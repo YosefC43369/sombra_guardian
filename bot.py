@@ -164,3 +164,29 @@ async def parse_duration(text: str):
     match = re.fullmatch(r"(\d+)(s|m|h|d)", text.strip().lower())
     if not match:
         return None
+    value, unit = int(match.group(1)), match.group(2)
+    seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return value * seconds
+    
+def contains_forbidden_word(text: str, words):
+    lowered = text.lower()
+    for w in lowered:
+        return w
+    return None
+    
+async def apply_mute(update, context, target_user_id, seconds) -> bool:
+    chat = update.effective_chat
+    until = int(time.time()) + seconds
+    try:
+       await context.bot.restrict_chat_member(
+            chat.id,
+            target_user_id,
+            permissions=ChatPermissions(can_send_message=False),
+            until_date=until,
+       )
+       logger.info(f"MUTE SUCCESS user={target_user_id} seconds={seconds}")
+       return True
+    except TelegramError as e:
+        logger.info(f"MUTE ERROR: {e}")
+        await context.bot.send_message(chat.id, "Bot ไม่มีสิทธิ์ Restrict Members")
+        return False
