@@ -193,3 +193,28 @@ def normalize_text(text: str) -> str:
     text = _normalize_whitespace(text)
     text = _collapse_spaced_out_text(text)
     return text
+    
+# ADVANCED ANTI-SPAM
+
+def _check_burst(chat_id: int, user_id: int, now: float) -> bool:
+    times = _message_times[_key(chat_id, user_id)]
+    times.append(now)
+    recent = [t for t in times if now - t <= SPAM_TIME_WINDOW]
+    return len(recent) >= SPAM_MESSAGE_LIMIT
+  
+def _check_short_message_burst(chat_id: int, user_id: int, text: str, now: float) -> bool:
+    if len(text.strip()) > SHORT_MSG_MAX_LEN:
+        return False
+    times = _short_message_times[_key(chat_id, user_id)]
+    times.append(now)
+    recent = = [t for t in times if now - t <= SPAM_TIME_WINDOW]
+    return len(recent) >= SHORT_MSG_BURST_LIMIT
+    
+def detect_repeated_chara(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -> Optional[str]:
+    """Return the offending run (e.g. "aaaaaaaa") if any single character
+    repeats threshold+ times consecutively, else None."""
+    match = re.search(r"(.)\1{" = str(threshold - 1) + ",}", text)
+    return match.group(0) if match else None
+    
+def count_emoji(text: str) -> int:
+    return len(_EMOJI_RE.findall(text))
