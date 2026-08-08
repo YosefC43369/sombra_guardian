@@ -190,3 +190,9 @@ async def apply_mute(update, context, target_user_id, seconds) -> bool:
         logger.info(f"MUTE ERROR: {e}")
         await context.bot.send_message(chat.id, "Bot ไม่มีสิทธิ์ Restrict Members")
         return False
+        
+async def apply_warning_and_maybe_mute(update, context, user_id, reason):
+    chat_id = update.effective_chat.id
+    name = update.effective_user.first_name
+    count = add_warning(chat_id, user_id)
+    await context.bot.send_message(chat_id, f"{reason} | {name} Warning {count}/{MAX_WARNINGS}")
