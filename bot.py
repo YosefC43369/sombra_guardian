@@ -159,3 +159,6 @@ async def check_bot_permissions(update: Update, context: ContextTypes.DEFAULT_TY
     except TelegramError as e:
         logger.info(f"PERMISSION CHECK ERROR: {e}")
         return False, False
+        
+async def parse_duration(text: str):
+    match = re.fullmatch(r"(\d+)(s
