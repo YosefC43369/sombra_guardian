@@ -245,3 +245,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_filter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    set_filter(update.effective_chat.id, True)
+    await update.message.reply_text("✅ เปิด Filter แล้ว")
+    
+async def cmd_filter_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    set_filter(update.effective_chat.id, False)
