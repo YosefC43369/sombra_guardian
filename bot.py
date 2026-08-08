@@ -200,3 +200,13 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
         can_delete, can_reatrict = await check_bot_permissions(update, context)
         if can_restrict:
             ok = await apply_mute(update, context, user_id, DEFAULT_MUTE_SECONDS)
+            if ok:
+                reset_warning(chat_id, user_id)
+                await context.bot.send_message(
+                    chat_id, f"🔇 ครบ {MAX_WARNINGS} Warning: Mute {DEFAULT_MUTE_SECONDS}s"
+                )
+        else:
+            await context.bot.send_message(chat_id, "❌ Bot ไม่มีสิทธิ์ Restrict Members")
+    return count
+    
+# ---------------- Commands ----------------
