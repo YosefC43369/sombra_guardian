@@ -13,7 +13,7 @@ RENDER_URL = os.getenv("RENDER_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 BANNED_WORDS = [
-    "คำต้องห้าม1",
+    "แม่เย็ด",
     "คำต้องห้าม2",
     "คำต้องห้าม3",
 ]
@@ -39,10 +39,28 @@ async def is_admin(
     )
 
 
-async def check_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("MESSAGE RECEIVED")
+    
+    if not update.message or not update.message.text:
+        print("NO TEXT")
+        return
+        
+    text = update.message.text.lower()
+    print(f"TEXT: {text}")
+    
+    for word in BAD_WORDS:
+        if word.lower() in text:
+            print(f"BAD WORD FOUND: {word}")
+            
+            try:
+                await update.message.delete()
+                print("MESSAGE DELETED")
+            except Exception as e:
+                print(f"DELETE error: {e}")
+                
+            return
+            
     message = update.effective_message
 
     if not message or not message.from_user:
