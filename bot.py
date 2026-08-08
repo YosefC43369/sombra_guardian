@@ -161,4 +161,6 @@ async def check_bot_permissions(update: Update, context: ContextTypes.DEFAULT_TY
         return False, False
         
 async def parse_duration(text: str):
-    match = re.fullmatch(r"(\d+)(s
+    match = re.fullmatch(r"(\d+)(s|m|h|d)", text.strip().lower())
+    if not match:
+        return None
