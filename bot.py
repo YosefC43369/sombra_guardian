@@ -212,7 +212,7 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
 # ---------------- Commands ----------------
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Group Moderation Bot พร้อมทำงาน\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด")
+    await update.message.reply_text("🤖 กูมาเพื่อช่วยเหลือพวกมึงแล้ว พวกเดนนรก\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด")
     
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
