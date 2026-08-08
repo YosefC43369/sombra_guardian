@@ -149,11 +149,11 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         logger.info(f"ADMIN CHECK ERROR: {e}")
         return False
         
-async def check_bot_permissions(update: Update,  context: ContextTypes.DEFAULT_TYPE):
+async def check_bot_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     try:
         me = await context.bot.get_chat_member(chat.id, context.bot.id)
-        can_delete = bool(getattr(me, "can_delete_messages, False)
+        can_delete = bool(getattr(me, "can_delete_messages", False))
         can_restrict = bool(getattr(me, "can_restrict_members", False))
         return can_delete, can_restrict
     except TelegramError as e:
