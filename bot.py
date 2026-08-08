@@ -252,3 +252,156 @@ async def cmd_filter_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
     set_filter(update.effective_chat.id, False)
+    await update.message.reply_text("✅ ปิด Filter แล้ว")
+    
+async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not context.args:
+        return await update.message.reply_text("ใช้งาน: /addword คำ")
+    word = " ".join(context.args)
+    add_word(update.effective_chat.id, word)
+    await update.message.reply_text(f"✅ เพิ่มคำต้องห้าม: {word}")
+    
+async def cmd_delword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not context.args:
+        return await update.message.reply_text("ใช้งาน: /delword คำ")
+    word = " ".join(context.args)
+    del_word(update.effective_chat.id, word)
+    await update.message.reply_text(f"✅ ลบคำต้องห้าม: {word}")
+
+async def cmd_listwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    words = list_words(update.effective_chat.id)
+    if not words:
+        return await update.message.reply_text("ยังไม่มีคำต้องห้าม")
+    await update.message.reply_text("คำต้องห้าม:\n" + "\n".join(words))
+
+async def cmd_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("ใช้งาน: Reply ข้อความสมาชิกแล้วพิมพ์ /warnings")
+    target = update.message.reply_to_message.from_user
+    count = get_warning(update.effective_chat.id, target.id)
+    await update.message.reply_text(f"{target.first_name}: Warning {count}/{MAX_WARNINGS}")
+
+async def cmd_resetwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("ใช้งาน: Reply ข้อความสมาชิกแล้วพิมพ์ /resetwarn")
+    target = update.message.reply_to_message.from_user
+    reset_warning(update.effective_chat.id, target.id)
+    await update.message.reply_text(f"✅ รีเซ็ต Warning ของ {target.first_name} แล้ว")
+
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("ใช้งาน: Reply ข้อความสมาชิกแล้วพิมพ์ /mute 10m")
+    if not context.args:
+        return await update.message.reply_text("ใช้งาน: /mute 10m (รองรับ s, m, h, d)")
+    seconds = parse_duration(context.args[0])
+    if seconds is None:
+        return await update.message.reply_text("รูปแบบเวลาไม่ถูกต้อง เช่น 10s 10m 1h 1d")
+    can_delete, can_restrict = await check_bot_permissions(update, context)
+    if not can_restrict:
+        return await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
+    target = update.message.reply_to_message.from_user
+    ok = await apply_mute(update, context, target.id, seconds)
+    if ok:
+        await update.message.reply_text(f"🔇 Mute {target.first_name} เป็นเวลา {context.args[0]}")
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("ใช้งาน: Reply ข้อความสมาชิกแล้วพิมพ์ /unmute")
+    target = update.message.reply_to_message.from_user
+    chat = update.effective_chat
+    try:
+        chat_info = await context.bot.get_chat(chat.id)
+        permissions = chat_info.permissions or ChatPermissions(can_send_messages=True)
+        await context.bot.restrict_chat_member(chat.id, target.id, permissions=permissions)
+        await update.message.reply_text(f"🔊 ปลด Mute {target.first_name} แล้ว")
+        logger.info(f"UNMUTE SUCCESS user={target.id}")
+    except TelegramError as e:
+        logger.info(f"UNMUTE ERROR: {e}")
+        await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
+        
+# ---------------- Message Handler ----------------
+    
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if message is None or not message.text:
+        return
+    chat = update.effective_chat
+    user = update.effective_user
+    text = message.text
+        
+    logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
+        
+    settings = get_settings(chat.id)
+        
+    if settings["antispam_on"]:
+        now = time.time()
+        dq = spam_tracker[(chat.id, user.id)]
+        dq.append(now)
+        while dq and now - dq[0] > SPAM_TIME_WINDOW:
+            dq.popleft()
+        if len(dq) > SPAM_MESSAGE_LIMIT:
+            logger.info(f"SPAM DETECTED | Chat ID: {chat.id} | User ID: {user.id}")
+            await safe_delete(message, chat.id, context)
+            await apply_warning_and_maybe_mute(update, context, user.id, "⚠️ ส่งข้อความเหี้ยไรบ่อยนักหนา ไอ้นรก")
+            dq.clear()
+            return
+            
+    logger.info(f"FILTER: {'ON' if settings['filter_on'] else 'OFF'}")
+    if settings["filter_on"]:
+        words = list_words(chat.id)
+        matched = contains_forbidden_word(text, words)
+        if matched:
+            logger.info(f"MATCHED WORD: {matched}\nACTION: DELETE")
+            await safe_delete(message, chat.id, context)
+            await apply_warning_and_maybe_mute(update, context, user.id, "🚫 ตรวจพบพวกลาบใช้คำต้องห้าม")
+        else:
+            logger.info("MATCHED WORD: NONE\nACTION: IGNORE")
+
+async def error_handler(update, context):
+    logger.info(f"UNHANDLED ERROR: {context.error}")
+    
+# ---------------- Main ----------------
+
+def main():
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN is not set. Please check .env file")
+        
+    logger.info("BOT STARTING")
+    db_init()
+    logger.info("DATABASE: OK")
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("filter_on", cmd_filter_on))
+    app.add_handler(CommandHandler("filter_off", cmd_filter_off))
+    app.add_handler(CommandHandler("addword", cmd_addword))
+    app.add_handler(CommandHandler("delword", cmd_delword))
+    app.add_handler(CommandHandler("listwords", cmd_listwords))
+    app.add_handler(CommandHandler("warnings", cmd_warnings))
+    app.add_handler(CommandHandler("resetwarn", cmd_resetwarn))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
+
+    logger.info("HANDLERS: OK")
+    logger.info("POLLING: STARTED")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
