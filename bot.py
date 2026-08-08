@@ -196,3 +196,7 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
     name = update.effective_user.first_name
     count = add_warning(chat_id, user_id)
     await context.bot.send_message(chat_id, f"{reason} | {name} Warning {count}/{MAX_WARNINGS}")
+    if count >= MAX_WARNINGS:
+        can_delete, can_reatrict = await check_bot_permissions(update, context)
+        if can_restrict:
+            ok = await apply_mute(update, context, user_id, DEFAULT_MUTE_SECONDS)
