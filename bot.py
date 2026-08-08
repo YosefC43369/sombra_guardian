@@ -210,3 +210,38 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
     return count
     
 # ---------------- Commands ----------------
+
+async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Group Moderation Bot พร้อมทำงาน\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด")
+    
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "/status - ดูสถานะบอท\n"
+        "/filter_on /filter_off - เปิด/ปิดตัวกรองคำ\n"
+        "/addword <คำ> - เพิ่มคำต้องห้าม\n"
+        "/delword <คำ> - ลบคำต้องห้าม\n"
+        "/listwords - แสดงคำต้องห้ามทั้งหมด\n"
+        "/warnings - ดู Warning (Reply ข้อความ)\n"
+        "/resetwarn - รีเซ็ต Warning (Reply ข้อความ)\n"
+        "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
+        "/unmute - ปลด Mute (Reply ข้อความ)"
+    )
+    await update.message.reply_text(text)
+    
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    settings = get_settings(chat_id)
+    words_count = len(list_words(chat_id))
+    can_delete, can_restrict = await check_bot_permissions(update, context)
+    text = (
+        f"Filter: {'ON' if settings['filter_on'] else 'OFF'}\n"
+        f"Anti-Spam: {'ON' if settings['antispam_on'] else 'OFF'}\n"
+        f"Forbidden Words: {words_count}\n"
+        f"Bot Delete Permission: {'OK' if can_delete else 'MISSING'}\n"
+        f"Bot Restrict Permission: {'OK' if can_restrict else 'MISSING'}"
+    )
+    await update.message.reply_text(text)
+    
+async def cmd_filter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
