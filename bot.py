@@ -379,7 +379,7 @@ def main():
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
-    db_init()
+    db_info()
     logger.info("DATABASE: OK")
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
