@@ -207,7 +207,7 @@ def _check_short_message_burst(chat_id: int, user_id: int, text: str, now: float
         return False
     times = _short_message_times[_key(chat_id, user_id)]
     times.append(now)
-    recent = = [t for t in times if now - t <= SPAM_TIME_WINDOW]
+    recent = [t for t in times if now - t <= SPAM_TIME_WINDOW]
     return len(recent) >= SHORT_MSG_BURST_LIMIT
     
 def detect_repeated_chara(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -> Optional[str]:
