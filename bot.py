@@ -19,7 +19,7 @@ from telegram.error import TelegramError
 
 import detection
 from security import security_db_init
-from gemini import ask_gemini, sqlit_telegram_message
+from gemini import ask_gemini, split_telegram_message
 
 load_dotenv()
 
