@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 
 from dotenv import load_dotenv
 from telegram import Update, ChatPermissions
-from telegram.constants import ChatMemberStatus
+from telegram.constants import ChatMemberStatus, ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -19,6 +19,7 @@ from telegram.error import TelegramError
 
 import detection
 from security import security_db_init
+from gemini import ask_gemini, sqlit_telegram_message
 
 load_dotenv()
 
@@ -238,7 +239,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/warnings - ดู Warning (Reply ข้อความ)\n"
         "/resetwarn - รีเซ็ต Warning (Reply ข้อความ)\n"
         "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
-        "/unmute - ปลด Mute (Reply ข้อความ)"
+        "/unmute - ปลด Mute (Reply ข้อความ)\n"
+        "/ask <ข้อความ> - ถาม Gemini AI"
     )
     await update.message.reply_text(text)
     
@@ -386,6 +388,21 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("ยังไม่มี Blocked Domain")
     await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
     
+    # ---------------- Gemini AI Command ----------------
+    
+    async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text(
+            "ใช้งาน: /ask <ข้อความ> เช่น /ask สวัสดี วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
+        )
+    prompt = " ".join(context.args)
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    ok, result = await ask_gemini(prompt)
+    if not ok:
+        return await update.message.reply_text(result)
+    for chunk in split_telegram_message(result):
+        await update.message.reply_text(chunk)
+    
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -486,6 +503,7 @@ def main():
     app.add_handler(CommandHandler("resetwarn", cmd_resetwarn))
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
