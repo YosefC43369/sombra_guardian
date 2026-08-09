@@ -481,12 +481,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await check_auto_reply(update, context, text):
             return
             
-        if await check_gemini_mention(update, context, text):
+    if await check_gemini_mention(update, context, text):
             return
         
-       settings = get_settings(chat.id)
+    settings = get_settings(chat.id)
         
-       if settings["antispam_on"]:
+    if settings["antispam_on"]:
         now = time.time()
         dq = spam_tracker[(chat.id, user.id)]
         dq.append(now)
