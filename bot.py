@@ -415,7 +415,7 @@ async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         await update.message.reply_text(reply_text)
         
     logger.info(
-        f"AUTO REPLY | Chat ID: {chat_id} | User ID: {user_id}
+        f"AUTO REPLY | Chat ID: {chat_id} | User ID: {user_id} | "
         f"Trigger: {trigger!r} | Count: {count}"
     )
     return True
