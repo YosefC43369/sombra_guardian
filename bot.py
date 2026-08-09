@@ -17,6 +17,9 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
+import detection
+from security import security_db_init
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -331,6 +334,47 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"UNMUTE ERROR: {e}")
         await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
         
+# ---------------- Anti-Link Commands ----------------
+
+async def cmd_linkfilter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text(❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    detection.enable_link_filter(update.effective_chat.id)
+    await update.message.reply_text("✅ เปิด Link Filter แล้ว")
+    
+async def cmd_link_filter_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    detection.disable_link_filter(update.effective_chat.id)
+    await update.message.reply_text("✅ ปิด Link Filter แล้ว")
+    
+async def cmd_adddomain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not context.args:
+        return await update.message.reply_text("ใช้งาน: /adddomain example.com")
+    domain = context.args[0]
+    detection.add_domain(update.effective_chat.id, domain)
+    await update.message.reply_text(f"✅ เพิ่ม Blocked Domain: {domain}")
+    
+async def cmd_deldomain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not context.args:
+        return await update.message.reply_text("ใช้งาน: /deldomain example.com")
+    domain = context.args[0]
+    removed = detection.remove_domain(update.effective_chat.id, domain)
+    if removed:
+        await update.message.reply_text(f"✅ ลบ Blocked Domain: {domain}")
+    else:
+        await update.message.reply_text(f"ไม่พบ Domain นี้ในรายการ: {domain}")
+        
+async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    domains = detection.get_blocked_domains(update.effective_chat.id)
+    if not domains:
+        return await update.message.reply_text("ยังไม่มี Blocked Domain")
+    await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
+    
 # ---------------- Message Handler ----------------
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
