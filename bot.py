@@ -250,7 +250,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/resetwarn - รีเซ็ต Warning (Reply ข้อความ)\n"
         "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
         "/unmute - ปลด Mute (Reply ข้อความ)\n"
-        "/ask <ข้อความ> - ถาม Gemini AI"
+        f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI"
     )
     await update.message.reply_text(text)
     
@@ -397,22 +397,7 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not domains:
         return await update.message.reply_text("ยังไม่มี Blocked Domain")
     await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
-    
-# ---------------- Gemini AI Command ----------------
-    
-async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text(
-        "ใช้งาน: /ask <ข้อความ> เช่น /ask สวัสดี วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
-        )
-    prompt = " ".join(context.args)
-    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
-    ok, result = await ask_gemini(prompt)
-    if not ok:
-        return await update.message.reply_text(result)
-    for chunk in split_telegram_message(result):
-        await update.message.reply_text(chunk)
-    
+
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -448,6 +433,42 @@ async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     )
     return True
     
+async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """ถาม AI เมื่อมีคนแท็กบอท เช่น '@ชื่อบอท คำถาม' ในแชท
+    คืนค่า True หากมีการตอบกลับแล้ว (handle_message ควร return ทันที)"""
+    message = update.effective_message
+    bot_username = context.bot.username
+    if not bot_username:
+        return False
+        
+    mention_text = None
+    for entity_text in message.parse_entities(types=["mention"]).values():
+        if entity_text.lower() == f"@{bot_username.lower()}:
+            mention_text = entity_text
+            break
+    if mention_text is None:
+        return False
+        
+    question = text.replace(mention_text, "", 1).strip()
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not question:
+        await update.message.reply_text(
+            f"พิมพ์คำถามต่อท้าย {mention_text} ได้เลย เช่น {mention_text} วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
+        )
+        return True
+        
+    logger.info(f"GEMINI MENTION | Chat ID: {chat_id} | User ID: {user_id} | Question: {question}")
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    ok, result = await ask_gemini(question)
+    if not ok:
+        await update.message.reply_text(result)
+        return True
+    for chunk in split_telegram_message(result):
+        await update.message.reply_text(chunk)
+    return True
+    
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if message is None or not message.text:
@@ -458,11 +479,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
     if await check_auto_reply(update, context, text):
-        return
+            return
+            
+        if await check_gemini_mention(update, context, text):
+            return
         
-    settings = get_settings(chat.id)
+       settings = get_settings(chat.id)
         
-    if settings["antispam_on"]:
+       if settings["antispam_on"]:
         now = time.time()
         dq = spam_tracker[(chat.id, user.id)]
         dq.append(now)
@@ -513,7 +537,6 @@ def main():
     app.add_handler(CommandHandler("resetwarn", cmd_resetwarn))
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
-    app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
