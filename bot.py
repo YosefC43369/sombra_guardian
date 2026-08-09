@@ -187,7 +187,7 @@ def contains_forbidden_word(text: str, words):
     lowered = text.lower()
     for w in words:
         if w in lowered:
-        return w
+           return w
     return None
     
 async def apply_mute(update, context, target_user_id, seconds) -> bool:
