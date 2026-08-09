@@ -93,7 +93,8 @@ def set_filter(chat_id, word):
     conn = db_conn()
     conn.execute(
         "INSERT OR IGNORE INTO forbidden_words (chat_id, word) VALUES (?, ?)",
-        (chat_id, word.lower()),
+        "ON CONFLICT(chat_id) DO UPDATE SET filter_on = excluded.filter_on",
+        (chat_id, int(enabled)),
     )
     conn.commit()
     conn.close()
@@ -121,7 +122,7 @@ def list_words(chat_id):
     
 def get_warning(chat_id, user_id):
     conn = db_conn()
-    row = conn.exexute(
+    row = conn.execute(
         "SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id)
     ).fetchone()
     conn.close()
@@ -183,7 +184,7 @@ async def parse_duration(text: str):
     
 def contains_forbidden_word(text: str, words):
     lowered = text.lower()
-    for w in lowered:
+    for w in words:
         return w
     return None
     
@@ -258,13 +259,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_filter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    set_filter(update.effective_chat.id, True)
+    set_filter_on(update.effective_chat.id, True)
     await update.message.reply_text("✅ เปิด Filter แล้ว")
     
 async def cmd_filter_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    set_filter(update.effective_chat.id, False)
+    set_filter_on(update.effective_chat.id, False)
     await update.message.reply_text("✅ ปิด Filter แล้ว")
     
 async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
