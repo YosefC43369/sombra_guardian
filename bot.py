@@ -422,7 +422,7 @@ async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     
     if count > AUTO_REPLY_ANGRY_THRESHOLD:
         await update.message.reply_text(AUTO_REPLY_ANGRY_TEXT)
-    elif count > AUTO_REPLY_ANNOY_THERESHOLD:
+    elif count > AUTO_REPLY_ANNOY_THRESHOLD:
         await update.message.reply_text(AUTO_REPLY_ANNOYED_TEXT)
     else:
         await update.message.reply_text(reply_text)
