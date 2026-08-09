@@ -38,6 +38,16 @@ logger = logging.getLogger("modbot")
 
 spam_tracker = defaultdict(deque)
 
+AUTO_REPLY_TRIGGERS = {
+    "ควย": "ควยพ่อมึงอะ ไอ้ควาย",
+}
+AUTO_REPLY_ANNOY_THRESHOLD = 3
+AUTO_REPLY_ANGRY_THRESHOLD = 5
+AUTO_REPLY_ANNOYED_TEXT = "มึงพิมพ์เหี้ยไรนักหนาวะ ว่างมากก็ไปกรอกน้ำให้แม่มึงไป ไอ้สัตว์นรก"
+AUTO_REPLY_ANGRY_TEXT = "ยัง ยังไม่หยุดอีก กูรำคาญ ไอ้ควาย เดี๋ยวสะง่องหรอก"
+
+auto_reply_tracker = defaultdict(int)
+
 # ---------------- Database ----------------
 
 def db_conn():
@@ -376,6 +386,39 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
     
 # ---------------- Message Handler ----------------
+
+async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Auto-reply เมื่อข้อความตรงกับ AUTO_REPLY_TRIGGERS
+    - พิมพ์ครั้งที่ 1-3: ตอบข้อความปกติ
+    - เกิน AUTO_REPLY_ANNOY_THRESHOLD (ครั้งที่ 4-5): ตอบข้อความรำคาญ
+    - เกิน AUTO_REPLY_ANGRY_THRESHOLD (ครั้งที่ 6+): ตอบข้อความไม่สุภาพ
+    นับโควต้าแยกตาม (chat_id, user_id, trigger) คนละคนคนละโควต้า
+    คืนค่า True หากมีการตอบกลับแล้ว (handle_message ควร return ทันที)
+    """
+    trigger = text.strip()
+    reply_text = AUTO_REPLY_TRIGGERS.get(trigger)
+    if reply_text is None:
+        return False
+        
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    key = (chat_id, user_id, trigger)
+    
+    auto_reply_tracker[key] += 1
+    count = auto_reply_tracker[key]
+    
+    if count > AUTO_REPLY_ANGRY_THRESHOLD:
+        await update.message.reply_text(AUTO_REPLY_ANGRY_TEXT)
+    elif count > AUTO_REPLY_ANNOY_THERESHOLD:
+        await update.message.reply_text(AUTO_REPLY_ANNOYED_TEXT)
+    else:
+        await update.message.reply_text(reply_text)
+        
+    logger.info(
+        f"AUTO REPLY | Chat ID: {chat_id} | User ID: {user_id}
+        f"Trigger: {trigger!r} | Count: {count}"
+    )
+    return True
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -386,6 +429,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
+    if await check_auto_reply(update, context, text):
+        return
         
     settings = get_settings(chat.id)
         
