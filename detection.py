@@ -213,7 +213,7 @@ def _check_short_message_burst(chat_id: int, user_id: int, text: str, now: float
 def detect_repeated_chara(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -> Optional[str]:
     """Return the offending run (e.g. "aaaaaaaa") if any single character
     repeats threshold+ times consecutively, else None."""
-    match = re.search(r"(.)\1{" = str(threshold - 1) + ",}", text)
+    match = re.search(r"(.)\1{" + str(threshold - 1) + ",}", text)
     return match.group(0) if match else None
     
 def count_emoji(text: str) -> int:
