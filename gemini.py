@@ -59,9 +59,9 @@ def _get_client() -> genai.Client:
         )
     return _client
     
-  # ---------------- Input validation ----------------
+# ---------------- Input validation ----------------
   
-  def _validate_input(text: str) -> Optional[str]:
+def _validate_input(text: str) -> Optional[str]:
     """Returns a Thai error message if `text` should not be sent to
     Gemini, else None. Kept local to this module: detection.py/security.py
     only cover moderation checks (spam/links/mentions), not general
