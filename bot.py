@@ -398,12 +398,12 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("ยังไม่มี Blocked Domain")
     await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
     
-    # ---------------- Gemini AI Command ----------------
+# ---------------- Gemini AI Command ----------------
     
-    async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            return await update.message.reply_text(
-            "ใช้งาน: /ask <ข้อความ> เช่น /ask สวัสดี วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text(
+        "ใช้งาน: /ask <ข้อความ> เช่น /ask สวัสดี วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
         )
     prompt = " ".join(context.args)
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
