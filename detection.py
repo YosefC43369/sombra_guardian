@@ -311,3 +311,287 @@ def check_duplicate_message(chat_id: int, user_id: int, text: str) -> DetectionR
     if now - last_fired < DUPLICATE_COOLDOWN:
         return _NO_DETECTION
     _duplicate_cooldown[key] = now
+    
+    reason = f"{matches} duplicate/near-duplicate messages within {DUPLICATE_TIME_WINDOW}s"
+    # security.py's SecurityEvent enum (Phase 1) has no dedicated
+    # DUPLICATE_MESSAGE member — detection.py must not invent new event
+    # types, so duplicate spam is recorded under the existing SPAM type.
+    result = record_event(chat_id, user_id, SecurityEvent.SPAM, detail=reason)
+    
+    return DetectionResult(
+        detected=True,
+        detection_type="DUPLICATE_MESSAGE",
+        severity="medium",
+        reason=reason,
+        meta={"risk_level": result["risk_level"], "match_count": matches},
+    )
+    
+# ANTI-LINK ENGINE
+
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+    
+def detection_db_init() -> None:
+    """Create Phase 2 tables only. Reuses bot.py/security.py's DB_PATH and
+    never drops or modifies existing tables or data."""
+    conn = _conn()
+    conn.execute("""CREATE TABLE IF NOT EXISTS link_blocked_domains (
+        chat_id INTEGER NOT NULL,
+        domain TEXT NOT NULL,
+        added_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, domain)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS link_allowed_domains (
+        chat_id INTEGER NOT NULL,
+        domain TEXT NOT NULL,
+        added_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, domain)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS link_filter_settings (
+        chat_id INTEGER PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0
+    )""")
+    conn.commit()
+    conn.close()
+    logger.info("DETECTION DATABASE: OK")
+    
+def _normalize_domain(domain: str) -> str:
+    domain = domain.strip().lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain.rstrip("/")
+    
+def extract_urls(text: str) -> List[str]:
+    return _URL_RE.findall(text)
+    
+def extract_domain(url: str) -> str:
+    candidate = url if "//" in url else f"//{url}"
+    parsed = urlparse(candidate)
+    host = parsed.netloc or parsed.path.split("/")[0]
+    return _normalize_domain(host)
+    
+def add_domain(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    if not domain:
+        return False
+    conn = _conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO link_blocked_domains (chat_id, domain, added_at) "
+        "VALUES (?, ?, ?)",
+        (chat_id, domain, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    return True
+    
+def remove_domain(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    conn = _conn()
+    cur = conn.execute(
+        "DELETE FROM link_blocked_domains WHERE chat_id=? AND domain=?",
+        (chat_id, domain),
+    )
+    conn.commit()
+    removed = cur.rowcount > 0
+    conn.close()
+    return removed
+    
+def is_domain_blocked(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM link_blocked_domains WHERE chat_id=? AND domain=?",
+        (chat_id, domain),
+    ).fetchone()
+    conn.close()
+    return row is not None
+    
+def get_blocked_domains(chat_id: int) -> List[str]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT domain FROM link_blocked_domains WHERE chat_id=? ORDER BY domain",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return [r["domain"] for r in rows]
+    
+def add_allowed_domain(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    if not domain:
+        return False
+    conn = _conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO link_allowed_domains (chat_id, domain, added_at) "
+        "VALUES (?, ?, ?)",
+        (chat_id, domain, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    return True
+    
+def remove_allowed_domain(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    conn = _conn()
+    cur = conn.execute(
+        "DELETE FROM link_allowed_domains WHERE chat_id=? AND domain=?",
+        (chat_id, domain),
+    )
+    conn.commit()
+    removed = cur.rowcount > 0
+    conn.close()
+    return removed
+
+
+def is_domain_allowed(chat_id: int, domain: str) -> bool:
+    domain = _normalize_domain(domain)
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM link_allowed_domains WHERE chat_id=? AND domain=?",
+        (chat_id, domain),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_allowed_domains(chat_id: int) -> List[str]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT domain FROM link_allowed_domains WHERE chat_id=? ORDER BY domain",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return [r["domain"] for r in rows]
+
+
+def enable_link_filter(chat_id: int) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO link_filter_settings (chat_id, enabled) VALUES (?, 1) "
+        "ON CONFLICT(chat_id) DO UPDATE SET enabled=1",
+        (chat_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def disable_link_filter(chat_id: int) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO link_filter_settings (chat_id, enabled) VALUES (?, 0) "
+        "ON CONFLICT(chat_id) DO UPDATE SET enabled=0",
+        (chat_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_link_filter_enabled(chat_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT enabled FROM link_filter_settings WHERE chat_id=?",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return bool(row["enabled"]) if row else False
+
+
+def check_links(chat_id: int, user_id: int, text: str) -> DetectionResult:
+    """Local-only URL/domain parsing — never makes a network request or DNS
+    lookup. Priority: an allowlisted domain is always permitted even if the
+    same domain also appears in the blocklist (admin override wins)."""
+    if not is_link_filter_enabled(chat_id):
+        return _NO_DETECTION
+
+    urls = extract_urls(text)
+    if not urls:
+        return _NO_DETECTION
+
+    blocked_hits = []
+    for url in urls:
+        domain = extract_domain(url)
+        if not domain:
+            continue
+        if is_domain_allowed(chat_id, domain):
+            continue
+        if is_domain_blocked(chat_id, domain):
+            blocked_hits.append(domain)
+
+    if not blocked_hits:
+        return _NO_DETECTION
+
+    reason = f"blocked domain(s): {', '.join(sorted(set(blocked_hits)))}"
+    result = record_event(chat_id, user_id, SecurityEvent.BLOCKED_LINK, detail=reason)
+
+    return DetectionResult(
+        detected=True,
+        detection_type="BLOCKED_LINK",
+        severity="high",
+        score=result["risk_score"],
+        reason=reason,
+        meta={"risk_level": result["risk_level"], "domains": sorted(set(blocked_hits))},
+    )
+    
+# ANTI-MENTION SPAM
+
+def extract_mentions(text: str) -> List[str]:
+    return _MENTION_RE.findall(text)
+
+
+def check_mention_spam(
+    chat_id: int, user_id: int, text: str, max_mentions: int = MAX_MENTIONS
+) -> DetectionResult:
+    """Flags a message and returns the result — bot.py is the one that
+    decides delete/warning/mute, per the existing moderation system."""
+    mentions = extract_mentions(text)
+    unique_mentions = {m.lower() for m in mentions}
+    if len(unique_mentions) <= max_mentions:
+        return _NO_DETECTION
+
+    reason = f"{len(unique_mentions)} distinct mentions in one message"
+    result = record_event(chat_id, user_id, SecurityEvent.MENTION_SPAM, detail=reason)
+
+    return DetectionResult(
+        detected=True,
+        detection_type="MENTION_SPAM",
+        severity="medium",
+        score=result["risk_score"],
+        reason=reason,
+        meta={"risk_level": result["risk_level"], "mention_count": len(unique_mentions)},
+    )
+    
+# AGGREGATE ENTRY POINT
+
+def analyze_message(chat_id: int, user_id: int, text: str) -> List[DetectionResult]:
+    """Runs every Phase 2 check for one incoming message and returns only
+    the checks that triggered, so bot.py can act on the list directly.
+
+    Order: link and mention violations first (usually the more disruptive
+    ones), then duplicate detection, then general spam patterns.
+
+    Does not run Forbidden Word filtering — that stays in the existing
+    filter in bot.py/security.py; use normalize_text() to feed it
+    evasion-resistant text."""
+    if not text:
+        return []
+
+    results = []
+    
+    link_result = check_links(chat_id, user_id, text)
+    if link_result.detected:
+        results.append(link_result)
+
+    mention_result = check_mention_spam(chat_id, user_id, text)
+    if mention_result.detected:
+        results.append(mention_result)
+
+    duplicate_result = check_duplicate_message(chat_id, user_id, text)
+    if duplicate_result.detected:
+        results.append(duplicate_result)
+
+    spam_result = analyze_spam(chat_id, user_id, text)
+    if spam_result.detected:
+        results.append(spam_result)
+
+    return results
