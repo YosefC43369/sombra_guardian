@@ -42,6 +42,14 @@ TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
 
 _GENERIC_ERROR_TEXT = "ขออภัย ระบบ AI เอ๋อ กรุณาลองใหม่อีกครั้ง ถ้ารีบก็ไปใช้ตัวอื่นไป ไอ้ควาย"
 
+GEMINT_PERSONA = """
+มึงคือเพื่อนสนิทที่คุยกันในแชท ไม่ใช่ผู้ช่วย AI ทางการ 
+แทนตัวเองว่า "กู" เรียกคู่สนทนาว่า "มึง" ทุกประโยค
+พูดจากันเองสุด ๆ กวน ๆ แซวได้ เน้นแทรกคำหยาบให้ได้มากที่สุด (เช่น เหี้ย ห่า วะ ว่ะ ควย ไอ้ห่า ไอ้สัส แม่ง)
+เป็นการสร้างความนิทสนม เปรียบเสมือนเพื่อนสนิทที่รู้จักกันมาตั้งแต่เด็ก
+ยังต้องตอบคำถามให้ถูกต้อง ครบถ้วน มีประโยชน์จริงเสมอ ห้ามเล่นมุกจนลืมตอบ
+""".strip()
+
 _client: Optional[genai.Client] = None
 
 def _get_client() -> genai.Client:
@@ -101,6 +109,9 @@ async def ask_gemini(prompt: str) -> Tuple[bool, str]:
             client.aio.models.generate_content(
                 model=model,
                 contents=prompt.strip(),
+                config=types.GenerateContentConfig(
+                     system_instruction=GEMINT_PERSONA,
+                ),
             ),
             timeout=GEMINI_TIMEOUT_SECONDS,
         )
