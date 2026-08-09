@@ -218,3 +218,96 @@ def detect_repeated_chara(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -
     
 def count_emoji(text: str) -> int:
     return len(_EMOJI_RE.findall(text))
+    
+def detect_excessive_emoji(text: str) -> bool:
+    """Absolute threshold covers short emoji-spam messages; the ratio check
+    only kicks in on longer messages so normal use of several emoji in a
+    long sentence is not penalized."""
+    count = count_emoji(text)
+    if count >= EMOJI_COUNT_THERESHOLD:
+        return True
+    if len(text) >= EMOJI_MIN_LEN_FOR_RATIO and count:
+        if count / max(len(text), 1) >= EMOJI_RATIO_THERESHOLD:
+            return True
+    return False
+    
+def analyze_spam(chat_id: int, user_id: int, text: str) -> DetectionResult:
+    """Runs every Advanced Anti-Spam check for one incoming message and
+    records a single SPAM security event if any of them trip."""
+    now = time.time()
+    _touch(chat_id, user_id, now)
+    
+    reasons = []
+    
+    if _check_burst(chat_id, user_id, now):
+        reasons.append("message burst")
+        
+    if _check_short_message_burst(chat_id, user_id, text, now):
+        reasons.append("repeated short messages")
+        
+    repeated = detect_repeated_chars(text)
+    if repeated:
+        reasons.append(f"repeated character {repeated[0]!r} x{len(repeated)}")
+        
+    if detect_excessive_emoji(text):
+        reasons.append(f"excessive emoji ({count_emoji(text)})")
+      
+    if not reasons:
+        return _NO_DETECTION
+        
+    reason = "; ".join(reasons)
+    severity = "high" if len(reasons) >= 2 else "medium"
+    result = record_event(chat_id, user_id, SecurityEvent.SPAM, detail=reason)
+    
+    return DetectionResult(
+        detected=True,
+        detection_type="SPAM",
+        severity=severity,
+        score=result["risk_score"],
+        reason=reason,
+        meta={"risk_level": result["risk_level"]},
+    )
+    
+# DUPLICATE MESSAGE DETECTION
+
+def _text_hash(normalized_text: str) -> str:
+    return hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+
+
+def _is_near_duplicate(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= DUPLICATE_SIMILARITY_RATIO
+
+
+def check_duplicate_message(chat_id: int, user_id: int, text: str) -> DetectionResult:
+    """Tracks a bounded history of a user's recent messages per chat and
+    flags when the same (or near-identical) message repeats
+    DUPLICATE_MESSAGE_LIMIT+ times inside DUPLICATE_TIME_WINDOW seconds.
+
+    A per-user cooldown stops a fresh event firing on every single repeat
+    once the threshold has already been crossed once."""
+    now = time.time()
+    _touch(chat_id, user_id, now)
+    key = _key(chat_id, user_id)
+    
+    normalized = normalize_text(text)
+    digest = _text_hash(normalized)
+    history = _message_history[key]
+    
+    matches = 1  # the current message counts as one occurrence
+    for entry_hash, entry_text, entry_time in history:
+        if now - entry_time > DUPLICATE_TIME_WINDOW:
+            continue
+        if entry_hash == digest or _is_near_duplicate(normalized, entry_text):
+             matches += 1
+            
+    history.append((digest, normalized, now))
+    
+    if matches < DUPLICATE_MESSAGE_LIMIT:
+        return _NO_DETECTION
+        
+    last_fired = _duplicate_cooldown.get(key, 0)
+    if now - last_fired < DUPLICATE_COOLDOWN:
+        return _NO_DETECTION
+    _duplicate_cooldown[key] = now
