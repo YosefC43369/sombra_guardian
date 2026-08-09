@@ -401,8 +401,8 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------------- Gemini AI Command ----------------
     
     async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text(
+        if not context.args:
+            return await update.message.reply_text(
             "ใช้งาน: /ask <ข้อความ> เช่น /ask สวัสดี วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
         )
     prompt = " ".join(context.args)
