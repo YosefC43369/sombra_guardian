@@ -187,7 +187,7 @@ def record_event(chat_id: int, user_id: int, event_type: SecurityEvent, detail: 
 # ---------------- Audit Log ----------------
 
 def write_audit_log(chat_id: int, user_id, actor: str, action: str, detail: str = ""):
-    now = int(time.time))
+    now = int(time.time())
     conn = _conn()
     conn.execute(
         "INSERT INTO audit_log (chat_id, user_id, actor, action, detail, created_at) "
