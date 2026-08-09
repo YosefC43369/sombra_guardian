@@ -186,6 +186,7 @@ async def parse_duration(text: str):
 def contains_forbidden_word(text: str, words):
     lowered = text.lower()
     for w in words:
+        if w in lowered:
         return w
     return None
     
@@ -206,13 +207,22 @@ async def apply_mute(update, context, target_user_id, seconds) -> bool:
         await context.bot.send_message(chat.id, "Bot ไม่มีสิทธิ์ Restrict Members")
         return False
         
+async def safe_delete(message, chat_id, context) -> bool:
+    try:
+        await context.bot.delete_message(chat_id, message.message_id)
+        logger.info(f"MESSAGE DELETED | Chat ID: {chat_id} | Message ID: {message.message_id}")
+        return True
+    except TelegramError as e:
+        logger.info(f"DELETE ERROR: {e}")
+        return False
+        
 async def apply_warning_and_maybe_mute(update, context, user_id, reason):
     chat_id = update.effective_chat.id
     name = update.effective_user.first_name
     count = add_warning(chat_id, user_id)
     await context.bot.send_message(chat_id, f"{reason} | {name} Warning {count}/{MAX_WARNINGS}")
     if count >= MAX_WARNINGS:
-        can_delete, can_reatrict = await check_bot_permissions(update, context)
+        can_delete, can_restrict = await check_bot_permissions(update, context)
         if can_restrict:
             ok = await apply_mute(update, context, user_id, DEFAULT_MUTE_SECONDS)
             if ok:
