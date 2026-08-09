@@ -348,7 +348,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_linkfilter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
-        return await update.message.reply_text(❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
     detection.enable_link_filter(update.effective_chat.id)
     await update.message.reply_text("✅ เปิด Link Filter แล้ว")
     
