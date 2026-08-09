@@ -443,7 +443,7 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
         
     mention_text = None
     for entity_text in message.parse_entities(types=["mention"]).values():
-        if entity_text.lower() == f"@{bot_username.lower()}:
+        if entity_text.lower() == f"@{bot_username.lower()}":
             mention_text = entity_text
             break
     if mention_text is None:
