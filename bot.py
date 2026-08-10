@@ -20,6 +20,7 @@ from telegram.error import TelegramError
 import detection
 from security import security_db_init, write_audit_log
 from gemini import ask_gemini, split_telegram_message
+from analytics import analytics_db_init, record_message_activity, get_group_summary
 
 load_dotenv()
 
@@ -519,6 +520,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        record_message_activity(chat.id, text)
     if await check_auto_reply(update, context, text):
             return
             
@@ -556,12 +559,14 @@ async def error_handler(update, context):
     
 # ---------------- Main ----------------
 
-def main():
+def main(int):
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
     db_info()
+    security_db_init()
+    analytics_db_init()
     logger.info("DATABASE: OK")
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
