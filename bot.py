@@ -20,6 +20,7 @@ from telegram.error import TelegramError
 import detection
 from security import security_db_init, write_audit_log
 from gemini import ask_gemini, split_telegram_message
+from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 
 load_dotenv()
@@ -527,6 +528,14 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return True
         
+    admin = await is_admin(update, context)
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
+    if not allowed:
+        await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻
+        )
+        return True
+        
     logger.info(f"GEMINI MENTION | Chat ID: {chat_id} | User ID: {user_id} | Question: {question}")
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
     ok, result = await ask_gemini(question)
@@ -591,6 +600,7 @@ def main(int):
         
     logger.info("BOT STARTING")
     db_info()
+    quota_db_init()
     security_db_init()
     analytics_db_init()
     logger.info("DATABASE: OK")
