@@ -117,7 +117,7 @@ def record_message_activity(chat_id: int, text: str, _now=None):
     conn.commit()
     conn.close()
     
-def get_group_summer(chat_id: int, top_words: int = 10, top_hours: int = 5) -> dict:
+def get_group_summary(chat_id: int, top_words: int = 10, top_hours: int = 5) -> dict:
     conn = _conn()
     summary_row = conn.execute(
         "SELECT total_messages, first_recorded_at, last_recorded_at "
