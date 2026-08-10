@@ -1,4 +1,16 @@
+"""
+analytics.py — Phase 3: Group-Level Behavior Analytics (aggregate only)
 
+Tracks group-wide word frequency and active-hour patterns for admin
+strategy/planning use. Deliberately aggregate-only — no per-user
+breakdown, no verbatim message archive.
+
+Design constraints (matches security.py):
+- Standard library only, plus optional pythainlp for real Thai word
+  segmentation (falls back to phrase-level counting if not installed).
+- No network/API calls, no background threads.
+- CREATE TABLE IF NOT EXISTS only; never touches other modules' tables.
+"""
 
 import sqlite3
 import time
