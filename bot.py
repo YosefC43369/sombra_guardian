@@ -532,7 +532,7 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
     allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
     if not allowed:
         await update.message.reply_text(
-            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻"
         )
         return True
         
