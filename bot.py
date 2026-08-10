@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 
 from dotenv import load_dotenv
 from telegram import Update, ChatPermissions
-from telegram.constants import ChatMemberStatus, ChatAction
+from telegram.constants import ChatMemberStatus, ChatAction, ChatType
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -18,7 +18,7 @@ from telegram.ext import (
 from telegram.error import TelegramError
 
 import detection
-from security import security_db_init
+from security import security_db_init, write_audit_log
 from gemini import ask_gemini, split_telegram_message
 
 load_dotenv()
