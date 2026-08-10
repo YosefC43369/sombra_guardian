@@ -357,6 +357,47 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"UNMUTE ERROR: {e}")
         await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
         
+async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ส่งข้อความประกาศเข้ากลุ่ม สั่งได้เฉพาะในแชทส่วนตัวกับบอทเท่านั้น
+    ใช้งาน: /announce <chat_id> <ข้อความ>
+    ผู้สั่งต้องเป็น Admin/Owner ของกลุ่มที่ระบุ chat_id นั้น"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return await update.message.reply_text("คำสั่งนี้ใช้ได้เฉพาะในแชทส่วนตัวกับบอทเท่านั้น")
+        
+    if len(context.args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน: /announce <chat_id> <ข้อความ>\nดู chat_id ของกลุ่มได้จาก /status ในกลุ่มนั้น"
+        )
+        
+    try:
+        target_chat_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("chat_id ต้องเป็นตัวเลข")
+        
+    announce_text = " ".join(context.args[1:]).strip()
+    if not announce_text:
+        return await update.message.reply_text("กรุณาพิมพ์ข้อความที่ต้องการประกาศต่อท้าย chat_id")
+        
+    user = update.effective_user
+    try:
+        member = await context.bot.get_chat_member(target_chat_id, user.id)
+    except TelegramError as e:
+        logger.info(f"ANNOUNCE ADMIN CHECK ERROR: {e}")
+        return await update.message.reply("❌ ไม่พบกลุ่มนี้ หรือบอทไม่ได้อยู่ในกลุ่มนั้น")
+        
+    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin ของกลุ่มที่ระบุ")
+        
+    try:
+        await context.bot.send_message(target_chat_id, f"📢 ประกาศ\n\n{announce_text}")
+    except TelegramError as e:
+        logger.info(f"ANNOUNCE SEND ERROR: {e}")
+        return await update.message.reply_text("❌ ส่งข้อความไม่สำเร็จ บอทอาจไม่มีสิทธิ์พูดในกลุ่มนั้น")
+        
+    write_audit_log
+    logger.info(f"ANNOUNCE SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
+    await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
+        
 # ---------------- Anti-Link Commands ----------------
 
 async def cmd_linkfilter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -537,6 +578,7 @@ def main():
     app.add_handler(CommandHandler("resetwarn", cmd_resetwarn))
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("announce", cmd_announce))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
