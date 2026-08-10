@@ -440,6 +440,32 @@ async def cmd_listdomains(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("ยังไม่มี Blocked Domain")
     await update.message.reply_text("Blocked Domains:\n" + "\n".join(domains))
 
+# ---------------- Group Analytics ----------------
+
+async def cmd_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สรุปภาพรวมกลุ่ม (คำฮิต + ช่วงเวลาแอคทีฟ) แบบไม่แยกรายบุคคล — Admin เท่านั้น"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        
+    summary = get_group_summary(update.effective_chat.id)
+    if summary["total_messages"] == 0:
+        return await update.message.reply_text("ยังไม่มีข้อมูลสถิติของกลุ่มนี้")
+        
+    words_text = "\n".join(
+        f"{i+1}. {w} ({c})" for i, (w, c) in enumerate(summary["top_words"])
+    ) or "-"
+    hours_text = "\n".join(
+        f"{h:02d}:00-{h:02d}:59 UTC ({c} ข้อความ)" for h, c in summary["top_hours"]
+    ) or "-"
+
+    text = (
+        f"📊 สรุปภาพรวมกลุ่ม\n"
+        f"ข้อความทั้งหมดที่บันทึก: {summary['total_messages']}\n\n"
+        f"คำฮิต:\n{words_text}\n\n"
+        f"ช่วงเวลาแอคทีฟสุด:\n{hours_text}"
+    )
+    await update.message.reply_text(text)
+
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -584,6 +610,7 @@ def main(int):
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("announce", cmd_announce))
+    app.add_handler(CommandHandler("groupstats", cmd_groupstats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
