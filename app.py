@@ -3,6 +3,7 @@ import re
 import time
 import sqlite3
 import logging
+import asyncio
 from collections import defaultdict, deque
 
 from dotenv import load_dotenv
@@ -22,6 +23,7 @@ from security import security_db_init, write_audit_log
 from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
+from news import news_db_init, run_news_check_cycle, new_background_loops
 
 from dashboard import get_dashboard_data, format_dashboard_message
 from gemini import classify_spam
@@ -616,6 +618,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update, context):
     logger.info(f"UNHANDLED ERROR: {context.error}")
     
+async def post_init(app):
+    app.bot_data["news_task"] = asyncio.create_task(news_background_loop(app.bot))
+    
+async def post_shutdown(app):
+    task = app.bot_data.get("news_task")
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
 # ---------------- Main ----------------
 
 def main(int):
@@ -627,6 +641,7 @@ def main(int):
     quota_db_init()
     security_db_init()
     analytics_db_init()
+    news_db_init()
     logger.info("DATABASE: OK")
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
