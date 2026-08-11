@@ -85,7 +85,7 @@ def _extract_words(text:str):
         raw_tokens = _thai_word_tokenize(text, engine="newmm")
     else:
         raw_tokens = WORD_RE.findall(text)
-    tokens = [t.strip().lower().low() for t in raw_tokens]
+    tokens = [t.strip().lower() for t in raw_tokens]
     return [t for t in tokens if len(t) >= 2 and t not in STOPWORDS]
     
 def record_message_activity(chat_id: int, text: str, _now=None):
