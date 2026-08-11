@@ -247,7 +247,7 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
 # ---------------- Commands ----------------
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 กูมาเพื่อช่วยเหลือพวกมึงแล้ว พวกเดนนรก\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด")
+    await update.message.reply_text("🤖 กูมาเพื่อช่วยเหลือพวกมึงแล้ว พวกเดนนรก\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด พัฒนาโดย @wissha_yosef พ่อกูเอง")
     
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -260,6 +260,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/resetwarn - รีเซ็ต Warning (Reply ข้อความ)\n"
         "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
         "/unmute - ปลด Mute (Reply ข้อความ)\n"
+        "/id - ดู Chat ID\n"
         f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI"
     )
     await update.message.reply_text(text)
@@ -418,7 +419,12 @@ async def dashboard_command(update, context):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
     
-        
+async def chat_id_command(update, context):
+    await update.message.reply_text(
+        f"Chat ID: `{update.effective_chat.id}`",
+        parse_mode="Markdown"
+    )
+    
 # ---------------- Anti-Link Commands ----------------
 
 async def cmd_linkfilter_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -661,6 +667,7 @@ def main(int):
     app.add_handler(CommandHandler("announce", cmd_announce))
     app.add_handler(CommandHandler("groupstats", cmd_groupstats))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
+    app.add_handler(CommandHandler("id", chat_id_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
