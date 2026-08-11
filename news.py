@@ -67,12 +67,20 @@ _NEWS_SUMMARY_INSTRUCTION = (
 # chat_id อ่านจาก env var เสมอ ไม่ hard-code ปลายทางไว้ในโค้ด
 NEWS_SOURCES = [
     {
-        "name": "example_source",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
-        "feed_url": os.getenv("NEWS_FEED_URL_EXAMPLE", ""),
-        "page_url": os.getenv("NEWS_PAGE_URL_EXAMPLE", ""),
-        "chat_id": int(os.getenv("NEWS_CHAT_ID_EXAMPLE", "0") or 0),
+        "name": "thairath",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
+        "feed_url": os.getenv("NEWS_FEED_URL_THAIRATH", ""),
+        "page_url": os.getenv("NEWS_PAGE_URL_THAIRATH", "https://www.thairath.co.th/news"),
+        "chat_id": int(os.getenv("NEWS_CHAT_ID_THAIRATH", "0") or 0),
         "ai_summary": True,
-        "max_items_per_cycle": MAX_ITEMS_PER_CYCLE_DEFAULT,
+        "max_items_per_cycle": 5,
+    },
+    {
+        "name": "khaosod",
+        "feed_url": os.getenv("NEWS_FEED_URL_KHAOSOD", ""),
+        "page_url": os.getenv("NEWS_PAGE_URL_KHAOSOD", "https://www.khaosod.co.th/breaking-news"),
+        "chat_id": int(os.getenv("NEWS_CHAT_ID_KHAOSOD", "0") or 0),
+        "ai_summary": True,
+        "max_items_per_cycle": 5,
     },
 ]
 
