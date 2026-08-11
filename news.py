@@ -67,18 +67,18 @@ _NEWS_SUMMARY_INSTRUCTION = (
 # chat_id อ่านจาก env var เสมอ ไม่ hard-code ปลายทางไว้ในโค้ด
 NEWS_SOURCES = [
     {
-        "name": "thaipbs",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
-        "feed_url": os.getenv("NEWS_FEED_URL_THAIPBS", ""),
-        "page_url": os.getenv("NEWS_PAGE_URL_THAIPBS", "https://news.thaipbs.or.th/rss"),
-        "chat_id": int(os.getenv("NEWS_CHAT_ID_THAIPBS", "0") or 0),
+        "name": "sanooknews",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
+        "feed_url": os.getenv("NEWS_FEED_URL_SANOOKNEWS", ""),
+        "page_url": os.getenv("NEWS_PAGE_URL_SANOOKNEWS", "https://news.sanook.com/rss/"),
+        "chat_id": int(os.getenv("NEWS_CHAT_ID_SANOOKNEWS", "0") or 0),
         "ai_summary": True,
         "max_items_per_cycle": 5,
     },
     {
-        "name": "mgronline",
-        "feed_url": os.getenv("NEWS_FEED_URL_MGRONLINE", ""),
-        "page_url": os.getenv("NEWS_PAGE_URL_MGRONLINE", "https://mgronline.com/rss"),
-        "chat_id": int(os.getenv("NEWS_CHAT_ID_MGRONLINE", "0") or 0),
+        "name": "prachatai",
+        "feed_url": os.getenv("NEWS_FEED_URL_PRACHATAI", ""),
+        "page_url": os.getenv("NEWS_PAGE_URL_PRACHATAI", "http://www.prachatai.com/rss/"),
+        "chat_id": int(os.getenv("NEWS_CHAT_ID_PRACHATAI", "0") or 0),
         "ai_summary": True,
         "max_items_per_cycle": 5,
     },
