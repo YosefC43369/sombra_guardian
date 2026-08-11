@@ -33,6 +33,7 @@ class SecurityEvent(str, Enum):
     WARNING = "WARNING"
     MUTE = "MUTE"
     MESSAGE_DELETED = "MESSAGE_DELETED"
+    AI_FLAGGED_SPAM = "AI_FLAGGED_SPAM"    # wired up in Phase 5 (Gemini Spam Classifier)
 
 
 # How much each event type adds to a user's risk score.
@@ -44,6 +45,7 @@ EVENT_WEIGHTS = {
     SecurityEvent.WARNING: 10,
     SecurityEvent.MUTE: 25,
     SecurityEvent.MESSAGE_DELETED: 5,
+    SecurityEvent.AI_FLAGGED_SPAM: 20,
 }
 
 RISK_LOW_MAX = 29
