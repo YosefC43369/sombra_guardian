@@ -24,6 +24,7 @@ of concerns already used by detection.py.
 """
 
 import os
+import json
 import asyncio
 import logging
 from typing import Optional, Tuple, List
@@ -39,6 +40,27 @@ GEMINI_MODEL_DEFAULT = "gemini-3.6-flash"
 GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
+
+CLASSIFIER_CONFIDENCE_THRESHOLD = float(os.getenv("AI_CLASSIFIER_CONFIDENCE_THRESHOLD", "0.75"))
+CLASSIFIER_MIN_INPUT_CHARS = 3
+
+# Deliberately NOT GEMINT_PERSONA — output here is parsed as JSON by the
+# caller, so one sweary/in-character token breaks json.loads() for the
+# whole message.
+_CLASSIFIER_INSTRUCTION = """
+You are a silent spam/scam classifier for a Telegram group chat. The
+message may be in Thai, English, or a mix. Decide whether it is spam, a
+scam, or a phishing attempt (fake prizes, investment/crypto pump
+schemes, impersonating support staff, credential-phishing links,
+forwarded scam chains).
+
+Respond with ONLY a single JSON object, no other text:
+{"is_spam": <true|false>, "category": "<scam|phishing|spam|none>",
+ "confidence": <0.0-1.0>, "reason": "<short reason, max 20 words, Thai>"}
+
+If it's ordinary conversation, use is_spam: false, category: "none".
+Prefer "none" and low confidence when unsure — never guess a category.
+""".strip()
 
 _GENERIC_ERROR_TEXT = "ขออภัย ระบบ AI เอ๋อ กรุณาลองใหม่อีกครั้ง ถ้ารีบก็ไปใช้ตัวอื่นไป ไอ้ควาย"
 
@@ -166,6 +188,72 @@ async def ask_gemini(prompt: str) -> Tuple[bool, str]:
 
     return True, text
 
+# ---------------- Automatic spam/scam classification ----------------
+
+async def classify_spam(text: str) -> Tuple[bool, Optional[dict]]:
+    """Asks Gemini whether `text` looks like spam/scam/phishing.
+
+    Returns (success, result). On ANY failure — timeout, API error,
+    malformed JSON, missing key — returns (False, None) and logs it.
+    Never raises, and a failed call is never treated as "is spam"; the
+    caller should just skip AI classification for that message.
+    """
+    if text is None or len(text.strip()) < CLASSIFIER_MIN_INPUT_CHARS:
+        return False, None
+
+    try:
+        client = _get_client()
+    except RuntimeError:
+        logger.error("CLASSIFIER CALL BLOCKED: GEMINI_API_KEY is not set")
+        return False, None
+
+    model = os.getenv("GEMINI_CLASSIFIER_MODEL", os.getenv("GEMINI_MODEL", GEMINI_MODEL_DEFAULT))
+    snippet = text.strip()[:GEMINI_MAX_INPUT_CHARS]
+
+    try:
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model,
+                contents=snippet,
+                config=types.GenerateContentConfig(
+                    system_instruction=_CLASSIFIER_INSTRUCTION,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            ),
+            timeout=GEMINI_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"CLASSIFIER TIMEOUT after {GEMINI_TIMEOUT_SECONDS}s")
+        return False, None
+    except errors.APIError as e:
+        logger.warning(f"CLASSIFIER API ERROR | code={getattr(e, 'code', None)} | {e}")
+        return False, None
+    except Exception:
+        logger.exception("CLASSIFIER UNEXPECTED ERROR")
+        return False, None
+
+    raw = (getattr(response, "text", None) or "").strip()
+    if not raw:
+        logger.warning("CLASSIFIER EMPTY RESPONSE")
+        return False, None
+
+    try:
+        result = json.loads(raw)
+        is_spam = bool(result["is_spam"])
+        category = str(result.get("category", "none"))
+        confidence = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
+        reason = str(result.get("reason", ""))[:200]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        logger.warning(f"CLASSIFIER MALFORMED JSON: {raw[:200]!r}")
+        return False, None
+
+    return True, {
+        "is_spam": is_spam and confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD,
+        "category": category,
+        "confidence": confidence,
+        "reason": reason,
+    }
 
 # ---------------- Telegram message splitting ----------------
 
