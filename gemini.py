@@ -132,7 +132,7 @@ def _validate_input(text: str) -> Optional[str]:
 
 # ---------------- Gemini call ----------------
 
-async def ask_gemini(prompt: str) -> Tuple[bool, str]:
+async def ask_gemini(prompt: str, system_instruction: Optional[str] = None) -> Tuple[bool, str]:
     """Sends `prompt` to Gemini and returns (success, text).
 
     On success: text is the model's reply.
@@ -159,7 +159,7 @@ async def ask_gemini(prompt: str) -> Tuple[bool, str]:
                 model=model,
                 contents=prompt.strip(),
                 config=types.GenerateContentConfig(
-                     system_instruction=GEMINT_PERSONA,
+                     system_instruction=system_instruction if system_instruction is not None else GEMINT_PERSONA,
                 ),
             ),
             timeout=GEMINI_TIMEOUT_SECONDS,
