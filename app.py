@@ -415,6 +415,7 @@ async def dashboard_command(update, context):
     text = format_dashboard_message(get_dashboard_data(chat.id, hours=24))
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
+    
         
 # ---------------- Anti-Link Commands ----------------
 
@@ -593,6 +594,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await apply_warning_and_maybe_mute(update, context, user.id, "⚠️ ส่งข้อความเหี้ยไรบ่อยนักหนา ไอ้นรก")
             dq.clear()
             return
+            
+        allowed, _, _ = check_and_use_classifier_quota(chat_id)
+        if allowed:
+            ok, result = await classify_spam(message_text)
+            if ok and result["is_spam"]:
+                record_event(chat_id, user_id, SecurityEvent.AI_FLAGGED_SPAM, detail=result["reason"])
+                await update.message.delete()
             
     logger.info(f"FILTER: {'ON' if settings['filter_on'] else 'OFF'}")
     if settings["filter_on"]:
