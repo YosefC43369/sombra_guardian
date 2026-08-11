@@ -572,6 +572,7 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     message = update.effective_message
     if message is None or not message.text:
         return
@@ -602,7 +603,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await apply_warning_and_maybe_mute(update, context, user.id, "⚠️ ส่งข้อความเหี้ยไรบ่อยนักหนา ไอ้นรก")
             dq.clear()
             return
-            
+        
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
         allowed, _, _ = check_and_use_classifier_quota(chat_id)
         if allowed:
             ok, result = await classify_spam(message_text)
