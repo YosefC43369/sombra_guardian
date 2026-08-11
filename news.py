@@ -69,7 +69,7 @@ NEWS_SOURCES = [
     {
         "name": "thaipbs",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
         "feed_url": os.getenv("NEWS_FEED_URL_THAIPBS", ""),
-        "page_url": os.getenv("NEWS_PAGE_URL_THAIPBS", "https://news.thaipbs.or.th/rss`"),
+        "page_url": os.getenv("NEWS_PAGE_URL_THAIPBS", "https://news.thaipbs.or.th/rss"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_THAIPBS", "0") or 0),
         "ai_summary": True,
         "max_items_per_cycle": 5,
@@ -77,7 +77,7 @@ NEWS_SOURCES = [
     {
         "name": "mgronline",
         "feed_url": os.getenv("NEWS_FEED_URL_MGRONLINE", ""),
-        "page_url": os.getenv("NEWS_PAGE_URL_MGRONLINE", "https://mgronline.com/rss`"),
+        "page_url": os.getenv("NEWS_PAGE_URL_MGRONLINE", "https://mgronline.com/rss"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_MGRONLINE", "0") or 0),
         "ai_summary": True,
         "max_items_per_cycle": 5,
