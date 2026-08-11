@@ -23,6 +23,12 @@ from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 
+from dashboard import get_dashboard_data, format_dashboard_message
+from gemini import classify_spam
+from quota import check_and_use_classifier_quota
+from security import SecurityEvent, record_event, write_audit_log
+from telegram.constants import ParseMode
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -399,6 +405,16 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
     write_audit_log
     logger.info(f"ANNOUNCE SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
     await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
+    
+async def dashboard_command(update, context):
+    chat, user = update.effective_chat, update.effective_user
+    member = await context.bot.get_chat_member(chat.id, user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("คำสั่งนี้ใช้ได้เฉพาะแอดมินกลุ่มเท่านั้น")
+        return
+    text = format_dashboard_message(get_dashboard_data(chat.id, hours=24))
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
         
 # ---------------- Anti-Link Commands ----------------
 
@@ -621,6 +637,7 @@ def main(int):
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("announce", cmd_announce))
     app.add_handler(CommandHandler("groupstats", cmd_groupstats))
+    app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
