@@ -210,7 +210,7 @@ def _check_short_message_burst(chat_id: int, user_id: int, text: str, now: float
     recent = [t for t in times if now - t <= SPAM_TIME_WINDOW]
     return len(recent) >= SHORT_MSG_BURST_LIMIT
     
-def detect_repeated_chara(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -> Optional[str]:
+def detect_repeated_chars(text: str, threshold: int = REPEATED_CHAR_THRESHOLD) -> Optional[str]:
     """Return the offending run (e.g. "aaaaaaaa") if any single character
     repeats threshold+ times consecutively, else None."""
     match = re.search(r"(.)\1{" + str(threshold - 1) + ",}", text)
@@ -224,7 +224,7 @@ def detect_excessive_emoji(text: str) -> bool:
     only kicks in on longer messages so normal use of several emoji in a
     long sentence is not penalized."""
     count = count_emoji(text)
-    if count >= EMOJI_COUNT_THERESHOLD:
+    if count >= EMOJI_COUNT_THRESHOLD:
         return True
     if len(text) >= EMOJI_MIN_LEN_FOR_RATIO and count:
         if count / max(len(text), 1) >= EMOJI_RATIO_THERESHOLD:
