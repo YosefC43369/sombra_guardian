@@ -7,6 +7,8 @@ import asyncio
 from collections import defaultdict, deque
 
 from dotenv import load_dotenv
+load_dotenv()
+
 from telegram import Update, ChatPermissions
 from telegram.constants import ChatMemberStatus, ChatAction, ChatType
 from telegram.ext import (
@@ -30,8 +32,6 @@ from gemini import classify_spam
 from quota import check_and_use_classifier_quota
 from security import SecurityEvent, record_event, write_audit_log
 from telegram.constants import ParseMode
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
