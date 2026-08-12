@@ -1,8 +1,0 @@
-services:
-  modbot:
-    build: .
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./bot.db:/app/bot.db
