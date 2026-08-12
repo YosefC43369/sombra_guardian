@@ -340,7 +340,7 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("ใช้งาน: Reply ข้อความสมาชิกแล้วพิมพ์ /mute 10m")
     if not context.args:
         return await update.message.reply_text("ใช้งาน: /mute 10m (รองรับ s, m, h, d)")
-    seconds = parse_duration(context.args[0])
+    seconds = await parse_duration(context.args[0])
     if seconds is None:
         return await update.message.reply_text("รูปแบบเวลาไม่ถูกต้อง เช่น 10s 10m 1h 1d")
     can_delete, can_restrict = await check_bot_permissions(update, context)
@@ -394,7 +394,7 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
         member = await context.bot.get_chat_member(target_chat_id, user.id)
     except TelegramError as e:
         logger.info(f"ANNOUNCE ADMIN CHECK ERROR: {e}")
-        return await update.message.reply("❌ ไม่พบกลุ่มนี้ หรือบอทไม่ได้อยู่ในกลุ่มนั้น")
+        return await update.message.reply_text("❌ ไม่พบกลุ่มนี้ หรือบอตไม่ได้อยู่ในกลุ่มนั้น")
         
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin ของกลุ่มที่ระบุ")
@@ -405,7 +405,7 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"ANNOUNCE SEND ERROR: {e}")
         return await update.message.reply_text("❌ ส่งข้อความไม่สำเร็จ บอทอาจไม่มีสิทธิ์พูดในกลุ่มนั้น")
         
-    write_audit_log
+    write_audit_log(target_chat_id, user.id, actor="admin", action="ANNOUNCE", detail=announce_text)
     logger.info(f"ANNOUNCE SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
     await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
     
@@ -584,6 +584,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
+        detection_results = detection.analyze_message(chat.id, user.id, text)
+        if detection_results:
+            worst = max(
+                detection_results,
+                key=lambda r: {"low": 0, "medium": 1, "high": 2}.get(r.severity, 0),
+            )
+            await safe_delete(message, chat.id, context)
+            await apply_warning_and_maybe_mute(update, context, user.id, f"⚠️ {worst.reason}")
+            return
     if await check_auto_reply(update, context, text):
             return
             
@@ -643,7 +652,7 @@ async def post_shutdown(app):
     
 # ---------------- Main ----------------
 
-def main(int):
+def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
@@ -688,4 +697,4 @@ def main(int):
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main(int)
+    main()
