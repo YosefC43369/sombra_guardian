@@ -100,10 +100,10 @@ def get_settings(chat_id):
     conn.close()
     return {"filter_on": row["filter_on"], "antispam_on": row["antispam_on"]}
     
-def set_filter(chat_id, word):
+def set_filter_on(chat_id, enabled):
     conn = db_conn()
     conn.execute(
-        "INSERT OR IGNORE INTO forbidden_words (chat_id, word) VALUES (?, ?)",
+        "INSERT INTO settings (chat_id, filter_on) VALUES (?, ?) "
         "ON CONFLICT(chat_id) DO UPDATE SET filter_on = excluded.filter_on",
         (chat_id, int(enabled)),
     )
