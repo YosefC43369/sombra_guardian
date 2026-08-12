@@ -68,7 +68,7 @@ _NEWS_SUMMARY_INSTRUCTION = (
 NEWS_SOURCES = [
     {
         "name": "sanooknews",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
-        "feed_url": os.getenv("NEWS_FEED_URL_SANOOKNEWS", "https://news.sanook.com/rss/"),
+        "feed_url": os.getenv("NEWS_FEED_URL_SANOOKNEWS", ""),
         "page_url": os.getenv("NEWS_PAGE_URL_SANOOKNEWS", "https://www.sanook.com/news/"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_SANOOKNEWS", "0") or 0),
         "ai_summary": True,
@@ -76,8 +76,8 @@ NEWS_SOURCES = [
     },
     {
         "name": "prachatai",
-        "feed_url": os.getenv("NEWS_FEED_URL_PRACHATAI", "http://www.prachatai.com/rss/"),
-        "page_url": os.getenv("NEWS_PAGE_URL_PRACHATAI", "https://prachatai.com"),
+        "feed_url": os.getenv("NEWS_FEED_URL_PRACHATAI", ""),
+        " page_url": os.getenv("NEWS_PAGE_URL_PRACHATAI", "https://prachatai.com"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_PRACHATAI", "0") or 0),
         "ai_summary": True,
         "max_items_per_cycle": 5,
