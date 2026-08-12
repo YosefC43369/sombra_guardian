@@ -297,14 +297,24 @@ def _extract_article_metadata(html: bytes) -> dict:
 
 # ---------------- AI summary (reuses gemini.ask_gemini — no new AI client) ----------------
 
-async def _summarize(item: NewsItem) -> str:
-    from gemini import ask_gemini  # lazy import: only paid when ai_summary is actually on
+async def _summarize(item: NewsItem):
+    """Returns (title_th, summary_th). ถ้า Gemini ล้มเหลว จะคง title เดิม
+    และแปะเหตุผลที่ fail ไว้ในข้อความ แทนที่จะเงียบแล้วโชว์ข้อความดิบภาษาอังกฤษ"""
+    from gemini import ask_gemini
     prompt = f"หัวข้อ: {item.title}\n\nเนื้อหา: {item.summary}"
     ok, text = await ask_gemini(prompt, system_instruction=_NEWS_SUMMARY_INSTRUCTION)
     if not ok:
         logger.warning(f"NEWS AI SUMMARY FAILED | url={item.url} | {text}")
-        return item.summary[:AI_SUMMARY_MAX_CHARS]
-    return text[:AI_SUMMARY_MAX_CHARS]
+        fallback = item.summary.strip() or "(ไม่มีเนื้อหาให้สรุป)"
+        return item.title, f"⚠️ AI แปล/สรุปไม่สำเร็จ: {text}\n\n{fallback[:AI_SUMMARY_MAX_CHARS]}"
+    try:
+        data = json.loads(text)
+        title_th = str(data.get("title_th") or item.title).strip()
+        summary_th = str(data.get("summary_th") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        logger.warning(f"NEWS AI SUMMARY MALFORMED JSON | url={item.url} | {text[:200]!r}")
+        title_th, summary_th = item.title, text
+    return title_th, summary_th[:AI_SUMMARY_MAX_CHARS]
 
 
 # ---------------- Sending ----------------
@@ -362,7 +372,6 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
             _mark_seen(conn, name, item.item_key, now)  # baseline only, don't send
             continue
         new_items.append(item)
-        _mark_seen(conn, name, item.item_key, now)
     conn.commit()
     conn.close()
 
@@ -378,7 +387,7 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
     for item in new_items:
         try:
             if source.get("ai_summary", True):
-                item.summary = await _summarize(item)
+                item.title, item.summary = await _summarize(item)
             await _send_item(bot, chat_id, item, message_thread_id=topic_id)
             logger.info(f"NEWS SENT | source={name} | url={item.url} | topic_id={topic_id}")
             sent_conn = _conn()
