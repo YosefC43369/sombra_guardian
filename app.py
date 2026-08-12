@@ -28,9 +28,7 @@ from analytics import analytics_db_init, record_message_activity, get_group_summ
 from news import news_db_init, run_news_check_cycle, news_background_loop
 
 from dashboard import get_dashboard_data, format_dashboard_message
-from gemini import classify_spam
-from quota import check_and_use_classifier_quota
-from security import SecurityEvent, record_event, write_audit_log
+from security import write_audit_log
 from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -616,13 +614,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        
-        allowed, _, _ = check_and_use_classifier_quota(chat_id)
-        if allowed:
-            ok, result = await classify_spam(text)
-            if ok and result["is_spam"]:
-                record_event(chat_id, user_id, SecurityEvent.AI_FLAGGED_SPAM, detail=result["reason"])
-                await update.message.delete()
             
     logger.info(f"FILTER: {'ON' if settings['filter_on'] else 'OFF'}")
     if settings["filter_on"]:
