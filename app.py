@@ -23,7 +23,7 @@ from security import security_db_init, write_audit_log
 from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
-from news import news_db_init, run_news_check_cycle, new_background_loops
+from news import news_db_init, run_news_check_cycle, news_background_loop
 
 from dashboard import get_dashboard_data, format_dashboard_message
 from gemini import classify_spam
