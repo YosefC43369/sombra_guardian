@@ -227,7 +227,7 @@ def detect_excessive_emoji(text: str) -> bool:
     if count >= EMOJI_COUNT_THRESHOLD:
         return True
     if len(text) >= EMOJI_MIN_LEN_FOR_RATIO and count:
-        if count / max(len(text), 1) >= EMOJI_RATIO_THERESHOLD:
+        if count / max(len(text), 1) >= EMOJI_RATIO_THRESHOLD:
             return True
     return False
     
