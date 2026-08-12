@@ -27,10 +27,6 @@ import time
 import logging
 import asyncio
 import sqlite3
-conn = sqlite3.connect("bot.db")
-conn.execute("DELETE FROM news_seen_items WHERE source_name = ?", ("hackernews",))
-conn.commit()
-conn.close()
 import json
 from dataclasses import dataclass
 from typing import Optional, List
@@ -67,7 +63,7 @@ _NEWS_SUMMARY_INSTRUCTION = (
     "ตอบกลับเป็น JSON เท่านั้น ไม่มีข้อความอื่นนอกจาก JSON ตามรูปแบบนี้: "
     '{"title_th": "<แปลหัวข้อข่าวเป็นภาษาไทย กระชับ>", '
     '"summary_th": "<สรุปเนื้อหาข่าวเป็นภาษาไทย กระชับ เป็นกลาง '
-    "ไม่ใส่ความคิดเห็นส่วนตัว ไม่ใช้คำหยาบ ความยาวไม่เกิน 4-5 บรรทัด"
+    "ไม่ใส่ความคิดเห็นส่วนตัว ไม่ใช้คำหยาบ ความยาวไม่เกิน 4-5 บรรทัด>"}'
 )
 
 # เพิ่มเว็บไซต์ข่าวใหม่ได้ที่นี่ — copy 1 dict ด้านล่างแล้วแก้ค่า ไม่ต้องแก้โค้ดส่วนอื่นของไฟล์นี้
@@ -298,6 +294,17 @@ def _extract_article_metadata(html: bytes) -> dict:
         "image_url": _meta("og:image"),
     }
 
+def _truncate_summary(text: str, limit: int) -> str:
+    """ตัด text ไม่ให้เกิน limit ตัวอักษร โดยไม่ตัดกลางคำ — หา space/newline
+    ที่ใกล้ limit ที่สุดแล้วตัดตรงนั้นแทน และใส่ "…" ต่อท้ายเฉพาะตอนที่ตัดจริง"""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    cut = max(window.rfind(" "), window.rfind("\n"))
+    if cut <= 0:
+        cut = limit
+    return window[:cut].rstrip() + "…"
 
 # ---------------- AI summary (reuses gemini.ask_gemini — no new AI client) ----------------
 
@@ -310,7 +317,7 @@ async def _summarize(item: NewsItem):
     if not ok:
         logger.warning(f"NEWS AI SUMMARY FAILED | url={item.url} | {text}")
         fallback = item.summary.strip() or "(ไม่มีเนื้อหาให้สรุป)"
-        return item.title, f"⚠️ AI แปล/สรุปไม่สำเร็จ: {text}\n\n{fallback[:AI_SUMMARY_MAX_CHARS]}"
+        return item.title, f"⚠️ AI แปล/สรุปไม่สำเร็จ: {text}\n\n{_truncate_summary(fallback, AI_SUMMARY_MAX_CHARS)}"
     try:
         data = json.loads(text)
         title_th = str(data.get("title_th") or item.title).strip()
@@ -318,7 +325,7 @@ async def _summarize(item: NewsItem):
     except (json.JSONDecodeError, AttributeError):
         logger.warning(f"NEWS AI SUMMARY MALFORMED JSON | url={item.url} | {text[:200]!r}")
         title_th, summary_th = item.title, text
-    return title_th, summary_th[:AI_SUMMARY_MAX_CHARS]
+    return title_th, _truncate_summary(summary_th, AI_SUMMARY_MAX_CHARS)
 
 
 # ---------------- Sending ----------------
