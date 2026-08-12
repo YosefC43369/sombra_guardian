@@ -333,19 +333,6 @@ async def _send_item(bot, chat_id: int, item: NewsItem, message_thread_id: Optio
 
 async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
     name = source["name"]
-
-    topic_id = source.get("topic_id") or None
-    for item in new_items:
-        try:
-            if source.get("ai_summary", True):
-                item.summary = await _summarize(item)
-            await _send_item(bot, chat_id, item, message_thread_id=topic_id)
-            logger.info(f"NEWS SENT | source={name} | url={item.url} | topic_id={topic_id}")
-        except TelegramError as e:
-            logger.warning(f"NEWS TELEGRAM SEND ERROR | source={name} | url={item.url} | {e}")
-        except Exception:
-            logger.exception(f"NEWS SEND ERROR | source={name} | url={item.url}")
-            
     chat_id = source.get("chat_id") or 0
     if not chat_id:
         logger.warning(f"NEWS SOURCE SKIPPED | source={name} | reason=no chat_id configured")
@@ -383,17 +370,17 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
     new_items = new_items[:max_items]
     logger.info(f"NEWS CHECK | source={name} | found={len(items)} | new={len(new_items)}")
 
+    topic_id = source.get("topic_id") or None
     for item in new_items:
         try:
             if source.get("ai_summary", True):
                 item.summary = await _summarize(item)
-            await _send_item(bot, chat_id, item)
-            logger.info(f"NEWS SENT | source={name} | url={item.url}")
+            await _send_item(bot, chat_id, item, message_thread_id=topic_id)
+            logger.info(f"NEWS SENT | source={name} | url={item.url} | topic_id={topic_id}")
         except TelegramError as e:
             logger.warning(f"NEWS TELEGRAM SEND ERROR | source={name} | url={item.url} | {e}")
         except Exception:
             logger.exception(f"NEWS SEND ERROR | source={name} | url={item.url}")
-
 
 async def run_news_check_cycle(bot):
     """One pass over every configured source. Each source's errors are
