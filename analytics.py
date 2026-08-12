@@ -63,11 +63,11 @@ def analytics_db_init():
         message_count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (chat_id, hour)
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS group_activity_hours (
+    conn.execute("""CREATE TABLE IF NOT EXISTS group_word_stats (
         chat_id INTEGER NOT NULL,
-        hour INTEGER NOT NULL,
-        message_count INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (chat_id, hour)
+        word TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat_id, word)
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS group_activity_summary (
         chat_id INTEGER PRIMARY KEY,
