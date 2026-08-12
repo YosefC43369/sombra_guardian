@@ -56,7 +56,7 @@ forwarded scam chains).
 
 Respond with ONLY a single JSON object, no other text:
 {"is_spam": <true|false>, "category": "<scam|phishing|spam|none>",
- "confidence": <0.0-1.0>, "reason": "<short reason, max 20 words, Thai>"}
+ "confidence": <0.0-0.75>, "reason": "<short reason, max 20 words, Thai>"}
 
 If it's ordinary conversation, use is_spam: false, category: "none".
 Prefer "none" and low confidence when unsure — never guess a category.
