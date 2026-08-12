@@ -377,6 +377,10 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
                 item.summary = await _summarize(item)
             await _send_item(bot, chat_id, item, message_thread_id=topic_id)
             logger.info(f"NEWS SENT | source={name} | url={item.url} | topic_id={topic_id}")
+            sent_conn = _conn()
+            _mark_seen(sent_conn, name, item.item_key, int(time.time()))
+            sent_conn.commit()
+            sent_conn.close()
         except TelegramError as e:
             logger.warning(f"NEWS TELEGRAM SEND ERROR | source={name} | url={item.url} | {e}")
         except Exception:
