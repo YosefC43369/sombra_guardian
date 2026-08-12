@@ -78,7 +78,7 @@ NEWS_SOURCES = [
     {
         "name": "prachatai",
         "feed_url": os.getenv("NEWS_FEED_URL_PRACHATAI", ""),
-        " page_url": os.getenv("NEWS_PAGE_URL_PRACHATAI", "https://prachatai.com"),
+        "page_url": os.getenv("NEWS_PAGE_URL_PRACHATAI", "https://prachatai.com"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_PRACHATAI", "0") or 0),
         "topic_id": int(os.getenv("NEWS_TOPIC_ID_PRACHATAI", "0") or 0) or None,
         "ai_summary": True,
