@@ -41,9 +41,6 @@ GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
 
-CLASSIFIER_CONFIDENCE_THRESHOLD = float(os.getenv("AI_CLASSIFIER_CONFIDENCE_THRESHOLD", "0.75"))
-CLASSIFIER_MIN_INPUT_CHARS = 3
-
 # Deliberately NOT GEMINT_PERSONA — output here is parsed as JSON by the
 # caller, so one sweary/in-character token breaks json.loads() for the
 # whole message.
