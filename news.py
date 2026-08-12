@@ -27,6 +27,7 @@ import time
 import logging
 import asyncio
 import sqlite3
+import json
 from dataclasses import dataclass
 from typing import Optional, List
 from urllib.parse import urljoin, urlparse
@@ -58,7 +59,10 @@ _HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; NewsForwarderBot/1.0)"}
 # from gemini.GEMINT_PERSONA (the /ask persona), since forwarded news
 # shouldn't carry that persona's tone into an automated news feed.
 _NEWS_SUMMARY_INSTRUCTION = (
-    "คุณเป็นนักเขียนข่าวมืออาชีพ สรุปข่าวที่ได้รับเป็นภาษาไทยแบบกระชับ เป็นกลาง "
+    "คุณเป็นนักเขียนข่าวมืออาชีพ อ่านหัวข้อและเนื้อหาข่าว (อาจเป็นภาษาอังกฤษ) "
+    "ตอบกลับเป็น JSON เท่านั้น ไม่มีข้อความอื่นนอกจาก JSON ตามรูปแบบนี้: "
+    '{"title_th": "<แปลหัวข้อข่าวเป็นภาษาไทย กระชับ>", '
+    '"summary_th": "<สรุปเนื้อหาข่าวเป็นภาษาไทย กระชับ เป็นกลาง '
     "ไม่ใส่ความคิดเห็นส่วนตัว ไม่ใช้คำหยาบ ความยาวไม่เกิน 4-5 บรรทัด"
 )
 
