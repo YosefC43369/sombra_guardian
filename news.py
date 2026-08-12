@@ -303,7 +303,7 @@ async def _summarize(item: NewsItem) -> str:
 
 # ---------------- Sending ----------------
 
-async def _send_item(bot, chat_id: int, item: NewsItem):
+async def _send_item(bot, chat_id: int, item: NewsItem, message_thread_id: Optional[int] = None):
     caption = (
         f"📰 ข่าวใหม่\n\n"
         f"<b>{_escape_html(item.title)}</b>\n\n"
@@ -311,13 +311,20 @@ async def _send_item(bot, chat_id: int, item: NewsItem):
         f"🔗 อ่านข่าวต้นฉบับ:\n{item.url}"
     )
     if item.image_url:
-        chunks = split_telegram_message(caption, limit=1024)  # Telegram caption cap
-        await bot.send_photo(chat_id, photo=item.image_url, caption=chunks[0], parse_mode=ParseMode.HTML)
+        chunks = split_telegram_message(caption, limit=1024)
+        await bot.send_photo(
+            chat_id, photo=item.image_url, caption=chunks[0],
+            parse_mode=ParseMode.HTML, message_thread_id=message_thread_id,
+        )
         for extra in chunks[1:]:
-            await bot.send_message(chat_id, extra, parse_mode=ParseMode.HTML)
+            await bot.send_message(
+                chat_id, extra, parse_mode=ParseMode.HTML, message_thread_id=message_thread_id,
+            )
     else:
         for chunk in split_telegram_message(caption):
-            await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+            await bot.send_message(
+                chat_id, chunk, parse_mode=ParseMode.HTML, message_thread_id=message_thread_id,
+            )
 
 
 # ---------------- Per-source cycle ----------------
