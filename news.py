@@ -67,7 +67,7 @@ _NEWS_SUMMARY_INSTRUCTION = (
 # chat_id อ่านจาก env var เสมอ ไม่ hard-code ปลายทางไว้ในโค้ด
 NEWS_SOURCES = [
     {
-        "name": "sanooknews",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
+        "name": "hackernews",                                    # unique — ใช้กัน duplicate ต่อแหล่งข่าว
         "feed_url": os.getenv("NEWS_FEED_URL_HACKERNEWS", ""),
         "page_url": os.getenv("NEWS_PAGE_URL_HACKERNEWS", "https://news.ycombinator.com/"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_HACKERNEWS", "0") or 0),
@@ -76,7 +76,7 @@ NEWS_SOURCES = [
         "max_items_per_cycle": 5,
     },
     {
-        "name": "prachatai",
+        "name": "krebsonsecurity",
         "feed_url": os.getenv("NEWS_FEED_URL_KREBSONSECURITY", ""),
         "page_url": os.getenv("NEWS_PAGE_URL_KREBSONSECURITY", "https://krebsonsecurity.com"),
         "chat_id": int(os.getenv("NEWS_CHAT_ID_KREBSONSECURITY", "0") or 0),
