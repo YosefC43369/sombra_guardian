@@ -26,6 +26,7 @@ from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 from news import news_db_init, run_news_check_cycle, news_background_loop
+import coordinator
 
 from dashboard import get_dashboard_data, format_dashboard_message
 from security import write_audit_log
@@ -562,12 +563,22 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
         
     logger.info(f"GEMINI MENTION | Chat ID: {chat_id} | User ID: {user_id} | Question: {question}")
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
-    ok, result = await ask_gemini(question)
+    
+    reply_msg = update.message.reply_to_message
+    reply_user_id = reply_msg.from_user.id if reply_msg and reply_msg.from_user else None
+    reply_text = reply_msg.text if reply_msg and reply_msg.text else None
+    ok, result = await coordinator.handle_request(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_admin=admin,
+        question=question,
+        reply_user_id=reply_user_id,
+        reply_text=reply_text,
+    )
     if not ok:
-        await update.message.reply_text(result)
         return True
     for chunk in split_telegram_message(result):
-        await update.message.reply_text(chunk)
+        return True
     return True
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
