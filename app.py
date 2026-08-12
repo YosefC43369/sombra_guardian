@@ -653,6 +653,7 @@ def main(int):
     security_db_init()
     analytics_db_init()
     news_db_init()
+    detection.detection_db_init()
     logger.info("DATABASE: OK")
     
     app = (
