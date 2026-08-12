@@ -27,6 +27,10 @@ import time
 import logging
 import asyncio
 import sqlite3
+conn = sqlite3.connect("bot.db")
+conn.execute("DELETE FROM news_seen_items WHERE source_name = ?", ("hackernews",))
+conn.commit()
+conn.close()
 import json
 from dataclasses import dataclass
 from typing import Optional, List
