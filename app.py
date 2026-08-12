@@ -420,6 +420,10 @@ async def dashboard_command(update, context):
     write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
     
 async def chat_id_command(update, context):
+    thread_id = update.effective_message.message_thread_id
+    text = f"Chat ID: `{update.effective_chat.id}`"
+    if thread_id:
+        text += f"\nTopic (Thread) ID: `{thread_id}`"
     await update.message.reply_text(
         f"Chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
