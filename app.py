@@ -424,10 +424,7 @@ async def chat_id_command(update, context):
     text = f"Chat ID: `{update.effective_chat.id}`"
     if thread_id:
         text += f"\nTopic (Thread) ID: `{thread_id}`"
-    await update.message.reply_text(
-        f"Chat ID: `{update.effective_chat.id}`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(text, parse_mode="Markdown")
     
 # ---------------- Anti-Link Commands ----------------
 
