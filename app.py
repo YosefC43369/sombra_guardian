@@ -610,7 +610,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         allowed, _, _ = check_and_use_classifier_quota(chat_id)
         if allowed:
-            ok, result = await classify_spam(message_text)
+            ok, result = await classify_spam(text)
             if ok and result["is_spam"]:
                 record_event(chat_id, user_id, SecurityEvent.AI_FLAGGED_SPAM, detail=result["reason"])
                 await update.message.delete()
