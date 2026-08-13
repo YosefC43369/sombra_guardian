@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import quote_plus
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -63,6 +64,7 @@ def get_tor_session():
     return session
 
 def fetch_search_results(endpoint, query):
+    endcoded_query = quote_plus(query)
     url = endpoint.format(query=query)
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     session = get_tor_session()
