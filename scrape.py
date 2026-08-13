@@ -161,3 +161,47 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051, 
                 response.close()
 
     return url, title
+    
+def scrape_multiple(urls_data, max_workers=5):
+    """
+    Scrapes multiple URLs concurrently using a thread pool.
+    """
+    results = {}
+    max_workers = max(1, min(int(max_workers), 16))
+    if not isinstance(urls_data, (list, tuple)):
+        return results
+
+    # Deduplicate links to reduce unnecessary requests under real workloads.
+    unique_urls_data = []
+    seen_links = set()
+    for item in urls_data:
+        url, title = _normalize_url_data(item)
+        if not url or url in seen_links:
+            continue
+        seen_links.add(url)
+        unique_urls_data.append({"link": url, "title": title})
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {
+            executor.submit(scrape_single, url_data): url_data
+            for url_data in unique_urls_data
+        }
+        for future in as_completed(future_to_url):
+            try:
+                url, content = future.result()
+                if not url:
+                    continue
+                if len(content) > MAX_RETURN_CHARS:
+                    suffix = "...(truncated)"
+                    if len(suffix) >= MAX_RETURN_CHARS:
+                        # Fallback: ensure we never exceed MAX_RETURN_CHARS even if suffix is long
+                        content = suffix[:MAX_RETURN_CHARS]
+                    else:
+                        available = MAX_RETURN_CHARS - len(suffix)
+                        content = content[:available] + suffix
+                results[url] = content
+            except Exception as exc:
+                _logger.debug("Worker failed to scrape a URL: %s", exc)
+                continue
+
+    return results
