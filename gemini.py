@@ -227,7 +227,6 @@ def _validate_input(text: str) -> Optional[str]:
 
 async def ask_gemini(prompt: str, system_instruction: Optional[str] = None) -> Tuple[bool, str]:
     """Sends `prompt` to Gemini and returns (success, text).
-
     On success: text is the model's reply.
     On failure: text is a safe, Thai, user-facing message — never a
     stack trace, never the API key. Every exception is caught here; this
@@ -235,6 +234,19 @@ async def ask_gemini(prompt: str, system_instruction: Optional[str] = None) -> T
     process or the polling loop.
     """
     PRESET_PROMPTS.get(preset, PRESET_PROMPTS["threat_intel"])
+    if preset:
+        system_instruction = PRESET_PROMPTS.get(preset)
+        
+        if system_instructions:
+            system_instruction = system_instruction.replace(
+                "{query}", prompt.strip()
+            )
+
+            if custom_instructions and custom_instructions.strip():
+                system_instruction += (
+                    "\n\nAdditional authorized focus:\n"
+                    + custom_instructions.strip()
+                )
     
     validation_error = _validate_input(prompt)
     if validation_error:
