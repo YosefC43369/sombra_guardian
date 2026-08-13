@@ -256,6 +256,8 @@ async def _collect_darkweb_evidence(query: str):
         search.get_search_results,
         query,
     )
+    
+    search_results = search_results[:20]
 
     if not search_results:
         return [], {}
