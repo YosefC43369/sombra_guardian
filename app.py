@@ -667,9 +667,10 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_text=reply_text,
     )
     if not ok:
+        await update.message.reply_text(result)
         return True
     for chunk in split_telegram_message(result):
-        return True
+        await update.message.reply_text(chunk)
     return True
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
