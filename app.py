@@ -729,7 +729,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info("MATCHED WORD: NONE\nACTION: IGNORE")
 
 async def error_handler(update, context):
-    logger.info(f"UNHANDLED ERROR: {context.error}")
+    logger.error("UNHANDLED ERROR", exc_info=context.error)
     
 async def post_init(app):
     app.bot_data["news_task"] = asyncio.create_task(news_background_loop(app.bot))
