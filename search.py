@@ -1,20 +1,31 @@
+import os
+import socket
 import requests
 import random, re
 import json
-import os
+import logging
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib.parse import quote_plus
-
-import socket
-import logging
+from urllib.parse import quote_plus, urlparse
 
 logger = logging.getLogger("modbot.search")
 
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+TOR_GATEWAY_SUFFIXES = [
+    s.strip() for s in os.getenv("TOR_GATEWAY_SUFFIXES", ".ly,.ps").split(",") if s.strip()
+]
+
+def _onion_to_gateway(url, suffix):
+    """แปลง http://xxxxx.onion/path -> https://xxxxx.onion<suffix>/path"""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".onion"):
+        return url
+    netloc = host + suffix
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return parsed._replace(scheme="https", netloc=netloc).geturl()
 
 def is_tor_reachable(timeout=2.0) -> bool:
     """เช็คไวๆ ว่ามีอะไรฟังอยู่ที่ SOCKS port ไหม จะได้ fail เร็ว
@@ -81,43 +92,35 @@ def get_tor_session():
     return session
 
 def fetch_search_results(endpoint, query):
-    endcoded_query = quote_plus(query)
-    url = endpoint.format(query=encoded_query)
+    encoded_query = quote_plus(query)
+    onion_url = endpoint.format(query=encoded_query)
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    session = get_tor_session()
-    
-    try:
-        response = session.get(url, headers=headers, timeout=40)
-        if response.status_code == 200:
+
+    # gateway พวกนี้ล่มบ่อยมาก ไล่ลองทีละตัวจนกว่าจะมีตัวที่ตอบ
+    for suffix in TOR_GATEWAY_SUFFIXES:
+        gateway_url = _onion_to_gateway(onion_url, suffix)
+        try:
+            response = requests.get(gateway_url, headers=headers, timeout=25)
+            if response.status_code != 200:
+                continue
             soup = BeautifulSoup(response.text, "html.parser")
             links = []
-            # Generic parsing for standard search engine layouts
             for a in soup.find_all('a'):
                 try:
                     href = a['href']
                     title = a.get_text(strip=True)
-                    # Extract onion links
                     link = re.findall(r'https?:\/\/[a-z0-9\.]+\.onion.*', href)
                     if len(link) != 0:
-                        # Basic filtering to avoid self-referential links
                         if "search" not in link[0] and len(title) > 3:
                             links.append({"title": title, "link": link[0]})
                 except:
                     continue
             return links
-        else:
-            return []
-    except:
-        return []
+        except:
+            continue
+    return []
 
 def get_search_results(refined_query, max_workers=5):
-    if not is_tor_reachable():
-        logger.warning(
-            "Tor SOCKS proxy %s:%s ไม่ตอบสนอง — ข้ามการค้นหา onion ทั้งหมด",
-            TOR_SOCKS_HOST, TOR_SOCKS_PORT
-        )
-        return []
-    
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(fetch_search_results, endpoint, refined_query)
