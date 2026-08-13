@@ -418,6 +418,97 @@ async def dashboard_command(update, context):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
     
+async def cmd_personal_identity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Authorized Personal Identity / PII exposure analysis."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text(
+            "❌ Personal Identity Investigation ใช้ได้เฉพาะ Admin"
+        )
+
+    question = " ".join(context.args).strip()
+    if not question:
+        return await update.message.reply_text(
+            "ใช้งาน: /identity <authorized OSINT/security investigation>"
+        )
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)"
+        )
+
+    write_audit_log(
+        chat_id,
+        user_id,
+        actor="admin",
+        action="PERSONAL_IDENTITY_ANALYSIS",
+        detail=question[:500],
+    )
+
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    ok, result = await coordinator.handle_request(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_admin=True,
+        question=question,
+        preset="personal_identity",
+    )
+
+    if not ok:
+        return
+
+    for chunk in split_telegram_message(result):
+        await update.message.reply_text(chunk)
+        
+async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Authorized defensive Corporate Intelligence / leak analysis."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text(
+            "❌ Corporate Espionage Investigation ใช้ได้เฉพาะ Admin"
+        )
+
+    question = " ".join(context.args).strip()
+    if not question:
+        return await update.message.reply_text(
+            "ใช้งาน: /corporate <authorized defensive corporate investigation>"
+        )
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)"
+        )
+
+    write_audit_log(
+        chat_id,
+        user_id,
+        actor="admin",
+        action="CORPORATE_ESPIONAGE_ANALYSIS",
+        detail=question[:500],
+    )
+
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    ok, result = await coordinator.handle_request(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_admin=True,
+        question=question,
+        preset="corporate_espionage",
+    )
+
+    if not ok:
+        return
+        
+    for chunk in split_telegram_message(result):
+        await update.message.reply_text(chunk)
+    
 async def chat_id_command(update, context):
     thread_id = update.effective_message.message_thread_id
     text = f"Chat ID: `{update.effective_chat.id}`"
@@ -691,6 +782,8 @@ def main():
     app.add_handler(CommandHandler("groupstats", cmd_groupstats))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CommandHandler("id", chat_id_command))
+    app.add_handler(CommandHandler("identity", cmd_personal_identity))
+    app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
