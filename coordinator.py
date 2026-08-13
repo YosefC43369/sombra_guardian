@@ -254,6 +254,8 @@ async def handle_request(
     user_id: int,
     is_admin: bool,
     question: str,
+    preset: str = "threat_intel",
+    custom_instructions: str = "",
     reply_user_id: Optional[int] = None,
     reply_text: Optional[str] = None,
 ) -> Tuple[bool, str]:
@@ -265,7 +267,11 @@ async def handle_request(
                 f"complexity={complexity} workers={worker_names}")
 
     if complexity == "LOW" or not worker_names:
-        return await gemini.ask_gemini(question)
+        return await gemini.ask_gemini(
+            question,
+            preset=preset,
+            custom_instructions=custom_instructions,
+        )
 
     t_start = time.monotonic()
     coros = [
@@ -300,7 +306,12 @@ async def handle_request(
         f"{context_block}"
     )
 
-    ok, draft = await gemini.ask_gemini(enriched_prompt)
+    ok, draft = await gemini.ask_gemini(
+        enriched_prompt,
+        preset=preset,
+        custom_instructions=custom_instructions,
+    
+    )
     if not ok:
         return ok, draft
 
