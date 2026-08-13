@@ -8,6 +8,23 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote_plus
 
+import socket
+import logging
+
+logger = logging.getLogger("modbot.search")
+
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
+TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+
+def is_tor_reachable(timeout=2.0) -> bool:
+    """เช็คไวๆ ว่ามีอะไรฟังอยู่ที่ SOCKS port ไหม จะได้ fail เร็ว
+    แทนที่จะ retry ครบทุก engine ทั้ง 16 ตัวโดยเปล่าประโยชน์เมื่อ Tor ไม่รัน"""
+    try:
+        with socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -58,14 +75,14 @@ def get_tor_session():
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.proxies = {
-        "http": "socks5h://127.0.0.1:9050",
-        "https": "socks5h://127.0.0.1:9050"
+        "http": f"socks5h://{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}",
+        "https": f"socks5h://{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}"
     }
     return session
 
 def fetch_search_results(endpoint, query):
     endcoded_query = quote_plus(query)
-    url = endpoint.format(query=query)
+    url = endpoint.format(query=encoded_query)
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     session = get_tor_session()
     
@@ -94,6 +111,13 @@ def fetch_search_results(endpoint, query):
         return []
 
 def get_search_results(refined_query, max_workers=5):
+    if not is_tor_reachable():
+        logger.warning(
+            "Tor SOCKS proxy %s:%s ไม่ตอบสนอง — ข้ามการค้นหา onion ทั้งหมด",
+            TOR_SOCKS_HOST, TOR_SOCKS_PORT
+        )
+        return []
+    
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(fetch_search_results, endpoint, refined_query)
