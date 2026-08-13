@@ -237,7 +237,6 @@ async def ask_gemini(
     function never raises, so a Gemini outage can never crash the bot
     process or the polling loop.
     """
-    PRESET_PROMPTS.get(preset, PRESET_PROMPTS["threat_intel"])
     if preset:
         preset_instruction = PRESET_PROMPTS.get(preset)
         if preset_instruction:
