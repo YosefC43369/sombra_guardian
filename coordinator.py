@@ -265,6 +265,7 @@ async def _collect_darkweb_evidence(query: str):
     scraped_results = await asyncio.to_thread(
         scrape.scrape_multiple,
         search_results,
+        5,
     )
 
     return search_results, scraped_results
