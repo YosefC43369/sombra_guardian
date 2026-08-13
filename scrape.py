@@ -1,3 +1,5 @@
+import os
+import socket
 import random
 import requests
 import threading
@@ -27,10 +29,18 @@ USER_AGENTS = [
 MAX_DOWNLOAD_BYTES = 1_000_000
 MAX_EXTRACTED_TEXT_CHARS = 50_000
 MAX_RETURN_CHARS = 2_000
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
+TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
 ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 _thread_local = threading.local()
 _logger = logging.getLogger(__name__)
 
+def _tor_reachable(timeout=2.0) -> bool:
+    try:
+        with socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 def _normalize_url_data(url_data):
     if not isinstance(url_data, dict):
@@ -58,8 +68,8 @@ def _build_session(use_tor=False):
 
     if use_tor:
         session.proxies = {
-            "http": "socks5h://127.0.0.1:9050",
-            "https": "socks5h://127.0.0.1:9050"
+            "http": f"socks5h://{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}",
+            "https": f"socks5h://{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}"
         }
 
     return session
@@ -153,9 +163,13 @@ def scrape_multiple(urls_data, max_workers=5):
     max_workers = max(1, min(int(max_workers), 16))
     if not isinstance(urls_data, (list, tuple)):
         return results
-
-    # Deduplicate links to reduce unnecessary requests under real workloads.
-    unique_urls_data = []
+    if not _tor_reachable():
+        _logger.warning("Tor SOCKS proxy %s:%s unreachable — skipping .onion URLs", TOR_SOCKS_HOST, TOR_SOCKS_PORT)
+        unique_urls_data = [
+            item for item in unique_urls_data
+            if not (urlparse(item["link"]).hostname or "").lower().endswith(".onion")
+        ]
+    
     seen_links = set()
     for item in urls_data:
         url, title = _normalize_url_data(item)
