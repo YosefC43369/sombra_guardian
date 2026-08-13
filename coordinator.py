@@ -29,6 +29,8 @@ import os
 import time
 import asyncio
 import logging
+import search
+import scrape
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
@@ -247,6 +249,23 @@ async def _run_worker(name: str, coro) -> WorkerResult:
 
 
 # ---------------- Main entry point ----------------
+
+async def _collect_darkweb_evidence(query: str):
+    """Search and scrape dark-web results for authorized OSINT analysis."""
+    search_results = await asyncio.to_thread(
+        search.get_search_results,
+        query,
+    )
+
+    if not search_results:
+        return [], {}
+
+    scraped_results = await asyncio.to_thread(
+        scrape.scrape_multiple,
+        search_results,
+    )
+
+    return search_results, scraped_results
 
 async def handle_request(
     *,
