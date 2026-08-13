@@ -40,6 +40,8 @@ GEMINI_MODEL_DEFAULT = "gemini-3.6-flash"
 GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
+CLASSIFIER_MIN_INPUT_CHARS = 5          # ข้อความสั้นกว่านี้ไม่ต้องส่งให้ AI จำแนก
+CLASSIFIER_CONFIDENCE_THRESHOLD = 0.5   # is_spam=True ก็ต่อเมื่อ confidence >= ค่านี้
 
 # Deliberately NOT GEMINT_PERSONA — output here is parsed as JSON by the
 # caller, so one sweary/in-character token breaks json.loads() for the
@@ -58,9 +60,6 @@ Respond with ONLY a single JSON object, no other text:
 If it's ordinary conversation, use is_spam: false, category: "none".
 Prefer "none" and low confidence when unsure — never guess a category.
 """.strip()
-
-PRESET_PROMPTS["personal_identity"],
-PRESET_PROMPTS["corporate_espionage"]
 
 # ---------------- Research Domain Presets ----------------
 
@@ -225,7 +224,12 @@ def _validate_input(text: str) -> Optional[str]:
 
 # ---------------- Gemini call ----------------
 
-async def ask_gemini(prompt: str, system_instruction: Optional[str] = None) -> Tuple[bool, str]:
+async def ask_gemini(
+    prompt: str,
+    system_instruction: Optional[str] = None,
+    preset: Optional[str] = None,
+    custom_instructions: str = "",
+) -> Tuple[bool, str]:
     """Sends `prompt` to Gemini and returns (success, text).
     On success: text is the model's reply.
     On failure: text is a safe, Thai, user-facing message — never a
@@ -235,18 +239,15 @@ async def ask_gemini(prompt: str, system_instruction: Optional[str] = None) -> T
     """
     PRESET_PROMPTS.get(preset, PRESET_PROMPTS["threat_intel"])
     if preset:
-        system_instruction = PRESET_PROMPTS.get(preset)
-        
-        if system_instructions:
-            system_instruction = system_instruction.replace(
-                "{query}", prompt.strip()
-            )
-
+        preset_instruction = PRESET_PROMPTS.get(preset)
+        if preset_instruction:
+            system_instruction = preset_instruction.replace("{query}", prompt.strip())
             if custom_instructions and custom_instructions.strip():
                 system_instruction += (
-                    "\n\nAdditional authorized focus:\n"
-                    + custom_instructions.strip()
+                    "\n\nAdditional authorized focus:\n" + custom_instructions.strip()
                 )
+        else:
+            logger.warning(f"GEMINI UNKNOWN PRESET: {preset!r} — falling back to default persona")
     
     validation_error = _validate_input(prompt)
     if validation_error:
