@@ -281,6 +281,51 @@ async def handle_request(
     """Drop-in replacement for `await gemini.ask_gemini(question)` — same
     (ok, text) contract. LOW complexity takes the exact pre-Coordinator
     path: one ask_gemini() call, nothing else."""
+    if preset in {"personal_identity", "corporate_espionage"}:
+        search_results, scraped_results = await _collect_darkweb_evidence(
+            question
+        )
+
+        if not search_results:
+            return await gemini.ask_gemini(
+                question,
+                preset=preset,
+                custom_instructions=custom_instructions,
+            )
+
+        source_lines = []
+        for item in search_results:
+            title = item.get("title", "Untitled")
+            link = item.get("link", "")
+            if link:
+                source_lines.append(f"- {title}: {link}")
+
+        evidence_lines = []
+        for url, text in scraped_results.items():
+            evidence_lines.append(
+                f"Source: {url}\n{text}"
+            )
+
+        darkweb_context = (
+            f"\n\n[DARK WEB SEARCH RESULTS]\n"
+            f"{chr(10).join(source_lines)}\n\n"
+            f"[SCRAPED EVIDENCE]\n"
+            f"{chr(10).join(evidence_lines)}"
+        )
+
+        research_prompt = (
+            f"{question}\n\n"
+            f"Use the following retrieved evidence as the only evidence "
+            f"for your analysis.\n"
+            f"{darkweb_context}"
+        )
+
+        return await gemini.ask_gemini(
+            research_prompt,
+            preset=preset,
+            custom_instructions=custom_instructions,
+        )
+        
     complexity, worker_names = assess_request(question, reply_text, reply_user_id is not None)
     logger.info(f"COORDINATOR ROUTE | chat={chat_id} user={user_id} "
                 f"complexity={complexity} workers={worker_names}")
