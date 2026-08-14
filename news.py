@@ -53,7 +53,7 @@ MAX_ITEMS_PER_CYCLE_DEFAULT = int(os.getenv("NEWS_MAX_ITEMS_PER_CYCLE", "5"))
 SEND_BACKLOG_ON_FIRST_RUN = os.getenv("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false").lower() == "true"
 ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "1200"))
 AI_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_AI_SUMMARY_MAX_CHARS", "1200"))
-RSS_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
+RSS_SUMMARY_MIN_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
 
 _HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; NewsForwarderBot/1.0)"}
 
