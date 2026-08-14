@@ -209,7 +209,7 @@ def _get_client() -> AsyncOpenAI:
             raise RuntimeError("GPT_API_KEY is not set")
         _client = AsyncOpenAI(
             api_key=api_key,
-            timeout=GPT_TIMEOUT_SECONDS,
+            timeout=GEMINI_TIMEOUT_SECONDS,
         )
     return _client
     
@@ -260,7 +260,7 @@ async def ask_gemini(
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("GPT CALL BLOCKED: GEMINI_API_KEY is not set")
+        logger.error("GPT CALL BLOCKED: GPT_API_KEY is not set")
         return False, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
     model = os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT)
@@ -269,7 +269,7 @@ async def ask_gemini(
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model=model,
-                message=[
+                messages=[
                      {
                        "role": "system",
                         "content": system_instruction if system_instruction is not None else GEMINT_PERSONA,
@@ -324,10 +324,10 @@ async def classify_spam(text: str) -> Tuple[bool, Optional[dict]]:
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("CLASSIFIER CALL BLOCKED: GEMINI_API_KEY is not set")
+        logger.error("CLASSIFIER CALL BLOCKED: GPT_API_KEY is not set")
         return False, None
 
-    model = os.getenv("GEMINI_CLASSIFIER_MODEL", os.getenv("GEMINI_MODEL", GEMINI_MODEL_DEFAULT))
+    model = os.getenv("GEMINI_CLASSIFIER_MODEL", os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT))
     snippet = text.strip()[:GEMINI_MAX_INPUT_CHARS]
 
     try:
