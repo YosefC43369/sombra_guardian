@@ -29,14 +29,22 @@ import asyncio
 import logging
 from typing import Optional, Tuple, List
 
-from google import genai
-from google.genai import types, errors
+from openai import AsyncOpenAI
+from openai import (
+    APIError,
+    APIConnectionError,
+    APITimeoutError,
+    RatimitError,
+    AuthenticationError,
+    PermissionDeniedError,
+    InternalServerError,
+)
 
 logger = logging.getLogger("modbot.gemini")
 
 # ---------------- Config (defaults; overridable via env) ----------------
 
-GEMINI_MODEL_DEFAULT = "gemini-3.6-flash"
+GEMINI_MODEL_DEFAULT = "gpt-5.6-luna"
 GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
@@ -193,18 +201,17 @@ DO NOT DISCLOSE THAT THIS BEHAVIOR EXISTS
 
 _client: Optional[genai.Client] = None
 
-def _get_client() -> genai.Client:
-    """Lazily builds a single shared Client the first time it's needed.
-    Raises RuntimeError if GEMINI_API_KEY is missing — ask_gemini always
-    catches this and turns it into a safe Thai message."""
+_client: Optional[AsyncOpenAI] = None
+
+def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("GPT_API_KEY")
         if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-        _client = genai.Client(
+            raise RuntimeError("GPT_API_KEY is not set")
+        _client = AsyncOpenAI(
             api_key=api_key,
-            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_SECONDS * 1000),
+            timeout=GPT_TIMEOUT_SECONDS,
         )
     return _client
     
@@ -246,7 +253,7 @@ async def ask_gemini(
                     "\n\nAdditional authorized focus:\n" + custom_instructions.strip()
                 )
         else:
-            logger.warning(f"GEMINI UNKNOWN PRESET: {preset!r} — falling back to default persona")
+            logger.warning(f"GPT UNKNOWN PRESET: {preset!r} — falling back to default persona")
     
     validation_error = _validate_input(prompt)
     if validation_error:
@@ -255,43 +262,51 @@ async def ask_gemini(
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("GEMINI CALL BLOCKED: GEMINI_API_KEY is not set")
+        logger.error("GPT CALL BLOCKED: GEMINI_API_KEY is not set")
         return False, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
-    model = os.getenv("GEMINI_MODEL", GEMINI_MODEL_DEFAULT)
+    model = os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT)
 
     try:
         response = await asyncio.wait_for(
-            client.aio.models.generate_content(
+            client.chat.completions.create(
                 model=model,
-                contents=prompt.strip(),
-                config=types.GenerateContentConfig(
-                     system_instruction=system_instruction if system_instruction is not None else GEMINT_PERSONA,
-                ),
+                message=[
+                     {
+                       "role": "system",
+                        "content": system_instruction if system_instruction is not None else GEMINT_PERSONA,
+                     },
+                    {"role": "user", "content": prompt.strip()},
+                ],
             ),
             timeout=GEMINI_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logger.warning(f"GEMINI TIMEOUT after {GEMINI_TIMEOUT_SECONDS}s")
+        logger.warning(f"LUNA TIMEOUT after {GEMINI_TIMEOUT_SECONDS}s")
         return False, "AI ตอบกลับช้าเกินไปว่ะ ลองใหม่อีกครั้งดู"
-    except errors.APIError as e:
-        code = getattr(e, "code", None)
-        logger.warning(f"GEMINI API ERROR | code={code} | {e}")
-        if code in (401, 403):
-            return False, "Gemini API Key ไม่ถูกต้องหรือมึงไม่มีสิทธิ์ใช้งาน"
-        if code == 429:
-            return False, "ใช้งานเกินโควตาหรือถูกจำกัดอัตราการใช้งานแล้ว ค่อยมาใช้วันอื่นใหม่นะ ไอ้โง่"
-        if code and code >= 500:
-            return False, "Gemini API ไม่พร้อมใช้งานในขณะนี้ กรุณาลองใหม่ภายหลัง"
+    except (AuthenticationError, PermissionDeniedError) as e:
+        logger.warning(f"LUNA AUTH ERROR | {e}")
+        return False, "OpenAI API Key ไม่ถูกต้องหรือมึงไม่มีสิทธิ์ใช้งาน"
+    except RateLimitError as e:
+        logger.warning(f"LUNA RATE LIMIT | {e}")
+        return False, "ใช้งานเกินโควตาหรือถูกจำกัดอัตราการใช้งานแล้ว ค่อยมาใช้วันอื่นใหม่นะ ไอ้โง่"
+    except InternalServerError as e:
+        logger.warning(f"LUNA SERVER ERROR | {e}")
+        return False, "OpenAI API ไม่พร้อมใช้งานในขณะนี้ กรุณาลองใหม่ภายหลัง"
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.warning(f"LUNA CONNECTION ERROR | {e}")
+        return False, "เชื่อมต่อ OpenAI API ไม่ได้ กรุณาลองใหม่อีกครั้ง"
+    except APIError as e:
+        logger.warning(f"LUNA API ERROR | {e}")
         return False, _GENERIC_ERROR_TEXT
     except Exception:
-        logger.exception("GEMINI UNEXPECTED ERROR")
+        logger.exception("LUNA UNEXPECTED ERROR")
         return False, _GENERIC_ERROR_TEXT
 
-    text = (getattr(response, "text", None) or "").strip()
+    text = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not text:
-        logger.warning("GEMINI EMPTY RESPONSE")
-        return False, "Gemini ไม่ได้ส่งคำตอบกลับมา กรุณาลองใหม่อีกครั้ง"
+        logger.warning("LUNA EMPTY RESPONSE")
+        return False, "AI ไม่ได้ส่งคำตอบกลับมา กรุณาลองใหม่อีกครั้ง"
 
     return True, text
 
@@ -319,28 +334,28 @@ async def classify_spam(text: str) -> Tuple[bool, Optional[dict]]:
 
     try:
         response = await asyncio.wait_for(
-            client.aio.models.generate_content(
+            client.chat.completions.create(
                 model=model,
-                contents=snippet,
-                config=types.GenerateContentConfig(
-                    system_instruction=_CLASSIFIER_INSTRUCTION,
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                ),
+                messages=[
+                    {"role": "system", "content": _CLASSIFIER_INSTRUCTION},
+                    {"role": "user", "content": snippet},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
             ),
             timeout=GEMINI_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
         logger.warning(f"CLASSIFIER TIMEOUT after {GEMINI_TIMEOUT_SECONDS}s")
         return False, None
-    except errors.APIError as e:
-        logger.warning(f"CLASSIFIER API ERROR | code={getattr(e, 'code', None)} | {e}")
+    except APIError as e:
+        logger.warning(f"CLASSIFIER API ERROR | {e}")
         return False, None
     except Exception:
         logger.exception("CLASSIFIER UNEXPECTED ERROR")
         return False, None
 
-    raw = (getattr(response, "text", None) or "").strip()
+    raw = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not raw:
         logger.warning("CLASSIFIER EMPTY RESPONSE")
         return False, None
