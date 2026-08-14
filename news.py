@@ -500,7 +500,7 @@ async def _summarize(item: NewsItem, client: httpx.AsyncClient):
                 meta = await asyncio.to_thread(_extract_article_metadata, article_raw)
             except Exception:
                 logger.exception(f"NEWS SUMMARY ENRICH PARSE ERROR | url={item.url}")
-                meta {}
+                meta = {}
             if meta.get("summary"):
                 content = meta["summary"]
 
