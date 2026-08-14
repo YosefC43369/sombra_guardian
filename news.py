@@ -53,6 +53,7 @@ MAX_ITEMS_PER_CYCLE_DEFAULT = int(os.getenv("NEWS_MAX_ITEMS_PER_CYCLE", "5"))
 SEND_BACKLOG_ON_FIRST_RUN = os.getenv("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false").lower() == "true"
 ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "1200"))
 AI_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_AI_SUMMARY_MAX_CHARS", "1200"))
+RSS_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
 
 _HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; NewsForwarderBot/1.0)"}
 
@@ -484,27 +485,30 @@ def _discover_article_links(html: bytes, base_url: str, max_links: int) -> List[
 
 # ---------------- AI summary ----------------
 
-async def _summarize(item: NewsItem):
+async def _summarize(item: NewsItem, client: httpx.AsyncClient):
     from gemini import ask_gemini
+    prompt = f"หัวข้อ: {item.title}\n\nเนื้อหา: {item.summary}"
+    
+    content = item.summary
+    # ฟีด RSS บางแหล่ง (เช่น proxy ของ Hacker News) ไม่มีเนื้อหาข่าวจริงใน
+    # <description> — มีแค่ข้อความสั้น ๆ อย่าง "Comments"/"ความคิดเห็น" ที่เป็น
+    # ลิงก์ไปหน้าคอมเมนต์ ทำให้ AI ไม่มีอะไรให้สรุป จึงไปดึงหน้าข่าวต้นฉบับ
+    if len(content.strip()) < RSS_SUMMARY_MIN_CHARS:
+        article_raw = await _fetch_bytes(client, item.url)
+        if article_raw is not None:
+            try:
+                meta = await asyncio.to_thread(_extract_article_metadata, article_raw)
+            except Exception:
+                logger.exception(f"NEWS SUMMARY ENRICH PARSE ERROR | url={item.url}")
+                meta {}
+            if meta.get("summary"):
+                content = meta["summary"]
 
-    article = item.article_text.strip()
-    if not article:
-        article = item.summary.strip()
-
-    if not article:
-        return item.title, "⚠️ ไม่สามารถดึงเนื้อหาข่าวจากหน้าเว็บได้ จึงไม่มีข้อมูลเพียงพอสำหรับสรุปข่าว"
-
-    prompt = (
-        "<ARTICLE_DATA>\n"
-        f"หัวข้อจากแหล่งข่าว: {item.title}\n\n"
-        f"เนื้อหาที่ดึงจากหน้าเว็บ:\n{article}\n"
-        "</ARTICLE_DATA>"
-    )
-
+    prompt = f"หัวข้อ: {item.title}\n\nเนื้อหา: {content}"
     ok, text = await ask_gemini(prompt, system_instruction=_NEWS_SUMMARY_INSTRUCTION)
     if not ok:
         logger.warning("NEWS AI SUMMARY FAILED | url=%s | %s", item.url, text)
-        fallback = item.summary.strip() or article[:AI_SUMMARY_MAX_CHARS]
+        fallback = content.strip() or "(ไม่มีเนื้อหาให้สรุป)"
         return item.title, f"⚠️ AI สรุปไม่สำเร็จ: {text}\n\n{fallback[:AI_SUMMARY_MAX_CHARS]}"
 
     try:
@@ -614,7 +618,7 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
     for item in new_items:
         try:
             if source.get("ai_summary", True):
-                item.title, item.summary = await _summarize(item)
+                item.title, item.summary = await _summarize(item, client)
 
             await _send_item(bot, chat_id, item, message_thread_id=topic_id)
 
