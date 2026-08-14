@@ -276,7 +276,7 @@ def _clean_candidate(soup: BeautifulSoup, candidate) -> str:
     return _normalize_text(node.get_text("\n", strip=True))
 
 
-def _score_candidate(tag) -> Tuple[int, str]:
+def _score_candidate(tag) -> tuple[int, str]:
     text = _normalize_text(tag.get_text(" ", strip=True))
     if len(text) < 120:
         return 0, text
