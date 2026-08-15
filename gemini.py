@@ -51,6 +51,23 @@ TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
 CLASSIFIER_MIN_INPUT_CHARS = 5          # ข้อความสั้นกว่านี้ไม่ต้องส่งให้ AI จำแนก
 CLASSIFIER_CONFIDENCE_THRESHOLD = 0.5   # is_spam=True ก็ต่อเมื่อ confidence >= ค่านี้
 
+# ---------------- Multimodal (image / file) attachments ----------------
+# Kept intentionally narrow: images + PDF + plain text only. Other document
+# types (docx/xlsx/zip/etc.) need conversion Gemini can't do from raw bytes,
+# so callers should reject those up front with a clear message rather than
+# send something Gemini will fail on anyway. Video/audio are also out of
+# scope for now (higher cost/latency) — can be added later if needed.
+MAX_MEDIA_BYTES = 15 * 1024 * 1024 # 15MB, safety margin under Telegram Bot API's 20MB getFile cap
+SUPPORTED_MEDIA_MIME_PREFIXES = ("image/", "application/pdf", "text/plain")
+
+def is_supported_media_mime(mime_type: Optional[str] -> bool:
+    """True if `mime_type` is something this module is willing to attach
+    to a Gemini call. Callers (app.py) should check this BEFORE downloading
+    a file from Telegram, so an unsupported type never eats bandwidth."""
+    if not mime_type:
+        return False
+    return mime_type.startswith(SUPPORTED_MEDIA_MIME_PREFIXES)
+    
 # Deliberately NOT GEMINT_PERSONA — output here is parsed as JSON by the
 # caller, so one sweary/in-character token breaks json.loads() for the
 # whole message.
@@ -234,6 +251,7 @@ async def ask_gemini(
     system_instruction: Optional[str] = None,
     preset: Optional[str] = None,
     custom_instructions: str = "",
+    media: Optional[List[Tuple[bytes, str]]] = None,
 ) -> Tuple[bool, str]:
     """Sends `prompt` to Gemini and returns (success, text).
     On success: text is the model's reply.
@@ -241,6 +259,12 @@ async def ask_gemini(
     stack trace, never the API key. Every exception is caught here; this
     function never raises, so a Gemini outage can never crash the bot
     process or the polling loop.
+    
+    `media`, if given, is a list of (raw_bytes, mime_type) tuples already
+    downloaded and size/type-checked by the caller (see app.py's
+    extract_media_from_message + is_supported_media_mime above) — this
+    function does not fetch or validate files itself, matching gemini.py's
+    existing rule of never talking to Telegram directly.
     """
     if preset:
         preset_instruction = PRESET_PROMPTS.get(preset)
@@ -264,7 +288,16 @@ async def ask_gemini(
         return False, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
     model = os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT)
-
+    
+    contents = prompt.strip()
+    if media:
+        try:
+            parts = [types.Part.from_bytes(data=data, mime_type=mime) for data, mime in media]
+        except Exception:
+            logger.exception("GPT MEDIA PART BUILD ERROR")
+            return False, "ไม่สามารถแนบไฟล์/รูปภาพนี้ให้ AI อ่านได้ ลองไฟล์อื่นดู"
+        parts.append(prompt.strip())
+        contents = parts
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
