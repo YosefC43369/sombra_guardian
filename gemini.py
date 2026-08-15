@@ -60,7 +60,7 @@ CLASSIFIER_CONFIDENCE_THRESHOLD = 0.5   # is_spam=True ก็ต่อเมื�
 MAX_MEDIA_BYTES = 15 * 1024 * 1024 # 15MB, safety margin under Telegram Bot API's 20MB getFile cap
 SUPPORTED_MEDIA_MIME_PREFIXES = ("image/", "application/pdf", "text/plain")
 
-def is_supported_media_mime(mime_type: Optional[str] -> bool:
+def is_supported_media_mime(mime_type: Optional[str]) -> bool:
     """True if `mime_type` is something this module is willing to attach
     to a Gemini call. Callers (app.py) should check this BEFORE downloading
     a file from Telegram, so an unsupported type never eats bandwidth."""
