@@ -51,11 +51,16 @@ spam_tracker = defaultdict(deque)
 
 AUTO_REPLY_TRIGGERS = {
     "ควย": "ควยพ่อมึงอะ ไอ้ควาย",
+    "ควยไรอะ": "แล้วมึงเป็นควยไรอะ",
+    "ต่อยกับกูไหม": "มาดิ ไอ้ควาย อย่าท้า",
+    "ฝอ.3": "ไอ้หม่ำหรอ กูให้ 3 ไอ้หม่ำเลย",
 }
 AUTO_REPLY_ANNOY_THRESHOLD = 3
 AUTO_REPLY_ANGRY_THRESHOLD = 5
 AUTO_REPLY_ANNOYED_TEXT = "มึงพิมพ์เหี้ยไรนักหนาวะ ว่างมากก็ไปกรอกน้ำให้แม่มึงไป ไอ้สัตว์นรก"
 AUTO_REPLY_ANGRY_TEXT = "ยัง ยังไม่หยุดอีก กูรำคาญ ไอ้ควาย เดี๋ยวสะง่องหรอก"
+
+DEFAULT_MEDIA_QUESTION = "ช่วยวิเคราะห์ไฟล์/รูปภาพที่แนบมาให้หน่อย อธิบายเป็นภาษาไทยอย่างละเอียด"
 
 auto_reply_tracker = defaultdict(int)
 
@@ -185,6 +190,54 @@ async def check_bot_permissions(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info(f"PERMISSION CHECK ERROR: {e}")
         return False, False
         
+async def _find_bot_mention(entities: dict, bot_username: str):
+    """entities is the dict returned by Message.parse_entities()/
+    parse_caption_entities() — {MessageEntity: substring}. Returns the
+    matched '@username' substring, or None."""
+    target = f"@{bot_username.lower()}"
+    for entity_text in entities.values():
+        if entity_text.lower() == target:
+            return entity_text
+    return None
+    
+async def extract_media_from_message(message, context: ContextTypes.DEFAULT_TYPE):
+    """ดาวน์โหลดรูปภาพ/เอกสารจาก Telegram message เพื่อส่งให้ GPT วิเคราะห์
+    คืนค่า (bytes, mime_type, error_text):
+      - ไม่มีรูป/เอกสารแนบเลย         -> (None, None, None)
+      - มีแนบแต่ชนิดไฟล์ไม่รองรับ/ใหญ่เกิน -> (None, None, <ข้อความ error ภาษาไทย>)
+      - ดาวน์โหลดสำเร็จ               -> (bytes, mime_type, None)
+    ไม่เคยตัดข้อความ/ไฟล์ทิ้งเงียบๆ — ทุก error path คืนข้อความอธิบายกลับไปเสมอ"""
+    file_id = mime_type, file_size = None, None, None
+    
+    if message.photo:
+        largest = message.photo[-1]
+        file_id, mime_type, file_size = largest.file_id, "image/jpeg", largest.file_size
+    elif message.document:
+        doc = message.document
+        file_id, mime_type, file_size = doc.file_id, doc.mime_type or "", doc.file_size
+        
+    if not file_id:
+        return None, None, (
+            f"❌ ไม่รองรับไฟล์ประเภทนี้ ({mime_type or 'ไม่ทราบชนิด'})\n"
+            "รองรับ: รูปภาพ (JPEG/PNG/WebP), PDF, ไฟล์ข้อความล้วน (.txt)"
+        )
+        
+    limit_mb = gemini.MAX_MEDIA_BYTES // (1024 * 1024)
+    if file_size and file_size > gemini.MAX_MEDIA_BYTES:
+        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
+        
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        file_bytes = bytes(await tg_file.download_as_bytearray())
+    except TelegramError as e:
+        logger.info(f"MEDIA DOWNLOAD ERROR: {e}")
+        return None, None, "❌ ดาวน์โหลดไฟล์จาก Telegram ไม่สำเร็จ ลองใหม่อีกครั้ง"
+        
+    if len(file_bytes) > gemini.MAX_MEDIA_BYTES:
+        return return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
+        
+    return file_bytes, mime_type, None
+        
 async def parse_duration(text: str):
     match = re.fullmatch(r"(\d+)(s|m|h|d)", text.strip().lower())
     if not match:
@@ -261,7 +314,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
         "/unmute - ปลด Mute (Reply ข้อความ)\n"
         "/id - ดู Chat ID\n"
-        f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI"
+        f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI\n"
+        f"ส่งรูปภาพ/ไฟล์ PDF/TXT พร้อม caption แท็ก @{context.bot.username} "
+        f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์"
     )
     await update.message.reply_text(text)
     
@@ -545,6 +600,7 @@ async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_
     )
 
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    
     ok, result = await coordinator.handle_request(
         chat_id=chat_id,
         user_id=user_id,
@@ -668,44 +724,29 @@ async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     )
     return True
     
-async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
-    """ถาม AI เมื่อมีคนแท็กบอท เช่น '@ชื่อบอท คำถาม' ในแชท
-    คืนค่า True หากมีการตอบกลับแล้ว (handle_message ควร return ทันที)"""
-    message = update.effective_message
-    bot_username = context.bot.username
-    if not bot_username:
-        return False
-        
-    mention_text = None
-    for entity_text in message.parse_entities(types=["mention"]).values():
-        if entity_text.lower() == f"@{bot_username.lower()}":
-            mention_text = entity_text
-            break
-    if mention_text is None:
-        return False
-        
-    question = text.replace(mention_text, "", 1).strip()
+async def _run_ai_question(update: Update, context: ContextTypes.DEFAULT_TYPE, question: str,
+                            reply_msg, media) -> None:
+    """ตรวจโควตา เรียก coordinator แล้วตอบกลับผู้ใช้ — ใช้ร่วมกันทั้ง
+    check_gemini_mention (แท็กบอทเป็นข้อความ) และ handle_media_message
+    (แท็กบอทใน caption ของรูป/ไฟล์) เพื่อไม่ให้ logic โควตา/quota-message/
+    error-handling สองที่เพี้ยนไปจากกัน"""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
-    if not question:
-        await update.message.reply_text(
-            f"พิมพ์คำถามต่อท้าย {mention_text} ได้เลย เช่น {mention_text} วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
-        )
-        return True
-        
     admin = await is_admin(update, context)
     allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
     if not allowed:
         await update.message.reply_text(
             f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻"
         )
-        return True
+        return
         
-    logger.info(f"GEMINI MENTION | Chat ID: {chat_id} | User ID: {user_id} | Question: {question}")
+    logger.info(
+        f"GEMINI MENTION | Chat ID: {chat_id} | User ID: {user_id} | "
+        f"Question: {question} | Media: {'yes' if media else 'no'}"
+    )
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
     
-    reply_msg = update.message.reply_to_message
     reply_user_id = reply_msg.from_user.id if reply_msg and reply_msg.from_user else None
     reply_text = reply_msg.text if reply_msg and reply_msg.text else None
     ok, result = await coordinator.handle_request(
@@ -715,13 +756,79 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
         question=question,
         reply_user_id=reply_user_id,
         reply_text=reply_text,
+        media=media,
     )
     if not ok:
         await update.message.reply_text(result)
-        return True
+        return
     for chunk in split_telegram_message(result):
         await update.message.reply_text(chunk)
+    
+async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """ถาม AI เมื่อมีคนแท็กบอท เช่น '@ชื่อบอท คำถาม' ในแชท
+    รองรับแนบรูปภาพ/ไฟล์ (PDF/TXT) ได้ด้วยการ Reply ข้อความที่มีรูป/เอกสารนั้น
+    แล้วแท็กบอทพร้อมคำถาม — หรือแท็กเฉยๆ ก็ได้ถ้ามีรูป/ไฟล์แนบ (จะใช้คำถามเริ่มต้น)
+    คืนค่า True หากมีการตอบกลับแล้ว (handle_message ควร return ทันที)"""
+    message = update.effective_message
+    bot_username = context.bot.username
+    if not bot_username:
+        return False
+        
+    entities = message.parse_entities(types={"mention"])
+    mention_text = _find_bot_mention(entities, bot_username)
+    if mention_text is None:
+        return False
+        
+    question = text.replace(mention_text, "", 1).strip()
+    
+    reply_msg = update.message.reply_to_message
+    media = None
+    if reply_msg and (reply_msg.photo or reply_msg.document):
+        media_bytes, media_mime, media_error = await extract_media_from_message(reply_msg, context)
+        if media_error:
+            await update.message.reply_text(media_error)
+            return True
+        if media_bytes:
+            media = [(media_bytes, media_mime)]
+            
+    if not question:
+        if media:
+            question = DEFAULT_MEDIA_QUESTION
+        else:
+             await update.message.reply_text(
+                f"พิมพ์คำถามต่อท้าย {mention_text} ได้เลย เช่น {mention_text} วันนี้พ่อกับแม่มึงเย็ดกันหรือยัง"
+             )
+             return True
+            
+    await _run_ai_question(update, context, question, reply_msg, media)
     return True
+    
+async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """แท็กบอทพร้อมแนบรูปภาพ/ไฟล์ในข้อความเดียว เช่น ส่งรูปแล้วใส่ caption
+    '@ชื่อบอท นี่คือรูปอะไร' — ทำงานคู่กับ check_gemini_mention ซึ่งรองรับ
+    กรณี Reply รูป/ไฟล์ที่ส่งไปก่อนหน้าแล้วแท็กบอทเป็นข้อความแยกต่างหาก"""
+    message = uodate.effective_message
+    if message is None or not message.caption:
+        return
+        
+    bot_username = context.bot.username
+    if not bot_username:
+        return
+        
+    entities = message.parse_caption_entities(types=["mention"])
+    mention_text = _find_bot_mention(entities, bot_username)
+    if mention_text is None:
+        return
+        
+    media_bytes, media_mime, media_error = await extract_media_from_message(message, context)
+    if media_error:
+        await update.message.reply_text(media_error)
+        return
+    if not media_bytes:
+        return 
+        
+    question = message.caption.replace(mention_text, "", 1).strip() or DEFAULT_MEDIA_QUESTION
+    await _run_ai_question(update, context, question, reply_msg=None, media=[(media_bytes, media_mime)])
     
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -733,7 +840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
-    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if chat.teype in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
         detection_results = detection.analyze_message(chat.id, user.id, text)
         if detection_results:
@@ -836,6 +943,10 @@ def main():
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & filters.CAPTION & ~filters.COMMAND,
+        handle_media_message,
+    ))
     app.add_error_handler(error_handler)
 
     logger.info("HANDLERS: OK")
