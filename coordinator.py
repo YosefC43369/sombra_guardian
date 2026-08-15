@@ -34,7 +34,7 @@ import scrape
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
-import gemini
+import openai
 import news
 from security import get_behavior
 from analytics import get_group_summary
@@ -280,6 +280,7 @@ async def handle_request(
     custom_instructions: str = "",
     reply_user_id: Optional[int] = None,
     reply_text: Optional[str] = None,
+    media: Optional[List[Tuple[bytes, str]]] = None,
 ) -> Tuple[bool, str]:
     """Drop-in replacement for `await gemini.ask_gemini(question)` — same
     (ok, text) contract. LOW complexity takes the exact pre-Coordinator
@@ -327,6 +328,15 @@ async def handle_request(
             research_prompt,
             preset=preset,
             custom_instructions=custom_instructions,
+            media=media,
+        )
+        
+    if media:
+        return await gemini.ask_gemini(
+            question,
+            preset=preset,
+            custom_instructions=custom_instructions,
+            media=media,
         )
         
     complexity, worker_names = assess_request(question, reply_text, reply_user_id is not None)
