@@ -840,7 +840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
-        if chat.teype in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
         detection_results = detection.analyze_message(chat.id, user.id, text)
         if detection_results:
