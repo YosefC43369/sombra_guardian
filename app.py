@@ -22,6 +22,7 @@ from telegram.error import TelegramError
 
 import detection
 from security import security_db_init, write_audit_log
+import gemini
 from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
@@ -190,7 +191,7 @@ async def check_bot_permissions(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info(f"PERMISSION CHECK ERROR: {e}")
         return False, False
         
-async def _find_bot_mention(entities: dict, bot_username: str):
+def _find_bot_mention(entities: dict, bot_username: str):
     """entities is the dict returned by Message.parse_entities()/
     parse_caption_entities() — {MessageEntity: substring}. Returns the
     matched '@username' substring, or None."""
@@ -207,7 +208,7 @@ async def extract_media_from_message(message, context: ContextTypes.DEFAULT_TYPE
       - มีแนบแต่ชนิดไฟล์ไม่รองรับ/ใหญ่เกิน -> (None, None, <ข้อความ error ภาษาไทย>)
       - ดาวน์โหลดสำเร็จ               -> (bytes, mime_type, None)
     ไม่เคยตัดข้อความ/ไฟล์ทิ้งเงียบๆ — ทุก error path คืนข้อความอธิบายกลับไปเสมอ"""
-    file_id = mime_type, file_size = None, None, None
+    file_id, mime_type, file_size = None, None, None
     
     if message.photo:
         largest = message.photo[-1]
@@ -217,6 +218,9 @@ async def extract_media_from_message(message, context: ContextTypes.DEFAULT_TYPE
         file_id, mime_type, file_size = doc.file_id, doc.mime_type or "", doc.file_size
         
     if not file_id:
+        return None, None, None
+
+    if not gemini.is_supported_media_mime(mime_type):
         return None, None, (
             f"❌ ไม่รองรับไฟล์ประเภทนี้ ({mime_type or 'ไม่ทราบชนิด'})\n"
             "รองรับ: รูปภาพ (JPEG/PNG/WebP), PDF, ไฟล์ข้อความล้วน (.txt)"
@@ -807,7 +811,7 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
     """แท็กบอทพร้อมแนบรูปภาพ/ไฟล์ในข้อความเดียว เช่น ส่งรูปแล้วใส่ caption
     '@ชื่อบอท นี่คือรูปอะไร' — ทำงานคู่กับ check_gemini_mention ซึ่งรองรับ
     กรณี Reply รูป/ไฟล์ที่ส่งไปก่อนหน้าแล้วแท็กบอทเป็นข้อความแยกต่างหาก"""
-    message = uodate.effective_message
+    message = update.effective_message
     if message is None or not message.caption:
         return
         
@@ -840,7 +844,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
-        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
         detection_results = detection.analyze_message(chat.id, user.id, text)
         if detection_results:
