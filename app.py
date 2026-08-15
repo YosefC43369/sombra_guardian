@@ -234,7 +234,7 @@ async def extract_media_from_message(message, context: ContextTypes.DEFAULT_TYPE
         return None, None, "❌ ดาวน์โหลดไฟล์จาก Telegram ไม่สำเร็จ ลองใหม่อีกครั้ง"
         
     if len(file_bytes) > gemini.MAX_MEDIA_BYTES:
-        return return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
+        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
         
     return file_bytes, mime_type, None
         
