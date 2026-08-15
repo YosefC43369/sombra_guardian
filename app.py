@@ -774,7 +774,7 @@ async def check_gemini_mention(update: Update, context: ContextTypes.DEFAULT_TYP
     if not bot_username:
         return False
         
-    entities = message.parse_entities(types={"mention"])
+    entities = message.parse_entities(types=["mention"])
     mention_text = _find_bot_mention(entities, bot_username)
     if mention_text is None:
         return False
