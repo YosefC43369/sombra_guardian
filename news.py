@@ -54,6 +54,7 @@ SEND_BACKLOG_ON_FIRST_RUN = os.getenv("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false")
 ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "1200"))
 AI_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_AI_SUMMARY_MAX_CHARS", "1200"))
 RSS_SUMMARY_MIN_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
+_BLOCKED_DOMAINS_THIS_CYCLE: set[str] = set()
 
 _HTTP_HEADERS = {
     "User-Agent": (
@@ -403,9 +404,14 @@ def _extract_feed_image(entry) -> Optional[str]:
 
 async def _hydrate_article(client: httpx.AsyncClient, item: NewsItem) -> NewsItem:
     """Fetch the real article page and replace the weak RSS summary with body text."""
+    domain = urlparse(item.url().netloc
+    if domain in _BLOCKED_DOMAINS_THIS_CYCLE:
+        return item
+        
     raw = await _fetch_bytes(client, item.url)
     if raw is None:
         logger.warning("NEWS ARTICLE FETCH FAILED | url=%s | using RSS summary", item.url)
+        _BLOCKED_DOMAINS_THIS_CYCLE.add(domain)
         return item
 
     try:
