@@ -39,6 +39,7 @@ SPAM_MESSAGE_LIMIT = 5
 SPAM_TIME_WINDOW = 10
 MAX_WARNINGS = 3
 DEFAULT_MUTE_SECONDS = 600
+TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_photo
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -369,43 +370,92 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
 async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ส่งข้อความประกาศเข้ากลุ่ม สั่งได้เฉพาะในแชทส่วนตัวกับบอทเท่านั้น
-    ใช้งาน: /announce <chat_id> <ข้อความ>
+
+    ใช้งาน:
+      1) ข้อความอย่างเดียว:
+         /announce <chat_id> <ข้อความ>
+
+      2) รูปภาพ + ข้อความ:
+         ส่งรูปภาพเข้าแชทส่วนตัวกับบอท (จะใส่ caption หรือไม่ก็ได้)
+         แล้ว Reply รูปภาพนั้นด้วย /announce <chat_id> [ข้อความ]
+         - ถ้าไม่พิมพ์ข้อความต่อท้าย chat_id จะใช้ caption ของรูปเป็นข้อความประกาศ
+         - ถ้าพิมพ์ข้อความต่อท้าย chat_id ข้อความนั้นจะ override caption เดิม
+
     ผู้สั่งต้องเป็น Admin/Owner ของกลุ่มที่ระบุ chat_id นั้น"""
     if update.effective_chat.type != ChatType.PRIVATE:
         return await update.message.reply_text("คำสั่งนี้ใช้ได้เฉพาะในแชทส่วนตัวกับบอทเท่านั้น")
-        
-    if len(context.args) < 2:
+
+    reply_msg = update.message.reply_to_message
+    is_photo_announce = bool(reply_msg and reply_msg.photo)
+
+    if not context.args:
         return await update.message.reply_text(
-            "ใช้งาน: /announce <chat_id> <ข้อความ>\nดู chat_id ของกลุ่มได้จาก /status ในกลุ่มนั้น"
+            "ใช้งาน:\n"
+            "1) /announce <chat_id> <ข้อความ>\n"
+            "2) ส่งรูปภาพ (ใส่ caption ได้) แล้ว Reply รูปนั้นด้วย /announce <chat_id> [ข้อความ]\n"
+            "ดู chat_id ของกลุ่มได้จาก /status ในกลุ่มนั้น"
         )
-        
+
     try:
         target_chat_id = int(context.args[0])
     except ValueError:
         return await update.message.reply_text("chat_id ต้องเป็นตัวเลข")
-        
-    announce_text = " ".join(context.args[1:]).strip()
-    if not announce_text:
-        return await update.message.reply_text("กรุณาพิมพ์ข้อความที่ต้องการประกาศต่อท้าย chat_id")
-        
+
+    typed_text = " ".join(context.args[1:]).strip()
+
+    if is_photo_announce:
+        announce_text = typed_text or (reply_msg.caption or "").strip()
+        if not announce_text:
+            return await update.message.reply_text(
+                "❌ ไม่มีข้อความประกาศ กรุณาใส่ caption ให้รูป หรือพิมพ์ข้อความต่อท้าย chat_id"
+            )
+        photo_file_id = reply_msg.photo[-1].file_id
+    else:
+        if len(context.args) < 2:
+            return await update.message.reply_text(
+                "ใช้งาน: /announce <chat_id> <ข้อความ>\nดู chat_id ของกลุ่มได้จาก /status ในกลุ่มนั้น"
+            )
+        announce_text = typed_text
+        if not announce_text:
+            return await update.message.reply_text("กรุณาพิมพ์ข้อความที่ต้องการประกาศต่อท้าย chat_id")
+
     user = update.effective_user
     try:
         member = await context.bot.get_chat_member(target_chat_id, user.id)
     except TelegramError as e:
         logger.info(f"ANNOUNCE ADMIN CHECK ERROR: {e}")
         return await update.message.reply_text("❌ ไม่พบกลุ่มนี้ หรือบอตไม่ได้อยู่ในกลุ่มนั้น")
-        
+
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin ของกลุ่มที่ระบุ")
-        
-    try:
-        await context.bot.send_message(target_chat_id, f"📢 ประกาศ\n\n{announce_text}")
-    except TelegramError as e:
-        logger.info(f"ANNOUNCE SEND ERROR: {e}")
-        return await update.message.reply_text("❌ ส่งข้อความไม่สำเร็จ บอทอาจไม่มีสิทธิ์พูดในกลุ่มนั้น")
-        
-    write_audit_log(target_chat_id, user.id, actor="admin", action="ANNOUNCE", detail=announce_text)
-    logger.info(f"ANNOUNCE SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
+
+    full_text = f"📢 ประกาศ\n\n{announce_text}"
+
+    if is_photo_announce:
+        if len(full_text) > TELEGRAM_CAPTION_LIMIT:
+            return await update.message.reply_text(
+                f"❌ ข้อความประกาศยาวเกินไปสำหรับ caption ของรูปภาพ "
+                f"({len(full_text)}/{TELEGRAM_CAPTION_LIMIT} ตัวอักษร)\n"
+                f"กรุณาย่อข้อความ หรือส่งแบบข้อความอย่างเดียวแทน"
+            )
+        try:
+            await context.bot.send_photo(target_chat_id, photo=photo_file_id, caption=full_text)
+        except TelegramError as e:
+            logger.info(f"ANNOUNCE PHOTO SEND ERROR: {e}")
+            return await update.message.reply_text(
+                "❌ ส่งรูปภาพไม่สำเร็จ บอทอาจไม่มีสิทธิ์พูดในกลุ่มนั้น หรือรูปภาพมีปัญหา"
+            )
+        write_audit_log(target_chat_id, user.id, actor="admin", action="ANNOUNCE_PHOTO", detail=announce_text)
+        logger.info(f"ANNOUNCE PHOTO SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
+    else:
+        try:
+            await context.bot.send_message(target_chat_id, full_text)
+        except TelegramError as e:
+            logger.info(f"ANNOUNCE SEND ERROR: {e}")
+            return await update.message.reply_text("❌ ส่งข้อความไม่สำเร็จ บอทอาจไม่มีสิทธิ์พูดในกลุ่มนั้น")
+        write_audit_log(target_chat_id, user.id, actor="admin", action="ANNOUNCE_TEXT", detail=announce_text)
+        logger.info(f"ANNOUNCE TEXT SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
+
     await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
     
 async def dashboard_command(update, context):
