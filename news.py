@@ -269,6 +269,8 @@ def _clean_candidate(soup: BeautifulSoup, candidate) -> str:
         tag.decompose()
 
     for tag in node.find_all(True):
+        if tag.decomposed:
+            continue
         attrs = " ".join(str(tag.get(a, "")) for a in ("id", "class", "role", "aria-label"))
         if _BOILERPLATE_RE.search(attrs):
             tag.decompose()
