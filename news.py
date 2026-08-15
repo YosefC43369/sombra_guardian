@@ -404,7 +404,7 @@ def _extract_feed_image(entry) -> Optional[str]:
 
 async def _hydrate_article(client: httpx.AsyncClient, item: NewsItem) -> NewsItem:
     """Fetch the real article page and replace the weak RSS summary with body text."""
-    domain = urlparse(item.url().netloc
+    domain = urlparse(item.url()).netloc
     if domain in _BLOCKED_DOMAINS_THIS_CYCLE:
         return item
         
