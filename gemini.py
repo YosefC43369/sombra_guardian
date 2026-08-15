@@ -1,17 +1,19 @@
 """
-gemini.py — Google Gemini API integration for the Telegram moderation bot.
+gemini.py — OpenAI (GPT) API integration for the Telegram moderation bot.
+(Filename/module name kept as-is so app.py's `import gemini` /
+`from gemini import ...` don't need to change.)
 
 Responsibilities (and only these):
-  - Read GEMINI_API_KEY / GEMINI_MODEL from the environment at call time
+  - Read GPT_API_KEY / GPT_MODEL from the environment at call time
     (never hardcoded, never read at import time — see note below).
-  - Validate user input before it is sent to Gemini (empty / too long).
-  - Call the Gemini API asynchronously so the bot's event loop is never
+  - Validate user input before it is sent to the model (empty / too long).
+  - Call the OpenAI API asynchronously so the bot's event loop is never
     blocked while waiting for a response.
   - Translate every failure mode (missing/invalid key, quota, rate limit,
     timeout, network error, empty response, unexpected exception) into a
     safe, Thai, user-facing message. Never raises out to bot.py and never
     leaks the API key or a stack trace to a Telegram user.
-  - Split long Gemini responses into Telegram-safe chunks (<=4096 chars).
+  - Split long responses into Telegram-safe chunks (<=4096 chars).
 
 Environment variables are read lazily (inside functions, not at module
 import time): bot.py calls load_dotenv() AFTER its own import block, so
@@ -25,6 +27,7 @@ of concerns already used by detection.py.
 
 import os
 import json
+import base64
 import asyncio
 import logging
 from typing import Optional, Tuple, List
@@ -62,7 +65,7 @@ SUPPORTED_MEDIA_MIME_PREFIXES = ("image/", "application/pdf", "text/plain")
 
 def is_supported_media_mime(mime_type: Optional[str]) -> bool:
     """True if `mime_type` is something this module is willing to attach
-    to a Gemini call. Callers (app.py) should check this BEFORE downloading
+    to an OpenAI call. Callers (app.py) should check this BEFORE downloading
     a file from Telegram, so an unsupported type never eats bandwidth."""
     if not mime_type:
         return False
@@ -244,6 +247,43 @@ def _validate_input(text: str) -> Optional[str]:
     return None
 
 
+# ---------------- Multimodal content builder (OpenAI Chat Completions) ----------------
+
+def _build_user_content(prompt: str, media: Optional[List[Tuple[bytes, str]]]):
+    """Builds the 'content' value for the user message in OpenAI's Chat
+    Completions format. With no media, this is just the prompt string —
+    OpenAI accepts a plain string directly and it's cheaper to read in logs.
+
+    With media: images become 'image_url' data-URI blocks, PDFs become
+    'file' data-URI blocks (both are documented Chat Completions content
+    types). text/plain has no dedicated content type in Chat Completions,
+    so it's decoded and merged straight into the prompt text instead —
+    that's the same content a human would just paste in anyway."""
+    if not media:
+        return prompt.strip()
+
+    text_prompt = prompt.strip()
+    blocks = []
+    for data, mime in media:
+        if mime == "text/plain":
+            decoded = data.decode("utf-8", errors="replace")
+            text_prompt = f"[เนื้อหาไฟล์แนบ]\n{decoded}\n\n[คำถาม]\n{text_prompt}"
+            continue
+        b64 = base64.b64encode(data).decode("ascii")
+        if mime.startswith("image/"):
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        elif mime == "application/pdf":
+            blocks.append({
+                "type": "file",
+                "file": {"filename": "attachment.pdf", "file_data": f"data:{mime};base64,{b64}"},
+            })
+    blocks.append({"type": "text", "text": text_prompt})
+    return blocks
+
+
 # ---------------- Gemini call ----------------
 
 async def ask_gemini(
@@ -288,26 +328,23 @@ async def ask_gemini(
         return False, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
     model = os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT)
-    
-    contents = prompt.strip()
-    if media:
-        try:
-            parts = [types.Part.from_bytes(data=data, mime_type=mime) for data, mime in media]
-        except Exception:
-            logger.exception("GPT MEDIA PART BUILD ERROR")
-            return False, "ไม่สามารถแนบไฟล์/รูปภาพนี้ให้ AI อ่านได้ ลองไฟล์อื่นดู"
-        parts.append(prompt.strip())
-        contents = parts
+
+    try:
+        user_content = _build_user_content(prompt, media)
+    except Exception:
+        logger.exception("GPT MEDIA PART BUILD ERROR")
+        return False, "ไม่สามารถแนบไฟล์/รูปภาพนี้ให้ AI อ่านได้ ลองไฟล์อื่นดู"
+
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model=model,
                 messages=[
-                     {
-                       "role": "system",
+                    {
+                        "role": "system",
                         "content": system_instruction if system_instruction is not None else GEMINT_PERSONA,
-                     },
-                    {"role": "user", "content": prompt.strip()},
+                    },
+                    {"role": "user", "content": user_content},
                 ],
             ),
             timeout=GEMINI_TIMEOUT_SECONDS,
