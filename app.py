@@ -320,7 +320,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/id - ดู Chat ID\n"
         f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI\n"
         f"ส่งรูปภาพ/ไฟล์ PDF/TXT พร้อม caption แท็ก @{context.bot.username} "
-        f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์"
+        f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์\n"
+        "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท"
     )
     await update.message.reply_text(text)
     
@@ -516,6 +517,45 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"ANNOUNCE TEXT SENT | Chat ID: {target_chat_id} | By User ID: {user.id}")
 
     await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
+
+async def cmd_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สั่ง AI สร้างรูปภาพแล้วส่งเข้าแชทนี้ ใช้งาน: /imagine <คำอธิบายรูปที่ต้องการ>
+    ใช้โควตา AI เดียวกับ /ask (check_and_use_quota) เพื่อคุมค่าใช้จ่ายต่อผู้ใช้"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        return await update.message.reply_text(
+            "ใช้งาน: /imagine <คำอธิบายรูปที่ต้องการ>\n"
+            "เช่น /imagine แมวส้มใส่หมวกนักบินอวกาศ สไตล์การ์ตูน"
+        )
+
+    admin = await is_admin(update, context)
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻"
+        )
+
+    logger.info(f"AI IMAGINE | Chat ID: {chat_id} | User ID: {user_id} | Prompt: {prompt}")
+    await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+
+    ok, image_bytes, error_text = await gemini.generate_image(prompt)
+    if not ok:
+        return await update.message.reply_text(f"❌ {error_text}")
+
+    caption = f"🎨 {prompt}"
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+        caption = caption[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
+
+    try:
+        await context.bot.send_photo(chat_id, photo=image_bytes, caption=caption)
+    except TelegramError as e:
+        logger.info(f"IMAGINE SEND ERROR: {e}")
+        return await update.message.reply_text("❌ สร้างรูปสำเร็จแต่ส่งรูปเข้าแชทไม่สำเร็จ ลองใหม่อีกครั้ง")
+
+    write_audit_log(chat_id, user_id, actor="user", action="AI_IMAGE_GENERATED", detail=prompt)
     
 async def dashboard_command(update, context):
     chat, user = update.effective_chat, update.effective_user
@@ -941,6 +981,7 @@ def main():
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("announce", cmd_announce))
+    app.add_handler(CommandHandler("imagine", cmd_imagine))
     app.add_handler(CommandHandler("groupstats", cmd_groupstats))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CommandHandler("id", chat_id_command))
