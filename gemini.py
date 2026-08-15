@@ -41,6 +41,7 @@ from openai import (
     AuthenticationError,
     PermissionDeniedError,
     InternalServerError,
+    BadRequestError,
 )
 
 logger = logging.getLogger("modbot.gemini")
@@ -50,6 +51,8 @@ logger = logging.getLogger("modbot.gemini")
 GEMINI_MODEL_DEFAULT = "gpt-5.6-luna"
 GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
+GPT_IMAGE_MODEL_DEFAULT = "gpt-image-2"
+GPT_IMAGE_TIMEOUT_SECONDS = 60   # image generation is slower than a text call
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
 CLASSIFIER_MIN_INPUT_CHARS = 5          # ข้อความสั้นกว่านี้ไม่ต้องส่งให้ AI จำแนก
 CLASSIFIER_CONFIDENCE_THRESHOLD = 0.5   # is_spam=True ก็ต่อเมื่อ confidence >= ค่านี้
@@ -377,6 +380,71 @@ async def ask_gemini(
         return False, "AI ไม่ได้ส่งคำตอบกลับมา กรุณาลองใหม่อีกครั้ง"
 
     return True, text
+
+# ---------------- AI image generation ----------------
+
+async def generate_image(prompt: str) -> Tuple[bool, Optional[bytes], str]:
+    """Asks the model to generate ONE image from `prompt` via OpenAI's
+    Images API (client.images.generate — a separate endpoint from chat
+    completions). Returns (success, image_bytes, message):
+      - success=True  -> image_bytes is PNG bytes, message is ""
+      - success=False -> image_bytes is None, message is a safe Thai error
+    Same never-raises contract as ask_gemini(): every exception is caught
+    here, so a bad prompt or an API outage can never crash the bot."""
+    validation_error = _validate_input(prompt)
+    if validation_error:
+        return False, None, validation_error
+
+    try:
+        client = _get_client()
+    except RuntimeError:
+        logger.error("IMAGE CALL BLOCKED: GPT_API_KEY is not set")
+        return False, None, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
+
+    model = os.getenv("GPT_IMAGE_MODEL", GPT_IMAGE_MODEL_DEFAULT)
+
+    try:
+        result = await asyncio.wait_for(
+            client.images.generate(model=model, prompt=prompt.strip()),
+            timeout=GPT_IMAGE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"IMAGE TIMEOUT after {GPT_IMAGE_TIMEOUT_SECONDS}s")
+        return False, None, "AI สร้างรูปช้าเกินไปว่ะ ลองใหม่อีกครั้งดู"
+    except BadRequestError as e:
+        logger.warning(f"IMAGE REJECTED | {e}")
+        return False, None, "คำสั่งนี้อาจขัดนโยบายเนื้อหาของ AI ลองเปลี่ยนคำอธิบายรูปดู"
+    except (AuthenticationError, PermissionDeniedError) as e:
+        logger.warning(f"IMAGE AUTH ERROR | {e}")
+        return False, None, "OpenAI API Key ไม่ถูกต้องหรือมึงไม่มีสิทธิ์ใช้งาน"
+    except RateLimitError as e:
+        logger.warning(f"IMAGE RATE LIMIT | {e}")
+        return False, None, "ใช้งานเกินโควตาหรือถูกจำกัดอัตราการใช้งานแล้ว ค่อยมาใช้วันอื่นใหม่นะ ไอ้โง่"
+    except InternalServerError as e:
+        logger.warning(f"IMAGE SERVER ERROR | {e}")
+        return False, None, "OpenAI API ไม่พร้อมใช้งานในขณะนี้ กรุณาลองใหม่ภายหลัง"
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.warning(f"IMAGE CONNECTION ERROR | {e}")
+        return False, None, "เชื่อมต่อ OpenAI API ไม่ได้ กรุณาลองใหม่อีกครั้ง"
+    except APIError as e:
+        logger.warning(f"IMAGE API ERROR | {e}")
+        return False, None, _GENERIC_ERROR_TEXT
+    except Exception:
+        logger.exception("IMAGE UNEXPECTED ERROR")
+        return False, None, _GENERIC_ERROR_TEXT
+
+    b64 = result.data[0].b64_json if result.data else None
+    if not b64:
+        logger.warning("IMAGE EMPTY RESPONSE")
+        return False, None, "AI ไม่ได้ส่งรูปภาพกลับมา ลองใหม่อีกครั้ง"
+
+    try:
+        image_bytes = base64.b64decode(b64)
+    except Exception:
+        logger.exception("IMAGE DECODE ERROR")
+        return False, None, "ถอดรหัสรูปภาพที่ AI สร้างไม่สำเร็จ ลองใหม่อีกครั้ง"
+
+    return True, image_bytes, ""
 
 # ---------------- Automatic spam/scam classification ----------------
 
