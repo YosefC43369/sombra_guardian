@@ -56,10 +56,10 @@ AI_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_AI_SUMMARY_MAX_CHARS", "1200"))
 RSS_SUMMARY_MIN_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
 
 _HTTP_HEADERS = {
-    "User-Agent": {
+    "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    },
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
 }
@@ -227,7 +227,7 @@ def _meta(soup: BeautifulSoup, *names: str) -> Optional[str]:
 
 def _json_ld_objects(soup: BeautifulSoup) -> List[dict]:
     objects: List[dict] = []
-    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\\+json", re.I)}):
+    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\+json", re.I)}):
         raw = script.string or script.get_text()
         if not raw:
             continue
