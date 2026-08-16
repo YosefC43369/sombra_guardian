@@ -125,15 +125,18 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 @dataclass
 class PolicyDecision:
     decision: str # Decision.ALLOW.value / Decision.DENY.value
-    reason: str.  # Reason.*.value
+    reason: str  # Reason.*.value
     detail: str = ""
     
     @property
     def allowed(self) -> bool:
         return self.decision == Decision.ALLOW.value
         
-def _deny(reason: Reason, detail: str = "")
+def _deny(reason: Reason, detail: str = "") -> "PolicyDecision":
     return PolicyDecision(decision=Decision.DENY.value, reason=reason.value, detail=detail)
+
+def _allow(detail: str = "") -> "PolicyDecision":
+    return PolicyDecision(decision=Decision.ALLOW.value, reason=Reason.OK.value, detail=detail)
     
 # ---------------- Database ----------------
 
@@ -142,7 +145,7 @@ def _conn():
     conn.row_factory = sqlite3.Row
     return conn
     
-def scope_policy_db_int() -> None:
+def scope_policy_db_init() -> None:
     """Create policy-engine tables only. Reuses security.py's DB_PATH and
     audit_log table; never touches any other module's tables or data."""
     conn = _conn()
@@ -195,7 +198,7 @@ def create_program(chat_id: int, name: str, created_by: int, metadata: str = "")
     set_program_status(), which keeps 'program exists' distinct from
     'program may currently produce ALLOW', mirroring the artifact/review
     split in the Authorization section below."""
-    now = int(time.())
+    now = int(time.time())
     conn = _conn()
     cur = conn.execute(
         "INSERT INTO bb_programs (chat_id, name, status, metadata, created_by, created_at, updated_at) "
@@ -224,7 +227,7 @@ def list_programs(chat_id: int) -> List[dict]:
     return [dict(r) for r in rows]
     
 def set_program_status(program_id: int, status: str, actor_user_id: int) -> bool:
-    if status not in VALID_PROGRAM_STATUES:
+    if status not in VALID_PROGRAM_STATUSES:
         return False
     program = get_program(program_id)
     if not program:
@@ -507,7 +510,7 @@ def _domain_matches(rule_domain: str, target_domain: str) -> bool:
     rule written for 'example.com'."""
     if target_domain == rule_domain:
         return True
-    return target_domain.enswith("." + rule_domain)
+    return target_domain.endswith("." + rule_domain)
     
 def _path_segments(path: str) -> List[str]:
     path = path or "/"
@@ -524,17 +527,18 @@ def _path_is_prefix(rule_path: str, target_path: str) -> bool:
     target_segs = _path_segments(target_path)
     if len(rule_segs) > len(target_segs):
         return False
-  
+    return all(r == t for r, t in zip(rule_segs, target_segs))
+
 def _ip_in_network(ip_str: str, network_str: str) -> bool:
     try:
         return ipaddress.ip_address(ip_str) in ipaddress.ip_network(network_str, strict=False)
     except ValueError:
         return False
         
-def _network_in_network(linner: str, outer: str) -> bool:
+def _network_in_network(inner: str, outer: str) -> bool:
     try:
         inner_net = ipaddress.ip_network(inner, strict=False)
-        outer_net = opaddress.ip_network(outer, strict=False)
+        outer_net = ipaddress.ip_network(outer, strict=False)
         if inner_net.version != outer_net.version:
             return False
         return inner_net.subnet_of(outer_net)
@@ -610,7 +614,7 @@ def evaluate_target(program_id: int, raw_target: str,
         program = get_program(program_id)
         if not program:
             return _deny(Reason.PROGRAM_NOT_FOUND, f"program_id={program_id}")
-        if program["status] != ProgramStatus.ACTIVE.value:
+        if program["status"] != ProgramStatus.ACTIVE.value:
             return _deny(Reason.PROGRAM_NOT_ACTIVE, f"status={program['status']}")
             
         authorizations = list_authorizations(program_id)
