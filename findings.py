@@ -443,3 +443,55 @@ def get_edvidence(edvidence_id: int) -> Optional[dict]:
     row = conn.execute("SELECT * FROM bb_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+    
+def list_edvidence(finding_id: int) -> List[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM bb_evidence WHERE finding_id=? ORDER BY evidence_id", (finding_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+    
+def remove_evidence(evidence_id: int, actor_user_id: int) -> bool:
+    ev = get_evidence(evidence_id)
+    if not ev:
+        return False
+    conn = _conn()
+    conn.execute("DELETE FROM bb_evidence WHERE evidence_id=?", (evidence_id,))
+    conn.commit()
+    conn.close()
+    
+    finding = get_finding(ev["finding_id"])
+    program = get_program(finding["program_id"]) if finding else None
+    chat_id = program["chat_id"] if program else 0
+    write_audit_log(chat_id, actor_user_id, actor="user", action="EVIDENCE_REMOVED",
+                     detail=f"evidence_id={evidence_id} finding_id={ev['finding_id']}")
+    logger.info(f"EVIDENCE REMOVED | evidence_id={evidence_id}")
+    return True
+    
+def verify_evidence(evidence_id: int, content_bytes: bytes) -> VerifyResult:
+    """Recomputes SHA-256 over `content_bytes` and compares it against
+    the hash stored at evidence-creation time. A hash match proves the
+    supplied bytes are identical to what was originally recorded; it
+    does NOT prove who created them. A hash mismatch means the content
+    has changed (or the wrong file was supplied) since it was recorded."""
+    ev = get_evidence(evidence_id)
+    if not ev:
+        return VerifyResult(False, reason="EVIDENCE_NOT_FOUND")
+    if not ev["sha256"]:
+        return VerifyResult(False, reason="NO_STORED_HASH",
+                             detail="this evidence record has no file content to verify against"
+                             if False else None) if False else VerifyResult(
+            False, reason="NO_STORED_HASH")
+            
+    recalculated = hashlib.sha256(content_bytes).hexdigest()
+    match = recalculated == ev["sha256"]
+    
+    finding = get_finding(ev["finding_id"])
+    program = get_program(finding["program_id"]) if finding else None
+    chat_id = program["chat_id"] if program else 0
+    write_audit_log(chat_id, ev["created_by"], actor="system", action="EVIDENCE_VERIFIED",
+                     detail=f"evidence_id={evidence_id} match={match}")
+    logger.info(f"EVIDENCE VERIFIED | evidence_id={evidence_id} match={match}")
+    return VerifyResult(True, reason="OK", match=match,
+                         stored_sha256=ev["sha256"], recalculated_sha256=recalculated)
