@@ -27,6 +27,26 @@ from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 from news import news_db_init, run_news_check_cycle, news_background_loop
+from scope_policy import (
+    scope_policy_db_init,
+    ProgramStatus,
+    create_program,
+    get_program,
+    list_programs,
+    set_program_status,
+    import_authorization,
+    get_authorization,
+    list_authorizations,
+    review_authorization,
+    revoke_authorization,
+    add_scope_rule,
+    remove_scope_rule,
+    list_scope_rules,
+    evaluate_target,
+    VALID_RULE_TYPES,
+    VALID_TARGET_TYPES,
+)
+
 import coordinator
 
 from dashboard import get_dashboard_data, format_dashboard_message
@@ -768,6 +788,211 @@ async def cmd_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ช่วงเวลาแอคทีฟสุด:\n{hours_text}"
     )
     await update.message.reply_text(text)
+    
+# ---------------- Bug Bounty Scope Policy (Phase 2) ----------------
+#
+# Telegram admin permission controls who may CREATE/MANAGE these records
+# (same as every other admin command in this file). It is deliberately
+# NOT what grants ALLOW — evaluate_target() in scope_policy.py has no
+# is_admin parameter and cannot be short-circuited by chat role. A
+# program only produces ALLOW once its Authorization has been reviewed
+# via /bbauth review ... approve by a second, explicit step.
+
+async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    args = context.args
+    usage = (
+        "ใช้งาน:\n"
+        "/bbprogram new <ชื่อโปรแกรม>\n"
+        "/bbprogram active|pause|archive <program_id>\n"
+        "/bbprogram list"
+    )
+    if not args:
+        return await update.message.reply_text(usage)
+        
+    sub = args[0].lower()
+    if sub == "now":
+        name = " ".join(args[1:]).strip()
+        if not name:
+            return await update.message.reply_text("ใช้งาน: /bbprogram new <ชื่อโปรแกรม>")
+        program_id = create_program(chat_id, name, created_by=user_id)
+        return await update.message.reply_text(
+            f"✅ สร้างโปรแกรมแล้ว #{program_id} “{name}” (สถานะ: PAUSED)\n"
+            f"เปิดใช้งานด้วย: /bbprogram active {program_id}"
+        )
+        
+    if sub in ("active", "pause", "archive"):
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text(f"ใช้งาน: /bbprogram {sub} <program_id>")
+        program_id = int(args[1])
+        status = {"active": ProgramStatus.ACTIVE.value, "pause": ProgramStatus.PAUSED.value,
+                  "archive": ProgramStatus.ARCHIVED.value}[sub]
+        ok = set_program_status(program_id status, user_id)
+        if not ok:
+            return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
+        return await update.message.reply_text(f"✅ โปรแกรม #{program_id} -> {status}")
+        
+    if sub == "list":
+        programs = list_programs(chat_id)
+        if not programs:
+            return await update.message.reply_text("ยังไม่มีโปรแกรมในกลุ่มนี้")
+        lines = [f"#{p['program_id']} {p['name']} [{p['status']}]" for p in programs]
+        return await update.message.reply_text("\n".join(lines))
+        
+    return await update.message.reply_text(usage)
+    
+async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    user_id = update.effective_user.id
+    args = context.args
+    usage = (
+        "ใช้งาน:\n"
+        "/bbauth import <program_id> <source_type> [source_reference ...]\n"
+        "/bbauth review <authorization_id> approve|reject\n"
+        "/bbauth revoke <authorization_id>\n"
+        "/bbauth list <program_id>"
+    )
+    if not args:
+        return await update.message.reply_text(usage)
+        
+    sub = args[0].lower()
+    if sub == "import":
+        if len(args) < 3 or not args[1].isdigit():
+            return await update.message.reply_text(
+                "ใช้งาน: /bbauth import <program_id> <source_type> [source_reference ...]"
+            )
+        program_id = int(args[1])
+        source_type = args[2]
+        source_reference = " ".join(args[3:])
+        authorization_id = import_authorization(
+            program_id, source_type=source_type, actor_user_id=user_id,
+            source_reference=source_reference,
+        )
+        if authorization_id is None:
+            return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
+        return await update.message.reply_text(
+            f"📥 บันทึกเอกสารสิทธิ์ #{authorization_id} สถานะ PENDING_REVIEW\n"
+            f"ต้องได้รับการตรวจทานก่อนจึงจะมีผล: /bbauth review {authorization_id} approve"
+        )
+        
+    if sub == "review":
+        if len(args) < 3 or not args[1].isdigit() or args[2].lower() not in ("approve", "reject"):
+            return await update.message.reply_text(
+                "ใช้งาน: /bbauth review <authorization_id> approve|reject"
+            )
+        authorization_id = int(args[1])
+        approve = args[2].lower() == "approve"
+        ok = review_authorization(authorization_id, approve=approve, reviewer_user_id=user_id)
+        if not ok:
+            return await update.message.reply_text(
+                f"ไม่สามารถตรวจทาน #{authorization_id} ได้ (ไม่พบ หรือไม่ได้อยู่ในสถานะ PENDING_REVIEW)"
+            )
+        return await update.message.reply_text(
+            f"✅ เอกสารสิทธิ์ #{authorization_id} -> {'ACTIVE' if approve else 'REJECTED'}"
+        )
+
+    if sub == "revoke":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbauth revoke <authorization_id>")
+        authorization_id = int(args[1])
+        ok = revoke_authorization(authorization_id, actor_user_id=user_id)
+        if not ok:
+            return await update.message.reply_text(f"ไม่สามารถเพิกถอน #{authorization_id} ได้")
+        return await update.message.reply_text(f"✅ เพิกถอนเอกสารสิทธิ์ #{authorization_id} แล้ว")
+
+    if sub == "list":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbauth list <program_id>")
+        program_id = int(args[1])
+        auths = list_authorizations(program_id)
+        if not auths:
+            return await update.message.reply_text(f"ยังไม่มีเอกสารสิทธิ์สำหรับโปรแกรม #{program_id}")
+        lines = [
+            f"#{a['authorization_id']} [{a['status']}] source={a['source_type']} "
+            f"reviewed_by={a['reviewed_by'] or '-'}"
+            for a in auths
+        ]
+        return await update.message.reply_text("\n".join(lines))
+
+    return await update.message.reply_text(usage)
+    
+async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    user_id = update.effective_user.id
+    args = context.args
+    usage = (
+        "ใช้งาน:\n"
+        "/bbscope add <program_id> include|exclude domain|url|ip|cidr <pattern>\n"
+        "/bbscope remove <rule_id>\n"
+        "/bbscope list <program_id>"
+    )
+    if not args:
+        return await update.message.reply_text(usage)
+    
+    sub = args[0].lower()
+    if sub == "add":
+        if len(args) < 5 or not args[1].isdigit():
+            return await update.message.reply_text(
+                "ใช้งาน: /bbscope add <program_id> include|exclude domain|url|ip|cidr <pattern>"
+            )
+        program_id = int(args[1])
+        rule_type = args[2].upper()
+        target_type = args[3].upper()
+        pattern = args[4]
+        if rule_type not in VALID_RULE_TYPES or target_type not in VALID_TARGET_TYPES:
+            return await update.message.reply_text(
+                "rule_type ต้องเป็น include/exclude, target_type ต้องเป็น domain/url/ip/cidr"
+            )
+        rule_id = add_scope_rule(program_id, rule_type, target_type, pattern, actor_user_id=user_id)
+        if rule_id is None:
+            return await update.message.reply_text(
+                "❌ เพิ่มกฎไม่สำเร็จ — ตรวจสอบ program_id หรือรูปแบบ pattern "
+                "(URL ต้องมี http:// หรือ https:// นำหน้า)"
+            )
+        return await update.message.reply_text(f"✅ เพิ่มกฎ #{rule_id}: {rule_type} {target_type} {pattern}")
+
+    if sub == "remove":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbscope remove <rule_id>")
+        rule_id = int(args[1])
+        ok = remove_scope_rule(rule_id, actor_user_id=user_id)
+        if not ok:
+            return await update.message.reply_text(f"ไม่พบกฎ #{rule_id}")
+        return await update.message.reply_text(f"✅ ลบกฎ #{rule_id} แล้ว")
+
+    if sub == "list":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbscope list <program_id>")
+        program_id = int(args[1])
+        rules = list_scope_rules(program_id)
+        if not rules:
+            return await update.message.reply_text(f"ยังไม่มีกฎ scope สำหรับโปรแกรม #{program_id}")
+        lines = [f"#{r['rule_id']} {r['rule_type']} {r['target_type']} {r['pattern']}" for r in rules]
+        return await update.message.reply_text("\n".join(lines))
+
+    return await update.message.reply_text(usage)
+    
+async def cmd_bbcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read-only decision check. Admin-gated for now, like the rest of
+    this command group — see the module-level note above this section."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit():
+        return await update.message.reply_text("ใช้งาน: /bbcheck <program_id> <target>")
+    program_id = int(args[0])
+    target = args[1]
+    decision = evaluate_target(program_id, target)
+    icon = "✅ ALLOW" if decision.allowed else "⛔ DENY"
+    text = f"{icon}\nprogram: #{program_id}\ntarget: {target}\nreason: {decision.reason}"
+    if decision.detail:
+        text += f"\ndetail: {decision.detail}"
+    await update.message.reply_text(text)
 
 # ---------------- Message Handler ----------------
 
@@ -1023,6 +1248,10 @@ def main():
     app.add_handler(CommandHandler("id", chat_id_command))
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
+app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
+    app.add_handler(CommandHandler("bbauth", cmd_bbauth))
+    app.add_handler(CommandHandler("bbscope", cmd_bbscope))
+    app.add_handler(CommandHandler("bbcheck", cmd_bbcheck)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.CaptionRegex(IMAGINE_CAPTION_RE),
