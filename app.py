@@ -518,18 +518,30 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("✅ ส่งประกาศเรียบร้อยแล้ว")
 
-async def cmd_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """สั่ง AI สร้างรูปภาพแล้วส่งเข้าแชทนี้ ใช้งาน: /imagine <คำอธิบายรูปที่ต้องการ>
-    ใช้โควตา AI เดียวกับ /ask (check_and_use_quota) เพื่อคุมค่าใช้จ่ายต่อผู้ใช้"""
+IMAGINE_CAPTION_RE = re.compile(r"^/imagine(@\w+)?\s*", re.IGNORECASE)
+
+async def _run_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_message) -> None:
+    """สร้าง/แก้ไขรูปภาพด้วย AI แล้วส่งเข้าแชท ใช้ร่วมกันทั้ง 3 ทาง:
+    /imagine <ข้อความ> ธรรมดา (สร้างใหม่ไม่มีรูปอ้างอิง), Reply รูปเดิมด้วย
+    /imagine (แก้ไขรูปนั้น), และส่งรูปใหม่พร้อม caption /imagine (แก้ไขรูปที่เพิ่งส่ง)
+    image_message คือ message ที่คาดว่าจะมีรูป/เอกสารแนบ (หรือ None ถ้าไม่มี)"""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    prompt = " ".join(context.args).strip()
     if not prompt:
         return await update.message.reply_text(
             "ใช้งาน: /imagine <คำอธิบายรูปที่ต้องการ>\n"
-            "เช่น /imagine แมวส้มใส่หมวกนักบินอวกาศ สไตล์การ์ตูน"
+            "เช่น /imagine แมวส้มใส่หมวกนักบินอวกาศ สไตล์การ์ตูน\n"
+            "หรือ Reply รูป/ส่งรูปพร้อม caption /imagine <สิ่งที่ต้องการแก้ไข> เพื่อแก้ไขรูปเดิม"
         )
+
+    image_bytes, image_mime, media_error = None, None, None
+    if image_message and (image_message.photo or image_message.document):
+        image_bytes, image_mime, media_error = await extract_media_from_message(image_message, context)
+        if media_error:
+            return await update.message.reply_text(media_error)
+        if image_bytes and not image_mime.startswith("image/"):
+            return await update.message.reply_text("❌ แก้ไขรูปได้เฉพาะไฟล์รูปภาพเท่านั้น (JPEG/PNG/WebP)")
 
     admin = await is_admin(update, context)
     allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
@@ -538,10 +550,17 @@ async def cmd_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง) ไว้มาใช้วันอื่นนะ หรือถ้ารีบก็ไปใช้งานบนเว็บไป ไอ้ควาย ไม่ต้องมาใช้กู นอกจากจะเปลือง Token แล้วยังเปลืองออกซิเจนเพราะมึงแย่งหายใจอีก🖕🏻"
         )
 
-    logger.info(f"AI IMAGINE | Chat ID: {chat_id} | User ID: {user_id} | Prompt: {prompt}")
+    mode = "edit" if image_bytes else "generate"
+    logger.info(f"AI IMAGINE | Chat ID: {chat_id} | User ID: {user_id} | Mode: {mode} | Prompt: {prompt}")
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
 
-    ok, image_bytes, error_text = await gemini.generate_image(prompt)
+    if image_bytes:
+        ok, result_bytes, error_text = await gemini.edit_image(prompt, image_bytes, image_mime)
+        action_tag = "AI_IMAGE_EDITED"
+    else:
+        ok, result_bytes, error_text = await gemini.generate_image(prompt)
+        action_tag = "AI_IMAGE_GENERATED"
+
     if not ok:
         return await update.message.reply_text(f"❌ {error_text}")
 
@@ -550,12 +569,29 @@ async def cmd_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = caption[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
 
     try:
-        await context.bot.send_photo(chat_id, photo=image_bytes, caption=caption)
+        await context.bot.send_photo(chat_id, photo=result_bytes, caption=caption)
     except TelegramError as e:
         logger.info(f"IMAGINE SEND ERROR: {e}")
         return await update.message.reply_text("❌ สร้างรูปสำเร็จแต่ส่งรูปเข้าแชทไม่สำเร็จ ลองใหม่อีกครั้ง")
 
-    write_audit_log(chat_id, user_id, actor="user", action="AI_IMAGE_GENERATED", detail=prompt)
+    write_audit_log(chat_id, user_id, actor="user", action=action_tag, detail=prompt)
+
+
+async def cmd_imagine(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สั่ง AI สร้าง/แก้ไขรูปภาพแล้วส่งเข้าแชทนี้
+    ใช้งาน: /imagine <คำอธิบาย> (สร้างรูปใหม่)
+    หรือ Reply รูปเดิมด้วย /imagine <สิ่งที่ต้องการแก้ไข> (แก้ไขรูป)"""
+    prompt = " ".join(context.args).strip()
+    await _run_imagine(update, context, prompt, update.message.reply_to_message)
+
+
+async def handle_imagine_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ส่งรูปพร้อม caption '/imagine <ข้อความ>' ในข้อความเดียว — แก้ไขรูปที่แนบมานั้น
+    (คำสั่งใน caption ไม่ถูก CommandHandler จับ เพราะ CommandHandler อ่านจาก
+    message.text เท่านั้น จึงต้องมี handler แยกที่จับจาก caption โดยตรง)"""
+    message = update.effective_message
+    prompt = IMAGINE_CAPTION_RE.sub("", message.caption or "", count=1).strip()
+    await _run_imagine(update, context, prompt, message)
     
 async def dashboard_command(update, context):
     chat, user = update.effective_chat, update.effective_user
@@ -989,7 +1025,12 @@ def main():
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & filters.CAPTION & ~filters.COMMAND,
+        filters.PHOTO & filters.CaptionRegex(IMAGINE_CAPTION_RE),
+        handle_imagine_caption,
+    ))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & filters.CAPTION
+        & ~filters.CaptionRegex(IMAGINE_CAPTION_RE) & ~filters.COMMAND,
         handle_media_message,
     ))
     app.add_error_handler(error_handler)
