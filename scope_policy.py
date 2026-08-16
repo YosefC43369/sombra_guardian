@@ -188,3 +188,25 @@ def scope_policy_db_int() -> None:
     logger.info("SCOPE POLICY DATABASE: OK")
     
 # ---------------- Program ----------------
+
+def create_program(chat_id: int, name: str, created_by: int, metadata: str = "") -> int:
+    """Creates a Program in PAUSED status. A brand-new program is never
+    ACTIVE by default — an admin must explicitly activate it via
+    set_program_status(), which keeps 'program exists' distinct from
+    'program may currently produce ALLOW', mirroring the artifact/review
+    split in the Authorization section below."""
+    now = int(time.())
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO bb_programs (chat_id, name, status, metadata, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, name, ProgramStatus.PAUSED.value, metadata, created_by, now, now),
+    )
+    program_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    write_audit_log(chat_id, created_by, actor="admin", action="PROGRAM_CREATED",
+                     detail=f"program_id={program_id} name={name!r}")
+    return program_id
+    
+def get_program(program_id: int) -> Optional
