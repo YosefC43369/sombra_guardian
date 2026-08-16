@@ -79,3 +79,112 @@ class AuthorizationStatus(str, Enum):
     EXPIRED = "EXPIRED"
     REVOKED = "REVOKED"
     REJECTED = "REJECTED"
+    
+class RuleType(str, Enum):
+    INCLUDE = "INCLUDE"
+    EXCLUDE = "EXCLUDE"
+
+
+class TargetType(str, Enum):
+    DOMAIN = "DOMAIN"
+    URL = "URL"
+    IP = "IP"
+    CIDR = "CIDR"
+
+
+class Decision(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class Reason(str, Enum):
+    OK = "OK"
+    PROGRAM_NOT_FOUND = "PROGRAM_NOT_FOUND"
+    PROGRAM_NOT_ACTIVE = "PROGRAM_NOT_ACTIVE"
+    AUTHORIZATION_NOT_FOUND = "AUTHORIZATION_NOT_FOUND"
+    AUTHORIZATION_NOT_REVIEWED = "AUTHORIZATION_NOT_REVIEWED"
+    AUTHORIZATION_PENDING = "AUTHORIZATION_PENDING"
+    AUTHORIZATION_EXPIRED = "AUTHORIZATION_EXPIRED"
+    AUTHORIZATION_REVOKED = "AUTHORIZATION_REVOKED"
+    AUTHORIZATION_REJECTED = "AUTHORIZATION_REJECTED"
+    AUTHORIZATION_NOT_EFFECTIVE = "AUTHORIZATION_NOT_EFFECTIVE"
+    TARGET_INVALID = "TARGET_INVALID"
+    TARGET_OUT_OF_SCOPE = "TARGET_OUT_OF_SCOPE"
+    TARGET_EXCLUDED = "TARGET_EXCLUDED"
+    NO_INCLUDE_MATCH = "NO_INCLUDE_MATCH"
+    POLICY_ERROR = "POLICY_ERROR"
+
+
+VALID_PROGRAM_STATUSES = {s.value for s in ProgramStatus}
+VALID_AUTH_STATUSES = {s.value for s in AuthorizationStatus}
+VALID_RULE_TYPES = {t.value for t in RuleType}
+VALID_TARGET_TYPES = {t.value for t in TargetType}
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+@dataclass
+class PolicyDecision:
+    decision: str # Decision.ALLOW.value / Decision.DENY.value
+    reason: str.  # Reason.*.value
+    detail: str = ""
+    
+    @property
+    def allowed(self) -> bool:
+        return self.decision == Decision.ALLOW.value
+        
+def _deny(reason: Reason, detail: str = "")
+    return PolicyDecision(decision=Decision.DENY.value, reason=reason.value, detail=detail)
+    
+# ---------------- Database ----------------
+
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+    
+def scope_policy_db_int() -> None:
+    """Create policy-engine tables only. Reuses security.py's DB_PATH and
+    audit_log table; never touches any other module's tables or data."""
+    conn = _conn()
+    conn.execute("""CREATE TABLE IF NOT EXISTS bb_programs (
+        program_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PAUSED',
+        metadata TEXT,
+        created_by INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bb_programs_chat ON bb_programs (chat_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS bb_authorizations (
+        authorization_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_id INTEGER NOT NULL,
+        source_type TEXT NOT NULL,
+        source_reference TEXT,
+        authorization_reference TEXT,
+        reviewed_by INTEGER,
+        reviewed_at INTEGER,
+        effective_at INTEGER,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (program_id) REFERENCES bb_programs(program_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bb_auth_program ON bb_authorizations (program_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS bb_scope_rules (
+        rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_id INTEGER NOT NULL,
+        rule_type TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (program_id) REFERENCES bb_programs(program_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bb_scope_program ON bb_scope_rules (program_id)")
+    conn.commit()
+    conn.close()
+    logger.info("SCOPE POLICY DATABASE: OK")
+    
+# ---------------- Program ----------------
