@@ -830,7 +830,7 @@ async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
         program_id = int(args[1])
         status = {"active": ProgramStatus.ACTIVE.value, "pause": ProgramStatus.PAUSED.value,
                   "archive": ProgramStatus.ARCHIVED.value}[sub]
-        ok = set_program_status(program_id status, user_id)
+        ok = set_program_status(program_id, status, user_id)
         if not ok:
             return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
         return await update.message.reply_text(f"✅ โปรแกรม #{program_id} -> {status}")
