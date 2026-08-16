@@ -83,6 +83,39 @@ class ScopePolicyTestCase(unittest.TestCase):
     def test_set_program_status_nonexistent_program(self):
         self.assertFalse(sp.set_program_status(999999, sp.ProgramStatus.ACTIVE.value, 999))
 
+    def test_archived_program_cannot_return_to_active(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
+        ok = sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999)
+        self.assertFalse(ok)
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.ARCHIVED.value)
+
+    def test_archived_program_cannot_return_to_paused(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
+        ok = sp.set_program_status(pid, sp.ProgramStatus.PAUSED.value, 999)
+        self.assertFalse(ok)
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.ARCHIVED.value)
+
+    def test_active_program_can_be_paused_then_reactivated(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999)
+        self.assertTrue(sp.set_program_status(pid, sp.ProgramStatus.PAUSED.value, 999))
+        self.assertTrue(sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999))
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.ACTIVE.value)
+
+    def test_paused_program_can_be_archived_directly(self):
+        pid = sp.create_program(1, "New Program", created_by=999)  # PAUSED by default
+        ok = sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
+        self.assertTrue(ok)
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.ARCHIVED.value)
+
+    def test_set_program_status_same_status_is_not_a_transition(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999)
+        ok = sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999)
+        self.assertFalse(ok)
+
     def test_list_programs_scoped_to_chat(self):
         sp.create_program(1, "Chat 1 Program", created_by=999)
         sp.create_program(2, "Chat 2 Program", created_by=999)
