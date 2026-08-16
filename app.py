@@ -1248,7 +1248,7 @@ def main():
     app.add_handler(CommandHandler("id", chat_id_command))
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
-app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
+    app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
     app.add_handler(CommandHandler("bbscope", cmd_bbscope))
     app.add_handler(CommandHandler("bbcheck", cmd_bbcheck)
