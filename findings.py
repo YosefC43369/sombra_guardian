@@ -115,3 +115,20 @@ MAX_EVIDENCE_BYTES = 15 * 1024 * 1024  # 15MB; matches gemini.py's MAX_MEDIA_BYT
 # module never writes evidence bytes to disk). Still enforced strictly:
 # no separators, no traversal segments, conservative charset only.
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,198}$")
+
+
+@dataclass
+class FindingResult:
+    ok: bool
+    finding_id: Optional[int] = None
+    reason: str = ""
+    detail: str = ""
+
+
+@dataclass
+class EvidenceResult:
+    ok: bool
+    evidence_id: Optional[int] = None
+    reason: str = ""
+    detail: str = ""
+    sha256: Optional[str] = None
