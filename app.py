@@ -812,9 +812,9 @@ async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if not args:
         return await update.message.reply_text(usage)
-        
+
     sub = args[0].lower()
-    if sub == "now":
+    if sub == "new":
         name = " ".join(args[1:]).strip()
         if not name:
             return await update.message.reply_text("ใช้งาน: /bbprogram new <ชื่อโปรแกรม>")
@@ -823,7 +823,7 @@ async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ สร้างโปรแกรมแล้ว #{program_id} “{name}” (สถานะ: PAUSED)\n"
             f"เปิดใช้งานด้วย: /bbprogram active {program_id}"
         )
-        
+
     if sub in ("active", "pause", "archive"):
         if len(args) < 2 or not args[1].isdigit():
             return await update.message.reply_text(f"ใช้งาน: /bbprogram {sub} <program_id>")
@@ -834,16 +834,17 @@ async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ok:
             return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
         return await update.message.reply_text(f"✅ โปรแกรม #{program_id} -> {status}")
-        
+
     if sub == "list":
         programs = list_programs(chat_id)
         if not programs:
             return await update.message.reply_text("ยังไม่มีโปรแกรมในกลุ่มนี้")
         lines = [f"#{p['program_id']} {p['name']} [{p['status']}]" for p in programs]
         return await update.message.reply_text("\n".join(lines))
-        
+
     return await update.message.reply_text(usage)
-    
+
+
 async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
@@ -852,13 +853,13 @@ async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usage = (
         "ใช้งาน:\n"
         "/bbauth import <program_id> <source_type> [source_reference ...]\n"
-        "/bbauth review <authorization_id> approve|reject\n"
+        "/bbauth review <authorization_id> approve|reject [notes ...]\n"
         "/bbauth revoke <authorization_id>\n"
         "/bbauth list <program_id>"
     )
     if not args:
         return await update.message.reply_text(usage)
-        
+
     sub = args[0].lower()
     if sub == "import":
         if len(args) < 3 or not args[1].isdigit():
@@ -878,15 +879,17 @@ async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📥 บันทึกเอกสารสิทธิ์ #{authorization_id} สถานะ PENDING_REVIEW\n"
             f"ต้องได้รับการตรวจทานก่อนจึงจะมีผล: /bbauth review {authorization_id} approve"
         )
-        
+
     if sub == "review":
         if len(args) < 3 or not args[1].isdigit() or args[2].lower() not in ("approve", "reject"):
             return await update.message.reply_text(
-                "ใช้งาน: /bbauth review <authorization_id> approve|reject"
+                "ใช้งาน: /bbauth review <authorization_id> approve|reject [notes ...]"
             )
         authorization_id = int(args[1])
         approve = args[2].lower() == "approve"
-        ok = review_authorization(authorization_id, approve=approve, reviewer_user_id=user_id)
+        review_notes = " ".join(args[3:])
+        ok = review_authorization(authorization_id, approve=approve, reviewer_user_id=user_id,
+                                   notes=review_notes)
         if not ok:
             return await update.message.reply_text(
                 f"ไม่สามารถตรวจทาน #{authorization_id} ได้ (ไม่พบ หรือไม่ได้อยู่ในสถานะ PENDING_REVIEW)"
@@ -913,13 +916,14 @@ async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text(f"ยังไม่มีเอกสารสิทธิ์สำหรับโปรแกรม #{program_id}")
         lines = [
             f"#{a['authorization_id']} [{a['status']}] source={a['source_type']} "
-            f"reviewed_by={a['reviewed_by'] or '-'}"
+            f"submitted_by={a['submitted_by'] or '-'} reviewed_by={a['reviewed_by'] or '-'}"
             for a in auths
         ]
         return await update.message.reply_text("\n".join(lines))
 
     return await update.message.reply_text(usage)
-    
+
+
 async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
@@ -933,7 +937,7 @@ async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if not args:
         return await update.message.reply_text(usage)
-    
+
     sub = args[0].lower()
     if sub == "add":
         if len(args) < 5 or not args[1].isdigit():
@@ -976,7 +980,8 @@ async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("\n".join(lines))
 
     return await update.message.reply_text(usage)
-    
+
+
 async def cmd_bbcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Read-only decision check. Admin-gated for now, like the rest of
     this command group — see the module-level note above this section."""
