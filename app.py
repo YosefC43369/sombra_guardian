@@ -27,24 +27,12 @@ from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 from news import news_db_init, run_news_check_cycle, news_background_loop
-from scope_policy import (
-    scope_policy_db_init,
-    ProgramStatus,
-    create_program,
-    get_program,
-    list_programs,
-    set_program_status,
-    import_authorization,
-    get_authorization,
-    list_authorizations,
-    review_authorization,
-    revoke_authorization,
-    add_scope_rule,
-    remove_scope_rule,
-    list_scope_rules,
-    evaluate_target,
-    VALID_RULE_TYPES,
-    VALID_TARGET_TYPES,
+from scope_policy import scope_policy_db_init
+from findings import (
+    findings_db_init, create_finding, get_finding, list_findings,
+    update_finding_status, mark_duplicate,
+    add_evidence, get_evidence, list_evidence, remove_evidence, verify_evidence,
+    VALID_SEVERITIES, VALID_STATUSES, VALID_EVIDENCE_TYPES, MAX_EVIDENCE_BYTES,
 )
 
 import coordinator
@@ -52,21 +40,6 @@ import coordinator
 from dashboard import get_dashboard_data, format_dashboard_message
 from security import write_audit_log
 from telegram.constants import ParseMode
-
-import findings
-from findings import (
-    findings_db_init,
-    FindingStatus,
-    create_finding,
-    get_finding,
-    list_findings,
-    update_finding_status,
-    mark_duplicate,
-    add_evidence,
-    list_evidence,
-    remove_evidence,
-    verify_evidence,
-)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
@@ -804,253 +777,104 @@ async def cmd_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
     
-# ---------------- Bug Bounty Scope Policy (Phase 2) ----------------
+# ---------------- Bug Bounty: Finding / Evidence Commands ----------------
 #
-# Telegram admin permission controls who may CREATE/MANAGE these records
-# (same as every other admin command in this file). It is deliberately
-# NOT what grants ALLOW — evaluate_target() in scope_policy.py has no
-# is_admin parameter and cannot be short-circuited by chat role. A
-# program only produces ALLOW once its Authorization has been reviewed
-# via /bbauth review ... approve by a second, explicit step.
-
-async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    args = context.args
-    usage = (
-        "ใช้งาน:\n"
-        "/bbprogram new <ชื่อโปรแกรม>\n"
-        "/bbprogram active|pause|archive <program_id>\n"
-        "/bbprogram list"
-    )
-    if not args:
-        return await update.message.reply_text(usage)
-
-    sub = args[0].lower()
-    if sub == "new":
-        name = " ".join(args[1:]).strip()
-        if not name:
-            return await update.message.reply_text("ใช้งาน: /bbprogram new <ชื่อโปรแกรม>")
-        program_id = create_program(chat_id, name, created_by=user_id)
-        return await update.message.reply_text(
-            f"✅ สร้างโปรแกรมแล้ว #{program_id} “{name}” (สถานะ: PAUSED)\n"
-            f"เปิดใช้งานด้วย: /bbprogram active {program_id}"
-        )
-
-    if sub in ("active", "pause", "archive"):
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text(f"ใช้งาน: /bbprogram {sub} <program_id>")
-        program_id = int(args[1])
-        status = {"active": ProgramStatus.ACTIVE.value, "pause": ProgramStatus.PAUSED.value,
-                  "archive": ProgramStatus.ARCHIVED.value}[sub]
-        ok = set_program_status(program_id, status, user_id)
-        if not ok:
-            return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
-        return await update.message.reply_text(f"✅ โปรแกรม #{program_id} -> {status}")
-
-    if sub == "list":
-        programs = list_programs(chat_id)
-        if not programs:
-            return await update.message.reply_text("ยังไม่มีโปรแกรมในกลุ่มนี้")
-        lines = [f"#{p['program_id']} {p['name']} [{p['status']}]" for p in programs]
-        return await update.message.reply_text("\n".join(lines))
-
-    return await update.message.reply_text(usage)
-
-
-async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    user_id = update.effective_user.id
-    args = context.args
-    usage = (
-        "ใช้งาน:\n"
-        "/bbauth import <program_id> <source_type> [source_reference ...]\n"
-        "/bbauth review <authorization_id> approve|reject [notes ...]\n"
-        "/bbauth revoke <authorization_id>\n"
-        "/bbauth list <program_id>"
-    )
-    if not args:
-        return await update.message.reply_text(usage)
-
-    sub = args[0].lower()
-    if sub == "import":
-        if len(args) < 3 or not args[1].isdigit():
-            return await update.message.reply_text(
-                "ใช้งาน: /bbauth import <program_id> <source_type> [source_reference ...]"
-            )
-        program_id = int(args[1])
-        source_type = args[2]
-        source_reference = " ".join(args[3:])
-        authorization_id = import_authorization(
-            program_id, source_type=source_type, actor_user_id=user_id,
-            source_reference=source_reference,
-        )
-        if authorization_id is None:
-            return await update.message.reply_text(f"ไม่พบโปรแกรม #{program_id}")
-        return await update.message.reply_text(
-            f"📥 บันทึกเอกสารสิทธิ์ #{authorization_id} สถานะ PENDING_REVIEW\n"
-            f"ต้องได้รับการตรวจทานก่อนจึงจะมีผล: /bbauth review {authorization_id} approve"
-        )
-
-    if sub == "review":
-        if len(args) < 3 or not args[1].isdigit() or args[2].lower() not in ("approve", "reject"):
-            return await update.message.reply_text(
-                "ใช้งาน: /bbauth review <authorization_id> approve|reject [notes ...]"
-            )
-        authorization_id = int(args[1])
-        approve = args[2].lower() == "approve"
-        review_notes = " ".join(args[3:])
-        ok = review_authorization(authorization_id, approve=approve, reviewer_user_id=user_id,
-                                   notes=review_notes)
-        if not ok:
-            return await update.message.reply_text(
-                f"ไม่สามารถตรวจทาน #{authorization_id} ได้ (ไม่พบ หรือไม่ได้อยู่ในสถานะ PENDING_REVIEW)"
-            )
-        return await update.message.reply_text(
-            f"✅ เอกสารสิทธิ์ #{authorization_id} -> {'ACTIVE' if approve else 'REJECTED'}"
-        )
-
-    if sub == "revoke":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bbauth revoke <authorization_id>")
-        authorization_id = int(args[1])
-        ok = revoke_authorization(authorization_id, actor_user_id=user_id)
-        if not ok:
-            return await update.message.reply_text(f"ไม่สามารถเพิกถอน #{authorization_id} ได้")
-        return await update.message.reply_text(f"✅ เพิกถอนเอกสารสิทธิ์ #{authorization_id} แล้ว")
-
-    if sub == "list":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bbauth list <program_id>")
-        program_id = int(args[1])
-        auths = list_authorizations(program_id)
-        if not auths:
-            return await update.message.reply_text(f"ยังไม่มีเอกสารสิทธิ์สำหรับโปรแกรม #{program_id}")
-        lines = [
-            f"#{a['authorization_id']} [{a['status']}] source={a['source_type']} "
-            f"submitted_by={a['submitted_by'] or '-'} reviewed_by={a['reviewed_by'] or '-'}"
-            for a in auths
-        ]
-        return await update.message.reply_text("\n".join(lines))
-
-    return await update.message.reply_text(usage)
-
-
-async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    user_id = update.effective_user.id
-    args = context.args
-    usage = (
-        "ใช้งาน:\n"
-        "/bbscope add <program_id> include|exclude domain|url|ip|cidr <pattern>\n"
-        "/bbscope remove <rule_id>\n"
-        "/bbscope list <program_id>"
-    )
-    if not args:
-        return await update.message.reply_text(usage)
-
-    sub = args[0].lower()
-    if sub == "add":
-        if len(args) < 5 or not args[1].isdigit():
-            return await update.message.reply_text(
-                "ใช้งาน: /bbscope add <program_id> include|exclude domain|url|ip|cidr <pattern>"
-            )
-        program_id = int(args[1])
-        rule_type = args[2].upper()
-        target_type = args[3].upper()
-        pattern = args[4]
-        if rule_type not in VALID_RULE_TYPES or target_type not in VALID_TARGET_TYPES:
-            return await update.message.reply_text(
-                "rule_type ต้องเป็น include/exclude, target_type ต้องเป็น domain/url/ip/cidr"
-            )
-        rule_id = add_scope_rule(program_id, rule_type, target_type, pattern, actor_user_id=user_id)
-        if rule_id is None:
-            return await update.message.reply_text(
-                "❌ เพิ่มกฎไม่สำเร็จ — ตรวจสอบ program_id หรือรูปแบบ pattern "
-                "(URL ต้องมี http:// หรือ https:// นำหน้า)"
-            )
-        return await update.message.reply_text(f"✅ เพิ่มกฎ #{rule_id}: {rule_type} {target_type} {pattern}")
-
-    if sub == "remove":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bbscope remove <rule_id>")
-        rule_id = int(args[1])
-        ok = remove_scope_rule(rule_id, actor_user_id=user_id)
-        if not ok:
-            return await update.message.reply_text(f"ไม่พบกฎ #{rule_id}")
-        return await update.message.reply_text(f"✅ ลบกฎ #{rule_id} แล้ว")
-
-    if sub == "list":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bbscope list <program_id>")
-        program_id = int(args[1])
-        rules = list_scope_rules(program_id)
-        if not rules:
-            return await update.message.reply_text(f"ยังไม่มีกฎ scope สำหรับโปรแกรม #{program_id}")
-        lines = [f"#{r['rule_id']} {r['rule_type']} {r['target_type']} {r['pattern']}" for r in rules]
-        return await update.message.reply_text("\n".join(lines))
-
-    return await update.message.reply_text(usage)
-
-
-async def cmd_bbcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Read-only decision check. Admin-gated for now, like the rest of
-    this command group — see the module-level note above this section."""
-    if not await is_admin(update, context):
-        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    args = context.args
-    if len(args) < 2 or not args[0].isdigit():
-        return await update.message.reply_text("ใช้งาน: /bbcheck <program_id> <target>")
-    program_id = int(args[0])
-    target = args[1]
-    decision = evaluate_target(program_id, target)
-    icon = "✅ ALLOW" if decision.allowed else "⛔ DENY"
-    text = f"{icon}\nprogram: #{program_id}\ntarget: {target}\nreason: {decision.reason}"
-    if decision.detail:
-        text += f"\ndetail: {decision.detail}"
-    await update.message.reply_text(text)
-
-# ---------------- Bug Bounty Finding / Evidence (Phase 4) ----------------
+# Telegram-facing surface for findings.py / scope_policy.py (Phase 4).
+# Deliberately thin: every ALLOW/DENY decision and every state-machine
+# rule lives in findings.py / scope_policy.py. This layer only does
+# Telegram plumbing (parsing args, downloading replied-to files,
+# formatting Thai replies) and decides which actions require chat-admin
+# status.
 #
-# create_finding()/add_evidence() have no is_admin parameter, same as
-# every function in findings.py — being a group admin, a finding's
-# creator, or an evidence submitter is never what grants ALLOW; that is
-# decided entirely by scope_policy.evaluate_target() inside
-# create_finding(). Because of that, /bbfinding new and /bbevidence add
-# are deliberately NOT admin-gated here: a regular member reporting a
-# real finding on an in-scope, authorized target must be able to record
-# it, and an out-of-scope/unauthorized attempt is denied for the exact
-# same reason regardless of who sent the command. Case-adjudication
-# actions (status transitions, duplicate marking, evidence removal) ARE
-# admin-gated, matching the /bbprogram, /bbauth, /bbscope commands above.
+# Permission model (see Phase 4 report for rationale): creating a
+# Finding or attaching Evidence is treated like reporting a bug, not
+# like moderating the chat -- so it is open to any chat member and the
+# real gate is evaluate_target() (Program/Authorization/Scope), not
+# Telegram role. Triage decisions that change a Finding's state
+# (status transitions, duplicate marking) and destructive Evidence
+# removal are admin-gated, matching this bot's existing convention for
+# every other state-mutating command (/addword, /mute, etc.).
+#
+# NOTE: there is currently no Telegram command to create a Program,
+# import/review an Authorization, or add Scope Rules (scope_policy.py
+# exposes create_program/import_authorization/review_authorization/
+# add_scope_rule, but app.py never calls them). An admin must obtain a
+# valid program_id some other way (direct DB/script access) before
+# /bbfinding new can succeed for that program. This is a known gap --
+# see "Remaining limitations" in the Phase 4 report.
 
-async def _download_evidence_bytes(message, context: ContextTypes.DEFAULT_TYPE):
-    """Downloads raw bytes from a Telegram photo/document for Evidence
-    attachment. Unlike extract_media_from_message (gemini.py's media
-    ingestion path used for /ask), this does not restrict by mime type —
-    Evidence is stored data, never sent to an LLM and never executed —
-    and is capped by findings.MAX_EVIDENCE_BYTES rather than
-    gemini.MAX_MEDIA_BYTES. Returns (bytes, filename, error_text); all
-    three None means "no photo/document on this message"."""
+_FINDING_DENY_TH = {
+    "TITLE_REQUIRED": "กรุณาระบุชื่อเรื่อง (title)",
+    "TITLE_TOO_LONG": "ชื่อเรื่องยาวเกินไป",
+    "INVALID_SEVERITY": "ระดับความรุนแรงไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_SEVERITIES)) + ")",
+    "INVALID_STATUS": "สถานะไม่ถูกต้อง",
+    "DESCRIPTION_TOO_LONG": "รายละเอียดยาวเกินไป",
+    "TARGET_REQUIRED": "กรุณาระบุเป้าหมาย (target)",
+    "PROGRAM_NOT_FOUND": "ไม่พบ Program นี้",
+    "PROGRAM_NOT_ACTIVE": "Program นี้ยังไม่ ACTIVE",
+    "AUTHORIZATION_NOT_FOUND": "Program นี้ยังไม่มี Authorization",
+    "AUTHORIZATION_NOT_REVIEWED": "Authorization ยังไม่ผ่านการ review",
+    "AUTHORIZATION_PENDING": "Authorization ยังรอ review อยู่",
+    "AUTHORIZATION_EXPIRED": "Authorization หมดอายุแล้ว",
+    "AUTHORIZATION_REVOKED": "Authorization ถูก revoke แล้ว",
+    "AUTHORIZATION_REJECTED": "Authorization ถูก reject แล้ว",
+    "AUTHORIZATION_NOT_EFFECTIVE": "Authorization ยังไม่ถึงวันมีผล",
+    "TARGET_INVALID": "รูปแบบ target ไม่ถูกต้อง",
+    "TARGET_OUT_OF_SCOPE": "target นี้ไม่อยู่ใน scope ของ Program",
+    "TARGET_EXCLUDED": "target นี้ถูก EXCLUDE ออกจาก scope โดยเฉพาะ",
+    "NO_INCLUDE_MATCH": "target นี้ไม่ตรงกับ INCLUDE rule ใดเลย",
+    "POLICY_ERROR": "เกิดข้อผิดพลาดภายในระหว่างประเมินนโยบาย (fail-closed: DENY)",
+    "FINDING_NOT_FOUND": "ไม่พบ Finding นี้",
+    "INVALID_TRANSITION": "เปลี่ยนสถานะแบบนี้ไม่ได้จากสถานะปัจจุบัน",
+    "USE_MARK_DUPLICATE": "ตั้งสถานะ DUPLICATE ตรงๆ ไม่ได้ ให้ใช้ /bbfinding duplicate แทน",
+    "RESOLUTION_TOO_LONG": "ข้อความสรุปผลยาวเกินไป",
+    "DUPLICATE_SELF_REFERENCE": "Finding อ้างอิงตัวเองเป็น duplicate ไม่ได้",
+    "DUPLICATE_TARGET_NOT_FOUND": "ไม่พบ Finding ปลายทางที่จะ mark เป็น duplicate ของ",
+}
+
+_EVIDENCE_DENY_TH = {
+    "FINDING_NOT_FOUND": "ไม่พบ Finding นี้",
+    "INVALID_EVIDENCE_TYPE": "ประเภทหลักฐานไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_EVIDENCE_TYPES)) + ")",
+    "DESCRIPTION_TOO_LONG": "รายละเอียดยาวเกินไป",
+    "UNSAFE_FILENAME": "ชื่อไฟล์ไม่ปลอดภัย/รูปแบบไม่ถูกต้อง",
+    "FILE_TOO_LARGE": f"ไฟล์ใหญ่เกินไป (จำกัด {MAX_EVIDENCE_BYTES // (1024*1024)}MB)",
+    "EVIDENCE_NOT_FOUND": "ไม่พบ Evidence นี้",
+    "NO_STORED_HASH": "Evidence นี้ไม่มี hash ที่บันทึกไว้ให้เทียบ",
+}
+
+
+def _deny_text_finding(reason: str, detail: str = "") -> str:
+    return "❌ " + _FINDING_DENY_TH.get(reason, reason)
+
+
+def _deny_text_evidence(reason: str, detail: str = "") -> str:
+    return "❌ " + _EVIDENCE_DENY_TH.get(reason, reason)
+
+
+async def _download_evidence_file(message, context: ContextTypes.DEFAULT_TYPE):
+    """Downloads a photo/document attached to `message` for Evidence
+    storage. Independent of gemini.py's mime allowlist on purpose --
+    findings.py must stay usable even if the AI provider is down/
+    removed, and evidence can legitimately be any file type (logs,
+    HAR files, etc.), not just what the AI vision/PDF path accepts.
+    Returns (bytes, filename, error_text); error_text is a ready-to-
+    send Thai message on failure, None on success. All three are None
+    if there is simply nothing attached to download."""
     file_id, filename, file_size = None, None, None
     if message.photo:
         largest = message.photo[-1]
         file_id, file_size = largest.file_id, largest.file_size
+        filename = f"{largest.file_unique_id}.jpg"
     elif message.document:
         doc = message.document
-        file_id, filename, file_size = doc.file_id, doc.file_name, doc.file_size
-        
+        file_id, file_size, filename = doc.file_id, doc.file_size, doc.file_name
+
     if not file_id:
         return None, None, None
-        
-    limit_mb = findings.MAX_EVIDENCE_BYTES // (1024 * 1024)
-    if file_size and file_size > findings.MAX_EVIDENCE_BYTES:
-        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
-        
+
+    if file_size and file_size > MAX_EVIDENCE_BYTES:
+        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {MAX_EVIDENCE_BYTES // (1024*1024)}MB)"
+
     try:
         tg_file = await context.bot.get_file(file_id)
         file_bytes = bytes(await tg_file.download_as_bytearray())
@@ -1058,222 +882,197 @@ async def _download_evidence_bytes(message, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"EVIDENCE DOWNLOAD ERROR: {e}")
         return None, None, "❌ ดาวน์โหลดไฟล์จาก Telegram ไม่สำเร็จ ลองใหม่อีกครั้ง"
 
-    if len(file_bytes) > findings.MAX_EVIDENCE_BYTES:
-        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {limit_mb}MB)"
+    if len(file_bytes) > MAX_EVIDENCE_BYTES:
+        return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {MAX_EVIDENCE_BYTES // (1024*1024)}MB)"
 
     return file_bytes, filename, None
-    
-async def cmd_bbfind(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    user_id = update.effective_user.id
-    usage = (
-        "ใช้งาน:\n"
-        "/bbfinding new <program_id> <target> <severity> <หัวข้อ...>\n"
-        "  (Reply ข้อความอื่นพร้อมคำสั่งนี้ เพื่อใช้ข้อความนั้นเป็นคำอธิบายเพิ่มเติม)\n"
-        "/bbfinding list <program_id>\n"
-        "/bbfinding show <finding_id>\n"
-        "/bbfinding status <finding_id> triaged|confirmed|rejected|resolved [หมายเหตุ...]\n"
-        "/bbfinding duplicate <finding_id> <duplicate_of>"
-    )
+
+
+async def cmd_bbfinding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bbfinding new|list|show|status|duplicate -- see Phase 4 report
+    for the exact argument syntax of each subcommand."""
+    args = context.args or []
     if not args:
-        return await update.message.reply_text(usage)
-        
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/bbfinding new <program_id> <target> <severity> <หัวข้อ...>\n"
+            "/bbfinding list <program_id>\n"
+            "/bbfinding show <finding_id>\n"
+            "/bbfinding status <finding_id> <สถานะใหม่> [สรุปผล...]\n"
+            "/bbfinding duplicate <finding_id> <duplicate_of>"
+        )
     sub = args[0].lower()
-    
+    user = update.effective_user
+
     if sub == "new":
-        if len(args) < 5 or not args[1].isdigit():
+        if len(args) < 5:
             return await update.message.reply_text(
                 "ใช้งาน: /bbfinding new <program_id> <target> <severity> <หัวข้อ...>"
             )
+        if not args[1].isdigit():
+            return await update.message.reply_text("❌ program_id ต้องเป็นตัวเลข")
         program_id = int(args[1])
         target = args[2]
         severity = args[3].upper()
-        title = " ".join(args[4:]).strip()
-        reply_msg = update.message.reply_to_message
-        decription = reply_msg.text if reply_msg and reply_msg.text else ""
-        result = create_finding(program_id, target, title, created_by=user_id,
-                                 severity=severity, description=description)
+        title = " ".join(args[4:])
+        result = create_finding(program_id, target, title, created_by=user.id, severity=severity)
         if not result.ok:
-            text = f"❌ สร้าง Finding ไม่สำเร็จ: {result.reason}"
-            if result.detail:
-                text += f" ({result.detail})"
-            return await update.message.reply_text(text)
-        return await update.message.reply_text(
-            f"✅ สร้าง Finding #{result.finding_id} แล้ว [{severity}] {title}\n"
-            f"target: {target} | program: #{program_id}"
+            return await update.message.reply_text(_deny_text_finding(result.reason, result.detail))
+        await update.message.reply_text(
+            f"✅ สร้าง Finding #{result.finding_id} แล้ว (สถานะ OPEN, severity {severity})"
         )
 
-    if sub == "list":
+    elif sub == "list":
         if len(args) < 2 or not args[1].isdigit():
             return await update.message.reply_text("ใช้งาน: /bbfinding list <program_id>")
-        program_id = int(args[1])
-        items = list_findings(program_id)
-        if not items:
-            return await update.message.reply_text(f"ยังไม่มี Finding สำหรับโปรแกรม #{program_id}")
-        lines = [
-            f"#{i['finding_id']} [{i['status']}/{i['severity']}] {i['title']} -> {i['target']}"
-            for i in items
-        ]
-        for chunk in split_telegram_message("\n".join(lines)):
-            await update.message.reply_text(chunk)
-        return
+        findings = list_findings(int(args[1]))
+        if not findings:
+            return await update.message.reply_text("ยังไม่มี Finding ใน Program นี้")
+        lines = [f"#{f['finding_id']} [{f['status']}] {f['title']} ({f['severity']})" for f in findings]
+        await update.message.reply_text("Findings:\n" + "\n".join(lines))
 
-    if sub == "show":
+    elif sub == "show":
         if len(args) < 2 or not args[1].isdigit():
             return await update.message.reply_text("ใช้งาน: /bbfinding show <finding_id>")
-        finding_id = int(args[1])
-        finding = get_finding(finding_id)
+        finding = get_finding(int(args[1]))
         if not finding:
-            return await update.message.reply_text(f"ไม่พบ Finding #{finding_id}")
-        evidence_items = list_evidence(finding_id)
+            return await update.message.reply_text("❌ ไม่พบ Finding นี้")
+        evidence_count = len(list_evidence(finding["finding_id"]))
         text = (
-            f"🔎 Finding #{finding['finding_id']} [{finding['status']}/{finding['severity']}]\n"
+            f"Finding #{finding['finding_id']} [{finding['status']}]\n"
             f"หัวข้อ: {finding['title']}\n"
-            f"target: {finding['target']} | program: #{finding['program_id']}\n"
-            f"สร้างโดย: {finding['created_by']}\n"
+            f"Target: {finding['target']}\n"
+            f"Severity: {finding['severity']}\n"
+            f"รายละเอียด: {finding['description'] or '-'}\n"
+            f"Evidence: {evidence_count} รายการ"
         )
-        if finding.get("description"):
-            text += f"รายละเอียด: {finding['description']}\n"
-        if finding["status"] == FindingStatus.DUPLICATE.value:
-            text += f"duplicate_of: #{finding['duplicate_of']}\n"
-        if finding.get("resolution"):
-            text += f"resolution: {finding['resolution']}\n"
-        text += f"หลักฐาน: {len(evidence_items)} รายการ"
-        for chunk in split_telegram_message(text):
-            await update.message.reply_text(chunk)
-        return
+        if finding["status"] == "DUPLICATE":
+            text += f"\nDuplicate of: #{finding['duplicate_of']}"
+        if finding["resolution"]:
+            text += f"\nสรุปผล: {finding['resolution']}"
+        await update.message.reply_text(text)
 
-    if sub == "status":
+    elif sub == "status":
         if not await is_admin(update, context):
             return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        valid_subs = {
-            "triaged": FindingStatus.TRIAGED.value, "confirmed": FindingStatus.CONFIRMED.value,
-            "rejected": FindingStatus.REJECTED.value, "resolved": FindingStatus.RESOLVED.value,
-        }
-        if len(args) < 3 or not args[1].isdigit() or args[2].lower() not in valid_subs:
+        if len(args) < 3 or not args[1].isdigit():
             return await update.message.reply_text(
-                "ใช้งาน: /bbfinding status <finding_id> triaged|confirmed|rejected|resolved [หมายเหตุ...]"
+                "ใช้งาน: /bbfinding status <finding_id> <สถานะใหม่> [สรุปผล...]"
             )
         finding_id = int(args[1])
-        new_status = valid_subs[args[2].lower()]
+        new_status = args[2].upper()
         resolution = " ".join(args[3:])
-        result = update_finding_status(finding_id, new_status, actor_user_id=user_id,
-                                        resolution=resolution)
+        result = update_finding_status(finding_id, new_status, actor_user_id=user.id, resolution=resolution)
         if not result.ok:
-            return await update.message.reply_text(f"❌ เปลี่ยนสถานะไม่สำเร็จ: {result.reason}")
-        return await update.message.reply_text(f"✅ Finding #{finding_id} -> {new_status}")
+            return await update.message.reply_text(_deny_text_finding(result.reason, result.detail))
+        await update.message.reply_text(f"✅ Finding #{finding_id} -> {new_status}")
 
-    if sub == "duplicate":
+    elif sub == "duplicate":
         if not await is_admin(update, context):
             return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
         if len(args) < 3 or not args[1].isdigit() or not args[2].isdigit():
-            return await update.message.reply_text(
-                "ใช้งาน: /bbfinding duplicate <finding_id> <duplicate_of>"
-            )
+            return await update.message.reply_text("ใช้งาน: /bbfinding duplicate <finding_id> <duplicate_of>")
         finding_id, duplicate_of = int(args[1]), int(args[2])
-        result = mark_duplicate(finding_id, duplicate_of, actor_user_id=user_id)
+        result = mark_duplicate(finding_id, duplicate_of, actor_user_id=user.id)
         if not result.ok:
-            return await update.message.reply_text(f"❌ ทำเครื่องหมายซ้ำไม่สำเร็จ: {result.reason}")
-        return await update.message.reply_text(f"✅ Finding #{finding_id} เป็นรายการซ้ำของ #{duplicate_of}")
+            return await update.message.reply_text(_deny_text_finding(result.reason, result.detail))
+        await update.message.reply_text(f"✅ Finding #{finding_id} ถูก mark เป็น duplicate ของ #{duplicate_of}")
 
-    return await update.message.reply_text(usage)
-    
+    else:
+        await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (new/list/show/status/duplicate)")
+
+
 async def cmd_bbevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    user_id = update.effective_user.id
-    usage = (
-        "ใช้งาน:\n"
-        "/bbevidence add <finding_id> <type> [คำอธิบาย...]\n"
-        "  (Reply รูป/ไฟล์พร้อมคำสั่งนี้เพื่อแนบเป็นหลักฐาน — ระบบคำนวณ SHA-256 ให้อัตโนมัติ)\n"
-        "  ประเภท: text|file|image|request|response|log|screenshot|other\n"
-        "/bbevidence list <finding_id>\n"
-        "/bbevidence verify <evidence_id>\n"
-        "  (Reply ไฟล์/รูปที่ต้องการตรวจสอบพร้อมคำสั่งนี้)\n"
-        "/bbevidence remove <evidence_id>  (Admin เท่านั้น)"
-    )
+    """/bbevidence add|list|verify|remove -- see Phase 4 report for the
+    exact argument syntax of each subcommand."""
+    args = context.args or []
     if not args:
-        return await update.message.reply_text(usage)
-        
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/bbevidence add <finding_id> <ประเภท> [รายละเอียด...] (Reply ไฟล์/รูปได้)\n"
+            "/bbevidence list <finding_id>\n"
+            "/bbevidence verify <evidence_id> (Reply ไฟล์/รูปที่จะเทียบ)\n"
+            "/bbevidence remove <evidence_id>"
+        )
     sub = args[0].lower()
-    
+    user = update.effective_user
+    reply_msg = update.message.reply_to_message
+
     if sub == "add":
-        if len(args) < 3 or not args[1].isdigit():
+        if len(args) < 3:
             return await update.message.reply_text(
-                "ใช้งาน: /bbevidence add <finding_id> <type> [คำอธิบาย...]"
+                "ใช้งาน: /bbevidence add <finding_id> <ประเภท> [รายละเอียด...] "
+                "(ใช้ได้: " + ", ".join(sorted(VALID_EVIDENCE_TYPES)) + ")"
             )
+        if not args[1].isdigit():
+            return await update.message.reply_text("❌ finding_id ต้องเป็นตัวเลข")
         finding_id = int(args[1])
         evidence_type = args[2].upper()
         description = " ".join(args[3:])
 
-        content_bytes, filename, error = None, None, None
-        reply_msg = update.message.reply_to_message
+        content_bytes, filename = None, None
         if reply_msg and (reply_msg.photo or reply_msg.document):
-            content_bytes, filename, error = await _download_evidence_bytes(reply_msg, context)
-            if error:
-                return await update.message.reply_text(error)
-            if not description and reply_msg.caption:
-                description = reply_msg.caption
+            content_bytes, filename, err = await _download_evidence_file(reply_msg, context)
+            if err:
+                return await update.message.reply_text(err)
 
-        result = add_evidence(finding_id, evidence_type, created_by=user_id,
+        result = add_evidence(finding_id, evidence_type, created_by=user.id,
                                description=description, filename=filename,
                                content_bytes=content_bytes)
         if not result.ok:
-            return await update.message.reply_text(f"❌ เพิ่มหลักฐานไม่สำเร็จ: {result.reason}")
-        text = f"✅ เพิ่มหลักฐาน #{result.evidence_id} ให้ Finding #{finding_id} แล้ว"
+            return await update.message.reply_text(_deny_text_evidence(result.reason, result.detail))
+        text = f"✅ เพิ่ม Evidence #{result.evidence_id} ให้ Finding #{finding_id} แล้ว"
         if result.sha256:
             text += f"\nSHA-256: {result.sha256}"
-        return await update.message.reply_text(text)
+        await update.message.reply_text(text)
 
-    if sub == "list":
+    elif sub == "list":
         if len(args) < 2 or not args[1].isdigit():
             return await update.message.reply_text("ใช้งาน: /bbevidence list <finding_id>")
-        finding_id = int(args[1])
-        items = list_evidence(finding_id)
-        if not items:
-            return await update.message.reply_text(f"ยังไม่มีหลักฐานสำหรับ Finding #{finding_id}")
-        lines = [
-            f"#{e['evidence_id']} [{e['evidence_type']}] {e['filename'] or '-'} "
-            f"sha256={(e['sha256'][:12] + '…') if e['sha256'] else '-'}"
-            for e in items
-        ]
-        for chunk in split_telegram_message("\n".join(lines)):
-            await update.message.reply_text(chunk)
-        return
+        evidence = list_evidence(int(args[1]))
+        if not evidence:
+            return await update.message.reply_text("ยังไม่มี Evidence สำหรับ Finding นี้")
+        lines = []
+        for e in evidence:
+            label = e["filename"] or e["evidence_type"]
+            hash_note = f" sha256={e['sha256'][:12]}..." if e["sha256"] else ""
+            lines.append(f"#{e['evidence_id']} [{e['evidence_type']}] {label}{hash_note}")
+        await update.message.reply_text("Evidence:\n" + "\n".join(lines))
 
-    if sub == "verify":
+    elif sub == "verify":
         if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bbevidence verify <evidence_id>")
-        evidence_id = int(args[1])
-        reply_msg = update.message.reply_to_message
+            return await update.message.reply_text(
+                "ใช้งาน: Reply ไฟล์/รูปที่จะเทียบแล้วพิมพ์ /bbevidence verify <evidence_id>"
+            )
         if not reply_msg or not (reply_msg.photo or reply_msg.document):
             return await update.message.reply_text(
-                "Reply ไฟล์/รูปที่ต้องการตรวจสอบมาพร้อมคำสั่งนี้ด้วย"
+                "ใช้งาน: Reply ไฟล์/รูปที่จะเทียบแล้วพิมพ์ /bbevidence verify <evidence_id>"
             )
-        content_bytes, _filename, error = await _download_evidence_bytes(reply_msg, context)
-        if error:
-            return await update.message.reply_text(error)
-        if content_bytes is None:
-            return await update.message.reply_text("❌ ไม่พบไฟล์ที่ต้อง Reply มาด้วย")
-        result = verify_evidence(evidence_id, content_bytes)
+        content_bytes, _filename, err = await _download_evidence_file(reply_msg, context)
+        if err:
+            return await update.message.reply_text(err)
+        result = verify_evidence(int(args[1]), content_bytes)
         if not result.ok:
-            return await update.message.reply_text(f"❌ ตรวจสอบไม่สำเร็จ: {result.reason}")
-        icon = "✅ ตรงกัน" if result.match else "⚠️ ไม่ตรงกัน"
-        return await update.message.reply_text(
-            f"{icon}\nstored:       {result.stored_sha256}\nrecalculated: {result.recalculated_sha256}"
-        )
+            return await update.message.reply_text(_deny_text_evidence(result.reason))
+        if result.match:
+            await update.message.reply_text(f"✅ ตรงกัน (SHA-256: {result.recalculated_sha256})")
+        else:
+            await update.message.reply_text(
+                f"⚠️ ไม่ตรงกัน\nที่บันทึกไว้: {result.stored_sha256}\nไฟล์นี้: {result.recalculated_sha256}"
+            )
 
-    if sub == "remove":
+    elif sub == "remove":
         if not await is_admin(update, context):
             return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
         if len(args) < 2 or not args[1].isdigit():
             return await update.message.reply_text("ใช้งาน: /bbevidence remove <evidence_id>")
-        evidence_id = int(args[1])
-        ok = remove_evidence(evidence_id, actor_user_id=user_id)
+        ok = remove_evidence(int(args[1]), actor_user_id=user.id)
         if not ok:
-            return await update.message.reply_text(f"ไม่พบหลักฐาน #{evidence_id}")
-        return await update.message.reply_text(f"✅ ลบหลักฐาน #{evidence_id} แล้ว")
+            return await update.message.reply_text("❌ ไม่พบ Evidence นี้")
+        await update.message.reply_text(f"✅ ลบ Evidence #{args[1]} แล้ว")
 
-    return await update.message.reply_text(usage)
+    else:
+        await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/list/verify/remove)")
 
 # ---------------- Message Handler ----------------
 
