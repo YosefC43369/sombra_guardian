@@ -1251,7 +1251,7 @@ def main():
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
     app.add_handler(CommandHandler("bbscope", cmd_bbscope))
-    app.add_handler(CommandHandler("bbcheck", cmd_bbcheck)
+    app.add_handler(CommandHandler("bbcheck", cmd_bbcheck))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.CaptionRegex(IMAGINE_CAPTION_RE),
