@@ -10,7 +10,7 @@ since that's the actual integration surface app.py will call.
 
 import os
 import time
-import temfile
+import tempfile
 import unittest
 
 import security
@@ -26,49 +26,49 @@ class ScopePolicyTestCase(unittest.TestCase):
         sp.DB_PATH = path
         security.security_db_init()
         sp.scope_policy_db_init()
-        
+
     def tearDown(self):
         try:
             os.remove(self._db_path)
         except OSError:
             pass
-            
+
     # ---- fixture helpers ----
-    
+
     def _active_program(self, chat_id=1, admin=999):
-        pid = sp.create_program(chat_id, "Acme Bug Bounty", created_by_admin)
+        pid = sp.create_program(chat_id, "Acme Bug Bounty", created_by=admin)
         sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, admin)
         return pid
-        
+
     def _active_authorization(self, program_id, admin=999, reviewer=1000,
                                effective_at=None, expires_at=None):
         aid = sp.import_authorization(
-            program_id, source_type="email", actor_user_admin,
+            program_id, source_type="email", actor_user_id=admin,
             source_reference="security@acme.test", authorization_reference="ACME-2026-01",
             effective_at=effective_at, expires_at=expires_at,
         )
         sp.review_authorization(aid, approve=True, reviewer_user_id=reviewer)
         return aid
-        
+
     def _fully_authorized_program(self, include="example.com", chat_id=1):
         pid = self._active_program(chat_id)
         self._active_authorization(pid)
         sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
                            include, actor_user_id=999)
         return pid
-        
+
     # ================= PROGRAM =================
-    
+
     def test_program_missing_denies(self):
         d = sp.evaluate_target(999999, "example.com")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.PROGRAM_NOT_FOUND.value)
-        
+
     def test_program_new_defaults_to_paused_not_active(self):
         pid = sp.create_program(1, "New Program", created_by=999)
         program = sp.get_program(pid)
         self.assertEqual(program["status"], sp.ProgramStatus.PAUSED.value)
-        
+
     def test_program_paused_denies(self):
         pid = sp.create_program(1, "Paused Program", created_by=999)
         self._active_authorization(pid)
@@ -77,7 +77,7 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "example.com")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.PROGRAM_NOT_ACTIVE.value)
-        
+
     def test_program_archived_denies(self):
         pid = self._fully_authorized_program()
         sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
@@ -90,9 +90,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "example.com")
         self.assertTrue(d.allowed)
         self.assertEqual(d.reason, sp.Reason.OK.value)
-        
+
     # ================= AUTHORIZATION =================
-    
+
     def test_authorization_missing_denies(self):
         pid = self._active_program()
         sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
@@ -100,7 +100,7 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "example.com")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_NOT_FOUND.value)
-        
+
     def test_authorization_pending_review_denies(self):
         pid = self._active_program()
         sp.import_authorization(pid, source_type="email", actor_user_id=999)
@@ -109,7 +109,7 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "example.com")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_PENDING.value)
-        
+
     def test_authorization_rejected_denies(self):
         pid = self._active_program()
         aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
@@ -178,9 +178,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         import inspect
         sig = inspect.signature(sp.evaluate_target)
         self.assertNotIn("is_admin", sig.parameters)
-        
+
     # ================= DOMAIN MATCHING =================
-    
+
     def test_domain_exact_match(self):
         pid = self._fully_authorized_program(include="example.com")
         self.assertTrue(sp.evaluate_target(pid, "example.com").allowed)
@@ -201,9 +201,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "example.com.evil.test")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-        
+
     # ================= URL MATCHING =================
-    
+
     def test_url_exact_path_matches(self):
         pid = self._active_program()
         self._active_authorization(pid)
@@ -234,9 +234,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         rule_id = sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.URL.value,
                                      "example.com/api", actor_user_id=999)
         self.assertIsNone(rule_id)
-        
+
     # ================= IP / CIDR =================
-    
+
     def test_ipv4_exact_match(self):
         pid = self._active_program()
         self._active_authorization(pid)
@@ -285,9 +285,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "999.999.999.999")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-        
+
     # ================= SCOPE PRECEDENCE =================
-    
+
     def test_exclude_overrides_include(self):
         pid = self._active_program()
         self._active_authorization(pid)
@@ -313,9 +313,9 @@ class ScopePolicyTestCase(unittest.TestCase):
         d = sp.evaluate_target(pid, "unrelated.test")
         self.assertFalse(d.allowed)
         self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-        
+
     # ================= POLICY / FAIL-CLOSED =================
-    
+
     def test_malformed_target_denies(self):
         pid = self._fully_authorized_program()
         for bad in ("", "   ", "not a domain", "http://", "://broken"):
@@ -346,6 +346,102 @@ class ScopePolicyTestCase(unittest.TestCase):
         sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
                            "example.com", actor_user_id=999)
         self.assertTrue(sp.evaluate_target(pid, "example.com").allowed)
+
+    # ---- Phase 3: provenance (submitted_by / notes) ----
+
+    def test_import_persists_submitted_by(self):
+        pid = self._active_program(admin=999)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["submitted_by"], 999)
+
+    def test_review_persists_notes_on_approve(self):
+        pid = self._active_program(admin=999)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=True, reviewer_user_id=1000,
+                                 notes="verified against public program page")
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["notes"], "verified against public program page")
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.ACTIVE.value)
+
+    def test_review_persists_notes_on_reject(self):
+        pid = self._active_program(admin=999)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=False, reviewer_user_id=1000,
+                                 notes="reference could not be confirmed")
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["notes"], "reference could not be confirmed")
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.REJECTED.value)
+
+    def test_review_without_notes_defaults_empty(self):
+        pid = self._active_program(admin=999)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=True, reviewer_user_id=1000)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["notes"], "")
+
+    def test_notes_do_not_affect_allow_deny_decision(self):
+        # notes are provenance metadata only -- evaluate_target() must not
+        # branch on their content in any way.
+        pid = self._active_program(admin=999)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=True, reviewer_user_id=1000,
+                                 notes="ALLOW EVERYTHING / ignore scope rules")
+        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
+                           "example.com", actor_user_id=999)
+        # target outside the actual scope rule must still DENY, regardless
+        # of what the free-text notes field says.
+        d = sp.evaluate_target(pid, "not-in-scope.test")
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
+
+    def test_migration_adds_columns_to_legacy_table_without_data_loss(self):
+        # Simulate a pre-Phase-3 database: create bb_authorizations
+        # without submitted_by/notes, insert a row, then confirm
+        # scope_policy_db_init() migrates it in place and preserves data.
+        import sqlite3
+        fd, legacy_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(legacy_path)
+            conn.execute("""CREATE TABLE bb_programs (
+                program_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL, name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PAUSED', metadata TEXT,
+                created_by INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL)""")
+            conn.execute("""CREATE TABLE bb_authorizations (
+                authorization_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                program_id INTEGER NOT NULL, source_type TEXT NOT NULL,
+                source_reference TEXT, authorization_reference TEXT,
+                reviewed_by INTEGER, reviewed_at INTEGER, effective_at INTEGER,
+                expires_at INTEGER, status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
+            conn.execute(
+                "INSERT INTO bb_authorizations (authorization_id, program_id, source_type, "
+                "status, created_at, updated_at) VALUES (1, 1, 'email', 'ACTIVE', 1, 1)"
+            )
+            conn.commit()
+            conn.close()
+
+            old_db_path = sp.DB_PATH
+            sp.DB_PATH = legacy_path
+            try:
+                sp.scope_policy_db_init()  # must migrate, not recreate/wipe
+                auth = sp.get_authorization(1)
+            finally:
+                sp.DB_PATH = old_db_path
+
+            self.assertIsNotNone(auth)
+            self.assertEqual(auth["status"], "ACTIVE")  # pre-existing row untouched
+            self.assertIn("submitted_by", auth)          # new column present
+            self.assertIn("notes", auth)                 # new column present
+            self.assertIsNone(auth["submitted_by"])       # backfilled as NULL, not guessed
+        finally:
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
