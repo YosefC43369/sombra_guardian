@@ -38,3 +38,80 @@ scope_policy.py):
   file-blob storage subsystem is out of scope for this phase (see
   Phase 4 report, "Remaining Limitations").
 """
+
+import re
+import time
+import sqlite3
+import hashlib
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, List
+
+from security import DB_PATH, write_audit_log
+from scope_policy import get_program, evalute_target
+
+logger = logging.getLogger("modbot.findings")
+
+# ---------------- Enums / Constants ----------------
+
+class Severity(str, Enum):
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+    
+
+class FindingStatus(str, Enum):
+    OPEN = "OPEN"
+    TRIAGED = "TRIAGED"
+    CONFIRMED = "CONFIRMED"
+    DUPLICATE = "DUPLICATE"
+    RESOLVED = "RESOLVED"
+    REJECTED = "REJECTED"
+
+
+class EvidenceType(str, Enum):
+    TEXT = "TEXT"
+    FILE = "FILE"
+    IMAGE = "IMAGE"
+    REQUEST = "REQUEST"
+    RESPONSE = "RESPONSE"
+    LOG = "LOG"
+    SCREENSHOT = "SCREENSHOT"
+    OTHER = "OTHER"
+    
+VALID_SEVERITIES = {s.value for s in Severity}
+VALID_STATUSES = {s.value for s in FindingStatus}
+VALID_EVIDENCE_TYPES = {t.value for t in EvidenceType}
+
+# Deterministic finding lifecycle. DUPLICATE is reachable from any
+# non-terminal state (a duplicate can be recognized at any triage
+# stage, not only from TRIAGED) but is deliberately NOT settable via
+# update_finding_status() — see the guard in that function. RESOLVED /
+# REJECTED / DUPLICATE are terminal: no further transition is legal,
+# so a resolved finding can't be silently reopened by an arbitrary
+# status string.
+_ALLOWED_TRANSITIONS = {
+    FindingStatus.OPEN.value: {FindingStatus.TRIAGED.value, FindingStatus.REJECTED.value,
+                                FindingStatus.DUPLICATE.value},
+    FindingStatus.TRIAGED.value: {FindingStatus.CONFIRMED.value, FindingStatus.REJECTED.value,
+                                   FindingStatus.DUPLICATE.value},
+    FindingStatus.CONFIRMED.value: {FindingStatus.RESOLVED.value, FindingStatus.REJECTED.value,
+                                     FindingStatus.DUPLICATE.value},
+    FindingStatus.RESOLVED.value: set(),
+    FindingStatus.REJECTED.value: set(),
+    FindingStatus.DUPLICATE.value: set(),
+}
+
+MAX_TITLE_LEN = 200
+MAX_DESCRIPTION_LEN = 4000
+MAX_EVIDENCE_DESCRIPTION_LEN = 2000
+MAX_RESOLUTION_LEN = 2000
+MAX_EVIDENCE_BYTES = 15 * 1024 * 1024  # 15MB; matches gemini.py's MAX_MEDIA_BYTES cap by convention
+
+# Filenames are metadata only (never used as a filesystem path — this
+# module never writes evidence bytes to disk). Still enforced strictly:
+# no separators, no traversal segments, conservative charset only.
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,198}$")
