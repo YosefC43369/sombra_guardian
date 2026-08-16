@@ -49,7 +49,7 @@ from enum import Enum
 from typing import Optional, List
 
 from security import DB_PATH, write_audit_log
-from scope_policy import get_program, evalute_target
+from scope_policy import get_program, evaluate_target
 
 logger = logging.getLogger("modbot.findings")
 
@@ -241,7 +241,7 @@ def create_finding(program_id: int, target: str, title: str, created_by: int,
     if len(title) > MAX_TITLE_LEN:
         return _fr(False, "TITLE_TOO_LONG", detail=f"max={MAX_TITLE_LEN}")
         
-    if severity not in VALID_SERVERITIES:
+    if severity not in VALID_SEVERITIES:
         return _fr(False, "INVALID_SEVERITY", detail=f"severity={severity!r}")
 
     if status not in VALID_STATUSES:
@@ -438,13 +438,13 @@ def add_evidence(finding_id: int, evidence_type: str, created_by: int,
                 f"type={evidence_type}")
     return _er(True, "OK", evidence_id=evidence_id, sha256=sha256_hex)
     
-def get_edvidence(edvidence_id: int) -> Optional[dict]:
+def get_evidence(evidence_id: int) -> Optional[dict]:
     conn = _conn()
     row = conn.execute("SELECT * FROM bb_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
     
-def list_edvidence(finding_id: int) -> List[dict]:
+def list_evidence(finding_id: int) -> List[dict]:
     conn = _conn()
     rows = conn.execute(
         "SELECT * FROM bb_evidence WHERE finding_id=? ORDER BY evidence_id", (finding_id,)
@@ -479,10 +479,7 @@ def verify_evidence(evidence_id: int, content_bytes: bytes) -> VerifyResult:
     if not ev:
         return VerifyResult(False, reason="EVIDENCE_NOT_FOUND")
     if not ev["sha256"]:
-        return VerifyResult(False, reason="NO_STORED_HASH",
-                             detail="this evidence record has no file content to verify against"
-                             if False else None) if False else VerifyResult(
-            False, reason="NO_STORED_HASH")
+        return VerifyResult(False, reason="NO_STORED_HASH")
             
     recalculated = hashlib.sha256(content_bytes).hexdigest()
     match = recalculated == ev["sha256"]
