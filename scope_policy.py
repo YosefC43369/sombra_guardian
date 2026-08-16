@@ -132,10 +132,10 @@ class PolicyDecision:
     def allowed(self) -> bool:
         return self.decision == Decision.ALLOW.value
         
-def _deny(reason: Reason, detail: str = "") -> "PolicyDecision":
+def _deny(reason: Reason, detail: str = "") -> PolicyDecision:
     return PolicyDecision(decision=Decision.DENY.value, reason=reason.value, detail=detail)
 
-def _allow(detail: str = "") -> "PolicyDecision":
+def _allow(detail: str = "") -> PolicyDecision:
     return PolicyDecision(decision=Decision.ALLOW.value, reason=Reason.OK.value, detail=detail)
     
 # ---------------- Database ----------------
@@ -145,20 +145,6 @@ def _conn():
     conn.row_factory = sqlite3.Row
     return conn
     
-def _migrate_bb_authorizations_columns(conn) -> None:
-    """Backward-compatible schema migration for installs whose
-    bb_authorizations table predates the submitted_by/notes columns.
-    SQLite has no 'ADD COLUMN IF NOT EXISTS', so existing columns are
-    checked via PRAGMA table_info first. Never drops or rewrites
-    existing rows/columns -- additive only."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(bb_authorizations)")}
-    if "submitted_by" not in existing:
-        conn.execute("ALTER TABLE bb_authorizations ADD COLUMN submitted_by INTEGER")
-    if "notes" not in existing:
-        conn.execute("ALTER TABLE bb_authorizations ADD COLUMN notes TEXT")
-    conn.commit()
-
-
 def scope_policy_db_init() -> None:
     """Create policy-engine tables only. Reuses security.py's DB_PATH and
     audit_log table; never touches any other module's tables or data."""
@@ -180,8 +166,6 @@ def scope_policy_db_init() -> None:
         source_type TEXT NOT NULL,
         source_reference TEXT,
         authorization_reference TEXT,
-        submitted_by INTEGER,
-        notes TEXT,
         reviewed_by INTEGER,
         reviewed_at INTEGER,
         effective_at INTEGER,
@@ -192,7 +176,6 @@ def scope_policy_db_init() -> None:
         FOREIGN KEY (program_id) REFERENCES bb_programs(program_id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bb_auth_program ON bb_authorizations (program_id)")
-    _migrate_bb_authorizations_columns(conn)
     conn.execute("""CREATE TABLE IF NOT EXISTS bb_scope_rules (
         rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
         program_id INTEGER NOT NULL,
@@ -270,12 +253,7 @@ def import_authorization(program_id: int, source_type: str, actor_user_id: int,
     one, and the bot never claims to have independently verified
     source_reference/authorization_reference. review_authorization()
     (a separate, explicitly logged human action) is required before
-    this artifact can participate in any ALLOW decision.
-
-    submitted_by (= actor_user_id) is persisted on the row itself so
-    provenance ("who submitted this artifact?") can be read directly
-    off bb_authorizations rather than reconstructed from audit_log
-    text — audit_log still gets its own entry below regardless."""
+    this artifact can participate in any ALLOW decision."""
     program = get_program(program_id)
     if not program:
         return None
@@ -283,10 +261,9 @@ def import_authorization(program_id: int, source_type: str, actor_user_id: int,
     conn = _conn()
     cur = conn.execute(
         "INSERT INTO bb_authorizations (program_id, source_type, source_reference, "
-        "authorization_reference, submitted_by, effective_at, expires_at, status, "
-        "created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (program_id, source_type, source_reference, authorization_reference, actor_user_id,
+        "authorization_reference, effective_at, expires_at, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (program_id, source_type, source_reference, authorization_reference,
          effective_at, expires_at, AuthorizationStatus.PENDING_REVIEW.value, now, now),
     )
     authorization_id = cur.lastrowid
@@ -323,11 +300,8 @@ def review_authorization(authorization_id: int, approve: bool, reviewer_user_id:
     rejection) so there is always an accountable record of who decided.
     This does NOT and cannot independently verify the underlying
     external source — it records that a named human reviewed it.
-
-    notes is optional free-text review rationale (e.g. why an artifact
-    was rejected, or what was checked before approval); it is stored
-    on the row and echoed into the audit entry, but never affects the
-    ALLOW/DENY decision itself — evaluate_target() does not read it."""
+    `notes` is reviewer commentary for the audit trail only; it is
+    never read back by evaluate_target() or any other decision path."""
     auth = get_authorization(authorization_id)
     if not auth or auth["status"] != AuthorizationStatus.PENDING_REVIEW.value:
         return False
@@ -335,17 +309,17 @@ def review_authorization(authorization_id: int, approve: bool, reviewer_user_id:
     new_status = AuthorizationStatus.ACTIVE.value if approve else AuthorizationStatus.REJECTED.value
     conn = _conn()
     conn.execute(
-        "UPDATE bb_authorizations SET status=?, reviewed_by=?, reviewed_at=?, notes=?, updated_at=? "
+        "UPDATE bb_authorizations SET status=?, reviewed_by=?, reviewed_at=?, updated_at=? "
         "WHERE authorization_id=?",
-        (new_status, reviewer_user_id, now, notes, now, authorization_id),
+        (new_status, reviewer_user_id, now, now, authorization_id),
     )
     conn.commit()
     conn.close()
     program = get_program(auth["program_id"])
     chat_id = program["chat_id"] if program else 0
     detail = f"authorization_id={authorization_id} -> {new_status}"
-    if notes:
-        detail += f" notes={notes!r}"
+    if notes.strip():
+        detail += f" notes={notes.strip()!r}"
     write_audit_log(chat_id, reviewer_user_id, actor="admin", action="AUTHORIZATION_REVIEWED",
                      detail=detail)
     return True
@@ -559,7 +533,7 @@ def _path_is_prefix(rule_path: str, target_path: str) -> bool:
     target_segs = _path_segments(target_path)
     if len(rule_segs) > len(target_segs):
         return False
-    return all(r == t for r, t in zip(rule_segs, target_segs))
+    return target_segs[:len(rule_segs)] == rule_segs
 
 def _ip_in_network(ip_str: str, network_str: str) -> bool:
     try:
