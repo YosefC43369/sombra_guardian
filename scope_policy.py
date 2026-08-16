@@ -51,3 +51,31 @@ Design constraints (matches security.py / quota.py / analytics.py):
 - CREATE TABLE IF NOT EXISTS only; reuses security.py's DB_PATH and
   audit_log table — no second database, no second audit system.
 """
+
+import re
+import time
+import sqlite3
+import logging
+import ipaddress
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, List
+from urllib.parse import urlsplit
+
+from security import DB_PATH, write_audit_log
+
+logger = logging.getLogger("modbot.scope_policy")
+
+# ---------------- States ----------------
+
+class ProgramStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    ARCHIVED = "ARCHIVED"
+  
+class AuthorizationStatus(str, Enum):
+    PENDING_REVIEW = "PENDING_REVIEW"
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    REJECTED = "REJECTED"
