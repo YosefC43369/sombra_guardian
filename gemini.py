@@ -469,7 +469,7 @@ async def edit_image(prompt: str, image_bytes: bytes, image_mime: str) -> Tuple[
     
     try:
         result = await asyncio.wait_for(
-            client.image.edit(
+            client.images.edit(
                 model=model,
                 image=(f"image.{ext}", image_bytes, image_mime),
                 prompt=prompt.strip(),
@@ -503,8 +503,8 @@ async def edit_image(prompt: str, image_bytes: bytes, image_mime: str) -> Tuple[
         
     b64 = result.data[0].b64_json if result.data else None
     if not b64:
-        logger.exception("IMAGE EDIT UNEXPECTED ERROR")
-        return False, None, _GENERIC_ERROR_TEXT
+        logger.warning("IMAGE EDIT EMPTY RESPONSE")
+        return False, None, "AI ไม่ได้ส่งรูปภาพกลับมา ลองใหม่อีกครั้ง"
         
     try:
         edited_bytes = base64.b64decode(b64)
