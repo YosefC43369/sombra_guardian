@@ -445,6 +445,74 @@ async def generate_image(prompt: str) -> Tuple[bool, Optional[bytes], str]:
         return False, None, "ถอดรหัสรูปภาพที่ AI สร้างไม่สำเร็จ ลองใหม่อีกครั้ง"
 
     return True, image_bytes, ""
+    
+# ---------------- AI image editing ----------------
+    
+async def edit_image(prompt: str, image_bytes: bytes, image_mime: str) -> Tuple[bool, Optional[bytes], str]:
+    """Asks the model to edit an existing image per `prompt`, via OpenAI's
+    Images API (client.images.edit — same gpt-image-2 model, image-to-image
+    workflow, separate call from generate_image()'s text-to-image one).
+    Returns (success, image_bytes, message) with the same never-raises
+    contract as generate_image()."""
+    validation_error = _validate_input(prompt)
+    if validation_error:
+        return False, None, validation_error
+        
+    try:
+        client = _get_client()
+    except RuntimeError:
+        logger.error("IMAGE EDIT BLOCKED: GPT_API_KEY is not set")
+        return False, None, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
+        
+    model = os.getenv("GPT_IMAGE_MODEL", GPT_IMAGE_MODEL_DEFAULT)
+    ext = {"image/png": "png", "image/webp": "webp"}.get(image_mime, "jpg")
+    
+    try:
+        result = await asyncio.wait_for(
+            client.image.edit(
+                model=model,
+                image=(f"image.{ext}", image_bytes, image_mime),
+                prompt=prompt.strip(),
+            ),
+            timeout=GPT_IMAGE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"IMAGE EDIT TIMEOUT after {GPT_IMAGE_TIMEOUT_SECONDS}s")
+        return False, None, "AI แก้ไขรูปช้าเกินไปว่ะ ลองใหม่อีกครั้งดู"
+    except BadRequestError as e:
+        logger.warning(f"IMAGE EDIT REJECTED | {e}")
+        return False, None, "คำสั่งนี้อาจขัดนโยบายเนื้อหาของ AI หรือรูปภาพมีปัญหา ลองเปลี่ยนคำสั่ง/รูปดู"
+    except (AuthenticationError, PermissionDeniedError) as e:
+        logger.warning(f"IMAGE EDIT AUTH ERROR | {e}")
+        return False, None, "OpenAI API Key ไม่ถูกต้องหรือมึงไม่มีสิทธิ์ใช้งาน"
+    except RateLimitError as e:
+        logger.warning(f"IMAGE EDIT RATE LIMIT | {e}")
+        return False, None, "ใช้งานเกินโควตาหรือถูกจำกัดอัตราการใช้งานแล้ว ค่อยมาใช้วันอื่นใหม่นะ ไอ้โง่"
+    except InternalServerError as e:
+        logger.warning(f"IMAGE EDIT SERVER ERROR | {e}")
+        return False, None, "OpenAI API ไม่พร้อมใช้งานในขณะนี้ กรุณาลองใหม่ภายหลัง"
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.warning(f"IMAGE EDIT CONNECTION ERROR | {e}")
+        return False, None, "เชื่อมต่อ OpenAI API ไม่ได้ กรุณาลองใหม่อีกครั้ง"
+    except APIError as e:
+        logger.warning(f"IMAGE EDIT API ERROR | {e}")
+        return False, None, _GENERIC_ERROR_TEXT
+    except Exception:
+        logger.exception("IMAGE EDIT UNEXPECTED ERROR")
+        return False, None, _GENERIC_ERROR_TEXT
+        
+    b64 = result.data[0].b64_json if result.data else None
+    if not b64:
+        logger.exception("IMAGE EDIT UNEXPECTED ERROR")
+        return False, None, _GENERIC_ERROR_TEXT
+        
+    try:
+        edited_bytes = base64.b64decode(b64)
+    except Exception:
+        logger.exception("IMAGE EDIT DECODE ERROR")
+        return False, None, "ถอดรหัสรูปภาพที่ AI แก้ไขไม่สำเร็จ ลองใหม่อีกครั้ง"
+        
+    return True, edited_bytes, ""
 
 # ---------------- Automatic spam/scam classification ----------------
 
