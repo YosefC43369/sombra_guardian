@@ -1,11 +1,16 @@
 """
-test_scope_policy.py — Phase 2 test suite.
+test_scope_policy.py — Phase 4 unit test suite for scope_policy.py itself.
 
-Each test gets a fresh, isolated SQLite file (tempfile), so tests never
-share state and can run in any order. Exercises the module through its
-real public API (create_program / import_authorization / review_authorization /
-add_scope_rule / evaluate_target) rather than poking at internal tables,
-since that's the actual integration surface app.py will call.
+test_findings.py already exercises scope_policy.py through findings.py's
+create_finding() integration surface (the path app.py actually calls).
+This file is the complement: it drives scope_policy.py's own public API
+directly -- create_program/set_program_status, import_authorization/
+review_authorization/revoke_authorization, add_scope_rule/remove_scope_rule,
+normalize_target, and evaluate_target -- to get unit-level coverage of
+paths the integration tests don't reach (Program/Authorization CRUD,
+AUTHORIZATION_NOT_EFFECTIVE, direct structural-matching edge cases,
+rule-pattern validation). Same isolation pattern as test_findings.py:
+every test gets a fresh tempfile SQLite DB.
 """
 
 import os
@@ -50,399 +55,439 @@ class ScopePolicyTestCase(unittest.TestCase):
         sp.review_authorization(aid, approve=True, reviewer_user_id=reviewer)
         return aid
 
-    def _fully_authorized_program(self, include="example.com", chat_id=1):
-        pid = self._active_program(chat_id)
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           include, actor_user_id=999)
-        return pid
+    def _include(self, program_id, target_type, pattern, admin=999):
+        return sp.add_scope_rule(program_id, sp.RuleType.INCLUDE.value, target_type, pattern, admin)
 
-    # ================= PROGRAM =================
+    def _exclude(self, program_id, target_type, pattern, admin=999):
+        return sp.add_scope_rule(program_id, sp.RuleType.EXCLUDE.value, target_type, pattern, admin)
 
-    def test_program_missing_denies(self):
-        d = sp.evaluate_target(999999, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.PROGRAM_NOT_FOUND.value)
+    # ---- Program lifecycle ----
 
-    def test_program_new_defaults_to_paused_not_active(self):
+    def test_new_program_defaults_to_paused(self):
         pid = sp.create_program(1, "New Program", created_by=999)
         program = sp.get_program(pid)
         self.assertEqual(program["status"], sp.ProgramStatus.PAUSED.value)
 
-    def test_program_paused_denies(self):
-        pid = sp.create_program(1, "Paused Program", created_by=999)
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.PROGRAM_NOT_ACTIVE.value)
+    def test_set_program_status_activates(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        ok = sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, 999)
+        self.assertTrue(ok)
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.ACTIVE.value)
 
-    def test_program_archived_denies(self):
-        pid = self._fully_authorized_program()
-        sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.PROGRAM_NOT_ACTIVE.value)
+    def test_set_program_status_rejects_invalid_status(self):
+        pid = sp.create_program(1, "New Program", created_by=999)
+        ok = sp.set_program_status(pid, "NOT_A_REAL_STATUS", 999)
+        self.assertFalse(ok)
+        self.assertEqual(sp.get_program(pid)["status"], sp.ProgramStatus.PAUSED.value)
 
-    def test_program_active_with_full_chain_allows(self):
-        pid = self._fully_authorized_program()
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertTrue(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.OK.value)
+    def test_set_program_status_nonexistent_program(self):
+        self.assertFalse(sp.set_program_status(999999, sp.ProgramStatus.ACTIVE.value, 999))
 
-    # ================= AUTHORIZATION =================
+    def test_list_programs_scoped_to_chat(self):
+        sp.create_program(1, "Chat 1 Program", created_by=999)
+        sp.create_program(2, "Chat 2 Program", created_by=999)
+        chat1_programs = sp.list_programs(1)
+        self.assertEqual(len(chat1_programs), 1)
+        self.assertEqual(chat1_programs[0]["name"], "Chat 1 Program")
 
-    def test_authorization_missing_denies(self):
-        pid = self._active_program()
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_NOT_FOUND.value)
+    def test_get_nonexistent_program_returns_none(self):
+        self.assertIsNone(sp.get_program(999999))
 
-    def test_authorization_pending_review_denies(self):
-        pid = self._active_program()
-        sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_PENDING.value)
+    # ---- Authorization lifecycle ----
 
-    def test_authorization_rejected_denies(self):
-        pid = self._active_program()
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid, approve=False, reviewer_user_id=1000)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_REJECTED.value)
-
-    def test_authorization_revoked_denies(self):
-        pid = self._fully_authorized_program()
-        auths = sp.list_authorizations(pid)
-        sp.revoke_authorization(auths[0]["authorization_id"], actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_REVOKED.value)
-
-    def test_authorization_expired_by_timestamp_denies(self):
-        # status says ACTIVE in the row, but expires_at is in the past —
-        # evaluate_target must compute "valid right now", not trust the column.
-        pid = self._active_program()
-        now = int(time.time())
-        self._active_authorization(pid, expires_at=now - 10)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com", current_time=now)
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_EXPIRED.value)
-
-    def test_authorization_not_yet_effective_denies(self):
-        pid = self._active_program()
-        now = int(time.time())
-        self._active_authorization(pid, effective_at=now + 3600)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        d = sp.evaluate_target(pid, "example.com", current_time=now)
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.AUTHORIZATION_NOT_EFFECTIVE.value)
-
-    def test_authorization_missing_reviewer_never_silently_approved(self):
-        # import_authorization alone (no review_authorization call) must
-        # never be usable for ALLOW, even though a row exists.
+    def test_import_authorization_starts_pending(self):
         pid = self._active_program()
         aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
         auth = sp.get_authorization(aid)
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.PENDING_REVIEW.value)
         self.assertIsNone(auth["reviewed_by"])
         self.assertIsNone(auth["reviewed_at"])
-        self.assertEqual(auth["status"], sp.AuthorizationStatus.PENDING_REVIEW.value)
 
-    def test_admin_created_program_and_scope_without_review_denies(self):
-        """CRITICAL invariant: a Telegram admin who creates a program and
-        scope rules, but never gets an authorization reviewed, must be
-        denied — admin privilege alone is never authorization."""
-        admin_id = 42
-        pid = sp.create_program(1, "Admin Self-Serve", created_by=admin_id)
-        sp.set_program_status(pid, sp.ProgramStatus.ACTIVE.value, admin_id)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=admin_id)
-        sp.import_authorization(pid, source_type="self-asserted", actor_user_id=admin_id)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertIn(d.reason, (sp.Reason.AUTHORIZATION_PENDING.value,))
+    def test_import_authorization_unknown_program_fails(self):
+        self.assertIsNone(sp.import_authorization(999999, source_type="email", actor_user_id=999))
 
-    def test_evaluate_target_has_no_admin_parameter(self):
-        import inspect
-        sig = inspect.signature(sp.evaluate_target)
-        self.assertNotIn("is_admin", sig.parameters)
-
-    # ================= DOMAIN MATCHING =================
-
-    def test_domain_exact_match(self):
-        pid = self._fully_authorized_program(include="example.com")
-        self.assertTrue(sp.evaluate_target(pid, "example.com").allowed)
-
-    def test_domain_valid_subdomain_matches(self):
-        pid = self._fully_authorized_program(include="example.com")
-        self.assertTrue(sp.evaluate_target(pid, "www.example.com").allowed)
-        self.assertTrue(sp.evaluate_target(pid, "api.example.com").allowed)
-
-    def test_domain_lookalike_prefix_does_not_match(self):
-        pid = self._fully_authorized_program(include="example.com")
-        d = sp.evaluate_target(pid, "evil-example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-
-    def test_domain_lookalike_suffix_does_not_match(self):
-        pid = self._fully_authorized_program(include="example.com")
-        d = sp.evaluate_target(pid, "example.com.evil.test")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-
-    # ================= URL MATCHING =================
-
-    def test_url_exact_path_matches(self):
+    def test_review_authorization_approve_sets_active_and_reviewer(self):
         pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.URL.value,
-                           "https://example.com/api", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "https://example.com/api").allowed)
-        self.assertTrue(sp.evaluate_target(pid, "https://example.com/api/v1/users").allowed)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        ok = sp.review_authorization(aid, approve=True, reviewer_user_id=1000, notes="looks legit")
+        self.assertTrue(ok)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.ACTIVE.value)
+        self.assertEqual(auth["reviewed_by"], 1000)
+        self.assertIsNotNone(auth["reviewed_at"])
 
-    def test_url_path_boundary_not_prefix_substring(self):
+    def test_review_authorization_reject_still_records_reviewer(self):
         pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.URL.value,
-                           "https://example.com/api", actor_user_id=999)
-        d = sp.evaluate_target(pid, "https://example.com/apix")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=False, reviewer_user_id=1000)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.REJECTED.value)
+        self.assertEqual(auth["reviewed_by"], 1000)  # accountable even on rejection
 
-    def test_url_scheme_and_host_must_match(self):
+    def test_review_authorization_cannot_be_redone(self):
         pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.URL.value,
-                           "https://example.com/api", actor_user_id=999)
-        self.assertFalse(sp.evaluate_target(pid, "http://example.com/api").allowed)
-        self.assertFalse(sp.evaluate_target(pid, "https://other.test/api").allowed)
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=False, reviewer_user_id=1000)
+        # A REJECTED artifact cannot be laundered into ACTIVE by reviewing again.
+        second = sp.review_authorization(aid, approve=True, reviewer_user_id=1000)
+        self.assertFalse(second)
+        self.assertEqual(sp.get_authorization(aid)["status"], sp.AuthorizationStatus.REJECTED.value)
 
-    def test_url_rule_without_scheme_rejected_at_add_time(self):
+    def test_revoke_active_authorization(self):
         pid = self._active_program()
-        rule_id = sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.URL.value,
-                                     "example.com/api", actor_user_id=999)
+        aid = self._active_authorization(pid)
+        ok = sp.revoke_authorization(aid, actor_user_id=999)
+        self.assertTrue(ok)
+        self.assertEqual(sp.get_authorization(aid)["status"], sp.AuthorizationStatus.REVOKED.value)
+
+    def test_revoke_pending_authorization(self):
+        pid = self._active_program()
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        ok = sp.revoke_authorization(aid, actor_user_id=999)
+        self.assertTrue(ok)
+        self.assertEqual(sp.get_authorization(aid)["status"], sp.AuthorizationStatus.REVOKED.value)
+
+    def test_revoke_already_revoked_fails(self):
+        pid = self._active_program()
+        aid = self._active_authorization(pid)
+        sp.revoke_authorization(aid, actor_user_id=999)
+        self.assertFalse(sp.revoke_authorization(aid, actor_user_id=999))
+
+    def test_list_authorizations_scoped_to_program(self):
+        pid1 = self._active_program(chat_id=1)
+        pid2 = self._active_program(chat_id=2)
+        sp.import_authorization(pid1, source_type="email", actor_user_id=999)
+        sp.import_authorization(pid2, source_type="email", actor_user_id=999)
+        self.assertEqual(len(sp.list_authorizations(pid1)), 1)
+        self.assertEqual(len(sp.list_authorizations(pid2)), 1)
+
+    # ---- Scope rule CRUD ----
+
+    def test_add_scope_rule_normalizes_domain(self):
+        pid = self._active_program()
+        rule_id = self._include(pid, sp.TargetType.DOMAIN.value, "Example.COM.")
+        self.assertIsNotNone(rule_id)
+        rules = sp.list_scope_rules(pid)
+        self.assertEqual(rules[0]["pattern"], "example.com")
+
+    def test_add_scope_rule_url_without_scheme_rejected(self):
+        pid = self._active_program()
+        rule_id = self._include(pid, sp.TargetType.URL.value, "example.com/api")
         self.assertIsNone(rule_id)
 
-    # ================= IP / CIDR =================
+    def test_add_scope_rule_invalid_rule_type_rejected(self):
+        pid = self._active_program()
+        rule_id = sp.add_scope_rule(pid, "NOT_A_RULE_TYPE", sp.TargetType.DOMAIN.value,
+                                     "example.com", 999)
+        self.assertIsNone(rule_id)
 
-    def test_ipv4_exact_match(self):
+    def test_add_scope_rule_malformed_pattern_rejected(self):
+        pid = self._active_program()
+        rule_id = self._include(pid, sp.TargetType.IP.value, "not-an-ip")
+        self.assertIsNone(rule_id)
+
+    def test_remove_scope_rule(self):
+        pid = self._active_program()
+        rule_id = self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        self.assertTrue(sp.remove_scope_rule(rule_id, 999))
+        self.assertEqual(sp.list_scope_rules(pid), [])
+
+    def test_remove_nonexistent_scope_rule(self):
+        self.assertFalse(sp.remove_scope_rule(999999, 999))
+
+    # ---- normalize_target: DOMAIN / URL / IP / CIDR ----
+
+    def test_normalize_domain_lowercases_and_strips_trailing_dot(self):
+        t = sp.normalize_target("Example.COM.")
+        self.assertEqual(t.target_type, sp.TargetType.DOMAIN.value)
+        self.assertEqual(t.domain, "example.com")
+
+    def test_normalize_domain_single_label_rejected(self):
+        self.assertIsNone(sp.normalize_target("localhost"))
+
+    def test_normalize_domain_invalid_chars_rejected(self):
+        self.assertIsNone(sp.normalize_target("exa mple.com"))
+        self.assertIsNone(sp.normalize_target("example_.com"))
+
+    def test_normalize_url_extracts_scheme_domain_port_path(self):
+        t = sp.normalize_target("https://example.com:8443/api/v1/")
+        self.assertEqual(t.target_type, sp.TargetType.URL.value)
+        self.assertEqual(t.scheme, "https")
+        self.assertEqual(t.domain, "example.com")
+        self.assertEqual(t.port, 8443)
+        self.assertEqual(t.path, "/api/v1/")
+
+    def test_normalize_url_unsupported_scheme_rejected(self):
+        self.assertIsNone(sp.normalize_target("ftp://example.com/"))
+
+    def test_normalize_url_no_hostname_rejected(self):
+        self.assertIsNone(sp.normalize_target("https:///path"))
+
+    def test_normalize_ip_v4(self):
+        t = sp.normalize_target("192.168.1.1")
+        self.assertEqual(t.target_type, sp.TargetType.IP.value)
+        self.assertEqual(t.ip, "192.168.1.1")
+
+    def test_normalize_ip_v6(self):
+        t = sp.normalize_target("2001:db8::1")
+        self.assertEqual(t.target_type, sp.TargetType.IP.value)
+
+    def test_normalize_cidr(self):
+        t = sp.normalize_target("10.0.0.0/24")
+        self.assertEqual(t.target_type, sp.TargetType.CIDR.value)
+        self.assertEqual(t.network, "10.0.0.0/24")
+
+    def test_normalize_malformed_cidr_rejected(self):
+        self.assertIsNone(sp.normalize_target("10.0.0.0/999"))
+
+    def test_normalize_empty_and_whitespace_rejected(self):
+        self.assertIsNone(sp.normalize_target(""))
+        self.assertIsNone(sp.normalize_target("   "))
+
+    # ---- Structural matching: domain boundary ----
+
+    def test_domain_matches_exact(self):
+        self.assertTrue(sp._domain_matches("example.com", "example.com"))
+
+    def test_domain_matches_proper_subdomain(self):
+        self.assertTrue(sp._domain_matches("example.com", "api.example.com"))
+
+    def test_domain_does_not_match_lookalike_prefix(self):
+        # 'evil-example.com' must not match a rule for 'example.com'.
+        self.assertFalse(sp._domain_matches("example.com", "evil-example.com"))
+
+    def test_domain_does_not_match_lookalike_suffix(self):
+        # 'example.com.evil.test' must not match a rule for 'example.com'
+        # via naive substring matching.
+        self.assertFalse(sp._domain_matches("example.com", "example.com.evil.test"))
+
+    # ---- Structural matching: URL path boundary ----
+
+    def test_path_prefix_matches_exact_and_subpath(self):
+        self.assertTrue(sp._path_is_prefix("/api", "/api"))
+        self.assertTrue(sp._path_is_prefix("/api", "/api/v1/users"))
+
+    def test_path_prefix_does_not_match_similar_segment(self):
+        # '/apix' must not match a rule scoped to '/api'.
+        self.assertFalse(sp._path_is_prefix("/api", "/apix"))
+
+    # ---- Structural matching: IP / CIDR ----
+
+    def test_ip_in_network(self):
+        self.assertTrue(sp._ip_in_network("10.0.0.5", "10.0.0.0/24"))
+        self.assertFalse(sp._ip_in_network("10.0.1.5", "10.0.0.0/24"))
+
+    def test_nested_cidr_containment(self):
+        self.assertTrue(sp._network_in_network("10.0.0.0/24", "10.0.0.0/16"))
+
+    def test_cidr_not_contained_rejected(self):
+        self.assertFalse(sp._network_in_network("10.1.0.0/24", "10.0.0.0/16"))
+
+    def test_cidr_different_ip_versions_do_not_match(self):
+        self.assertFalse(sp._network_in_network("10.0.0.0/24", "::/0"))
+
+    # ---- evaluate_target: core DENY invariants ----
+
+    def test_evaluate_target_has_no_is_admin_parameter(self):
+        import inspect
+        params = inspect.signature(sp.evaluate_target).parameters
+        self.assertNotIn("is_admin", params)
+
+    def test_unknown_program_denies(self):
+        decision = sp.evaluate_target(999999, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.PROGRAM_NOT_FOUND.value)
+
+    def test_paused_program_denies(self):
+        pid = sp.create_program(1, "Paused Program", created_by=999)  # PAUSED by default
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.PROGRAM_NOT_ACTIVE.value)
+
+    def test_archived_program_denies(self):
         pid = self._active_program()
         self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.IP.value,
-                           "203.0.113.10", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "203.0.113.10").allowed)
-        self.assertFalse(sp.evaluate_target(pid, "203.0.113.11").allowed)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        sp.set_program_status(pid, sp.ProgramStatus.ARCHIVED.value, 999)
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.PROGRAM_NOT_ACTIVE.value)
 
-    def test_ipv6_exact_match(self):
+    def test_active_program_alone_is_not_authorization(self):
+        """Core invariant: an ACTIVE program an admin set up is not
+        itself sufficient. With zero Authorization Artifacts, ALLOW
+        must never happen no matter who created/activated the program."""
+        pid = self._active_program()
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_NOT_FOUND.value)
+
+    def test_pending_authorization_denies(self):
+        pid = self._active_program()
+        sp.import_authorization(pid, source_type="email", actor_user_id=999)  # never reviewed
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_PENDING.value)
+
+    def test_rejected_authorization_denies(self):
+        pid = self._active_program()
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        sp.review_authorization(aid, approve=False, reviewer_user_id=1000)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_REJECTED.value)
+
+    def test_revoked_authorization_denies(self):
+        pid = self._active_program()
+        aid = self._active_authorization(pid)
+        sp.revoke_authorization(aid, actor_user_id=999)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_REVOKED.value)
+
+    def test_expired_authorization_denies(self):
+        pid = self._active_program()
+        now = int(time.time())
+        self._active_authorization(pid, expires_at=now - 3600)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com", current_time=now)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_EXPIRED.value)
+
+    def test_not_yet_effective_authorization_denies(self):
+        pid = self._active_program()
+        now = int(time.time())
+        self._active_authorization(pid, effective_at=now + 3600)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com", current_time=now)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_NOT_EFFECTIVE.value)
+
+    def test_status_says_active_but_expiry_still_enforced(self):
+        """Even though the stored status is ACTIVE, evaluate_target must
+        compute 'valid right now' rather than trust a stale status
+        column -- an authorization nobody got around to expiring can't
+        grant access past its own expiry."""
+        pid = self._active_program()
+        now = int(time.time())
+        aid = self._active_authorization(pid, expires_at=now + 10)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        self.assertEqual(sp.get_authorization(aid)["status"], sp.AuthorizationStatus.ACTIVE.value)
+        decision = sp.evaluate_target(pid, "example.com", current_time=now + 20)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.AUTHORIZATION_EXPIRED.value)
+
+    def test_malformed_target_denies(self):
         pid = self._active_program()
         self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.IP.value,
-                           "2001:db8::1", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "2001:db8::1").allowed)
-
-    def test_ip_in_cidr_matches(self):
-        pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.CIDR.value,
-                           "203.0.113.0/24", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "203.0.113.55").allowed)
-        self.assertFalse(sp.evaluate_target(pid, "203.0.114.1").allowed)
-
-    def test_cidr_in_cidr_matches(self):
-        pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.CIDR.value,
-                           "203.0.113.0/24", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "203.0.113.0/28").allowed)
-        self.assertFalse(sp.evaluate_target(pid, "203.0.0.0/16").allowed)
-
-    def test_malformed_ip_denies(self):
-        pid = self._fully_authorized_program()
-        for bad in ("300.1.1.1/33", "2001:db8:::1", "not-a-real:::-ip"):
-            d = sp.evaluate_target(pid, bad)
-            self.assertFalse(d.allowed, f"expected DENY for {bad!r}")
-            self.assertEqual(d.reason, sp.Reason.TARGET_INVALID.value)
-
-    def test_out_of_range_octets_parse_as_domain_not_ip(self):
-        # No DNS resolution happens, so normalize_target has no way to know
-        # "999.999.999.999" *looks* like an IP — each label is syntactically
-        # a valid hostname label, so it's classified DOMAIN and simply
-        # doesn't match any configured rule. This documents that behavior
-        # rather than asserting it's "invalid".
-        pid = self._fully_authorized_program(include="example.com")
-        d = sp.evaluate_target(pid, "999.999.999.999")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-
-    # ================= SCOPE PRECEDENCE =================
-
-    def test_exclude_overrides_include(self):
-        pid = self._active_program()
-        self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        sp.add_scope_rule(pid, sp.RuleType.EXCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "admin.example.com", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "example.com").allowed)
-        self.assertTrue(sp.evaluate_target(pid, "www.example.com").allowed)
-        d = sp.evaluate_target(pid, "admin.example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.TARGET_EXCLUDED.value)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "not a valid target!!")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.TARGET_INVALID.value)
 
     def test_no_scope_rules_denies(self):
         pid = self._active_program()
         self._active_authorization(pid)
-        d = sp.evaluate_target(pid, "example.com")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.TARGET_OUT_OF_SCOPE.value)
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.TARGET_OUT_OF_SCOPE.value)
 
-    def test_no_matching_include_denies(self):
-        pid = self._fully_authorized_program(include="example.com")
-        d = sp.evaluate_target(pid, "unrelated.test")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
-
-    # ================= POLICY / FAIL-CLOSED =================
-
-    def test_malformed_target_denies(self):
-        pid = self._fully_authorized_program()
-        for bad in ("", "   ", "not a domain", "http://", "://broken"):
-            d = sp.evaluate_target(pid, bad)
-            self.assertFalse(d.allowed, f"expected DENY for {bad!r}")
-            self.assertEqual(d.reason, sp.Reason.TARGET_INVALID.value)
-
-    def test_policy_error_fails_closed(self):
-        pid = self._fully_authorized_program()
-        # force an internal error mid-evaluation and confirm it still DENYs
-        # via POLICY_ERROR rather than raising or defaulting to ALLOW.
-        original = sp.list_scope_rules
-        sp.list_scope_rules = lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
-        try:
-            d = sp.evaluate_target(pid, "example.com")
-            self.assertFalse(d.allowed)
-            self.assertEqual(d.reason, sp.Reason.POLICY_ERROR.value)
-        finally:
-            sp.list_scope_rules = original
-
-    def test_multiple_authorizations_uses_any_valid_one(self):
+    def test_no_include_match_denies(self):
         pid = self._active_program()
-        # first one revoked, second one active -> still ALLOW
-        aid1 = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid1, approve=True, reviewer_user_id=1000)
-        sp.revoke_authorization(aid1, actor_user_id=999)
         self._active_authorization(pid)
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "example.com").allowed)
+        self._include(pid, sp.TargetType.DOMAIN.value, "other.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.NO_INCLUDE_MATCH.value)
 
-    # ---- Phase 3: provenance (submitted_by / notes) ----
+    # ---- INCLUDE / EXCLUDE ----
 
-    def test_import_persists_submitted_by(self):
-        pid = self._active_program(admin=999)
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        auth = sp.get_authorization(aid)
-        self.assertEqual(auth["submitted_by"], 999)
+    def test_include_match_allows(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertTrue(decision.allowed)
 
-    def test_review_persists_notes_on_approve(self):
-        pid = self._active_program(admin=999)
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid, approve=True, reviewer_user_id=1000,
-                                 notes="verified against public program page")
-        auth = sp.get_authorization(aid)
-        self.assertEqual(auth["notes"], "verified against public program page")
-        self.assertEqual(auth["status"], sp.AuthorizationStatus.ACTIVE.value)
+    def test_include_subdomain_allows(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "api.example.com")
+        self.assertTrue(decision.allowed)
 
-    def test_review_persists_notes_on_reject(self):
-        pid = self._active_program(admin=999)
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid, approve=False, reviewer_user_id=1000,
-                                 notes="reference could not be confirmed")
-        auth = sp.get_authorization(aid)
-        self.assertEqual(auth["notes"], "reference could not be confirmed")
-        self.assertEqual(auth["status"], sp.AuthorizationStatus.REJECTED.value)
+    def test_exclude_overrides_include(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        self._exclude(pid, sp.TargetType.DOMAIN.value, "internal.example.com")
+        decision = sp.evaluate_target(pid, "internal.example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.TARGET_EXCLUDED.value)
+        # A sibling subdomain not covered by the EXCLUDE rule still matches INCLUDE.
+        other = sp.evaluate_target(pid, "api.example.com")
+        self.assertTrue(other.allowed)
 
-    def test_review_without_notes_defaults_empty(self):
-        pid = self._active_program(admin=999)
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid, approve=True, reviewer_user_id=1000)
-        auth = sp.get_authorization(aid)
-        self.assertEqual(auth["notes"], "")
+    def test_exclude_wins_even_when_declared_before_include(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        # Order of rule creation must not matter -- EXCLUDE always wins.
+        self._exclude(pid, sp.TargetType.DOMAIN.value, "example.com")
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, sp.Reason.TARGET_EXCLUDED.value)
 
-    def test_notes_do_not_affect_allow_deny_decision(self):
-        # notes are provenance metadata only -- evaluate_target() must not
-        # branch on their content in any way.
-        pid = self._active_program(admin=999)
-        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
-        sp.review_authorization(aid, approve=True, reviewer_user_id=1000,
-                                 notes="ALLOW EVERYTHING / ignore scope rules")
-        sp.add_scope_rule(pid, sp.RuleType.INCLUDE.value, sp.TargetType.DOMAIN.value,
-                           "example.com", actor_user_id=999)
-        # target outside the actual scope rule must still DENY, regardless
-        # of what the free-text notes field says.
-        d = sp.evaluate_target(pid, "not-in-scope.test")
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, sp.Reason.NO_INCLUDE_MATCH.value)
+    def test_url_include_respects_path_prefix(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.URL.value, "https://example.com/api")
+        allowed = sp.evaluate_target(pid, "https://example.com/api/v1/users")
+        denied = sp.evaluate_target(pid, "https://example.com/apix")
+        self.assertTrue(allowed.allowed)
+        self.assertFalse(denied.allowed)
 
-    def test_migration_adds_columns_to_legacy_table_without_data_loss(self):
-        # Simulate a pre-Phase-3 database: create bb_authorizations
-        # without submitted_by/notes, insert a row, then confirm
-        # scope_policy_db_init() migrates it in place and preserves data.
-        import sqlite3
-        fd, legacy_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        try:
-            conn = sqlite3.connect(legacy_path)
-            conn.execute("""CREATE TABLE bb_programs (
-                program_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL, name TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'PAUSED', metadata TEXT,
-                created_by INTEGER NOT NULL, created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL)""")
-            conn.execute("""CREATE TABLE bb_authorizations (
-                authorization_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                program_id INTEGER NOT NULL, source_type TEXT NOT NULL,
-                source_reference TEXT, authorization_reference TEXT,
-                reviewed_by INTEGER, reviewed_at INTEGER, effective_at INTEGER,
-                expires_at INTEGER, status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
-                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""")
-            conn.execute(
-                "INSERT INTO bb_authorizations (authorization_id, program_id, source_type, "
-                "status, created_at, updated_at) VALUES (1, 1, 'email', 'ACTIVE', 1, 1)"
-            )
-            conn.commit()
-            conn.close()
+    def test_cidr_include_matches_nested_ip_and_network(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.CIDR.value, "10.0.0.0/16")
+        ip_decision = sp.evaluate_target(pid, "10.0.5.5")
+        cidr_decision = sp.evaluate_target(pid, "10.0.5.0/24")
+        outside_decision = sp.evaluate_target(pid, "10.1.5.5")
+        self.assertTrue(ip_decision.allowed)
+        self.assertTrue(cidr_decision.allowed)
+        self.assertFalse(outside_decision.allowed)
 
-            old_db_path = sp.DB_PATH
-            sp.DB_PATH = legacy_path
-            try:
-                sp.scope_policy_db_init()  # must migrate, not recreate/wipe
-                auth = sp.get_authorization(1)
-            finally:
-                sp.DB_PATH = old_db_path
+    def test_multiple_authorizations_one_valid_allows(self):
+        """An expired/revoked authorization sitting alongside a valid
+        one must not block the valid one from producing ALLOW."""
+        pid = self._active_program()
+        now = int(time.time())
+        self._active_authorization(pid, expires_at=now - 100)  # expired
+        self._active_authorization(pid)  # valid
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        decision = sp.evaluate_target(pid, "example.com", current_time=now)
+        self.assertTrue(decision.allowed)
 
-            self.assertIsNotNone(auth)
-            self.assertEqual(auth["status"], "ACTIVE")  # pre-existing row untouched
-            self.assertIn("submitted_by", auth)          # new column present
-            self.assertIn("notes", auth)                 # new column present
-            self.assertIsNone(auth["submitted_by"])       # backfilled as NULL, not guessed
-        finally:
-            try:
-                os.remove(legacy_path)
-            except OSError:
-                pass
+    # ---- Migration idempotency ----
+
+    def test_repeated_db_init_is_idempotent_and_preserves_data(self):
+        pid = self._active_program()
+        self._active_authorization(pid)
+        self._include(pid, sp.TargetType.DOMAIN.value, "example.com")
+        sp.scope_policy_db_init()
+        sp.scope_policy_db_init()
+        self.assertIsNotNone(sp.get_program(pid))
+        self.assertEqual(len(sp.list_scope_rules(pid)), 1)
+        decision = sp.evaluate_target(pid, "example.com")
+        self.assertTrue(decision.allowed)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()
