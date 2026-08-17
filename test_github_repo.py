@@ -15,20 +15,21 @@ all.
 import os
 import time
 import shutil
+import unittest
 import tempfile
 import subprocess
-from unittest.mock import path
+from unittest.mock import patch
 
 import security
 import github_repo as gr
 
-def _mock_complete(returncode=0, stdout="", stderr=""):
+def _mock_completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
     
 class GithubRepoTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close()
+        os.close(fd)
         self._db_path = db_path
         security.DB_PATH = db_path
         gr.DB_PATH = db_path
@@ -128,7 +129,7 @@ class GithubRepoTestCase(unittest.IsolatedAsyncioTestCase):
 
     # ================= size / file-count limits (items 10-11) =================
     
-    @path("github_repo.subprocess.run")
+    @patch("github_repo.subprocess.run")
     async def test_10_repository_size_limit_enforced(self, mock_run):
         gr.MAX_REPOSITORY_SIZE_BYTES = 50 # tiny cap so our fake clone exceeds it
         
