@@ -38,3 +38,232 @@ Design constraints (matches security.py / scope_policy.py / findings.py):
 - CREATE TABLE IF NOT EXISTS only; reuses security.py's DB_PATH and
   audit_log table — no second database, no second audit system.
 """
+
+import os
+import re
+import time
+import shutil
+import logging
+import asyncio
+import sqlite3
+import tempfile
+import subprocess
+import urllib.parse
+from uuid import uuid4
+from dataclasses import dataclass
+from typing import Optional, List, Dict
+
+from security import DB_PATH, write_audit_log
+
+logger = logging.getLogger(__name__)
+
+# ---------------- Configuration (all overridable, e.g. in tests) ----------------
+
+WORKSPACE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "github_workspaces")
+
+MAX_CONCURRENT_CLONES = 2
+MAX_FILE_COUNT = 5000
+MAX_REPOSITORY_SIZE_BYTES = 250 * 1024 * 1024
+MAX_TOTAL_WORKSPACE_BYTES = 2048 * 1024 * 1024
+MAX_CLONE_TIME_SECONDS = 120
+DEFAULT_REPOSITORY_TTL_SECONDS = 24 * 60 * 60
+
+_active_clone_count = 0
+_clone_slot_lock = asyncio.Lock()
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+# ---------------- Data types ----------------
+
+@dataclass
+class RepositoryRef:
+    owner: str
+    name: str
+    clone_url: str
+
+
+@dataclass
+class CloneResult:
+    ok: bool
+    repository_id: Optional[int] = None
+    reason: Optional[str] = None
+    detail: Optional[str] = None
+
+
+# ---------------- Database ----------------
+
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def github_repo_db_init() -> None:
+    """Create the repository-tracking table only. Reuses security.py's
+    DB_PATH and audit_log table; never touches any other module's data."""
+    conn = _conn()
+    conn.execute("""CREATE TABLE IF NOT EXISTS github_repositories (
+        repository_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        created_by INTEGER NOT NULL,
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        clone_url TEXT NOT NULL,
+        workspace_id TEXT,
+        status TEXT NOT NULL DEFAULT 'CLONING',
+        branch TEXT,
+        commit_sha TEXT,
+        file_count INTEGER,
+        size_bytes INTEGER,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_github_repositories_chat "
+                 "ON github_repositories (chat_id)")
+    conn.commit()
+    conn.close()
+    logger.info("GITHUB REPO DATABASE: OK")
+
+
+def get_repository_info(repository_id) -> Optional[Dict]:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT * FROM github_repositories WHERE repository_id=?",
+        (repository_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def repository_exists(repository_id) -> bool:
+    return get_repository_info(repository_id) is not None
+
+
+def get_workspace_path(repository_id) -> Optional[str]:
+    info = get_repository_info(repository_id)
+    if not info or info.get("status") != "READY" or not info.get("workspace_id"):
+        return None
+    return os.path.join(WORKSPACE_ROOT, info["workspace_id"])
+
+
+# ---------------- URL validation ----------------
+
+def validate_repository_url(url) -> Optional[RepositoryRef]:
+    """Allow-list https://github.com/<owner>/<repo>[.git] only. Anything
+    else — wrong host, wrong scheme, userinfo tricks, extra path segments,
+    query/fragment, path traversal — returns None."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
+
+    if parsed.scheme != "https":
+        return None
+    if "@" in parsed.netloc:
+        return None
+    hostname = parsed.hostname
+    if not hostname or hostname.lower() != "github.com":
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+
+    segments = [s for s in parsed.path.split("/") if s != ""]
+    if len(segments) != 2:
+        return None
+    owner, raw_name = segments
+    if owner in (".", "..") or raw_name in (".", ".."):
+        return None
+    if not _NAME_RE.match(owner):
+        return None
+
+    name = raw_name[:-4] if raw_name.endswith(".git") else raw_name
+    if not name or not _NAME_RE.match(name):
+        return None
+
+    clone_url = f"https://github.com/{owner}/{name}.git"
+    return RepositoryRef(owner=owner, name=name, clone_url=clone_url)
+
+
+# ---------------- Workspace path helpers ----------------
+
+def _is_within(path, root) -> bool:
+    try:
+        root_n = os.path.normpath(os.path.abspath(root))
+        target_n = os.path.normpath(os.path.abspath(path))
+    except (TypeError, ValueError):
+        return False
+    return target_n == root_n or target_n.startswith(root_n + os.sep)
+    
+def _is_within_workspace_root(path) -> bool:
+    return _is_within(path, WORKSPACE_ROOT)
+    
+def _new_workspace_path():
+    os.makedirs(WORKSPACE_ROOT, exist_ok=True)
+    workspace_id = uuid4().hex
+    workspace_path = os.path.join(WORKSPACE_ROOT, workspace_id)
+    return workspace_id, workspace_path
+    
+def _rmtree_safe(path) -> bool:
+    """Delete path only if it resolves inside WORKSPACE_ROOT. Refuses
+    (no-op) for anything else, so a bad workspace_id can never make this
+    function delete an arbitrary directory on the host."""
+    if not path or not _is_within_workspace_root(path):
+        return False
+    if os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)
+    return True
+    
+# ---------------- Symlink safety ----------------
+
+def _strip_unsafe_symlinks(workspace_path) -> int:
+    """Remove any symlink (file or directory) whose resolved target falls
+    outside workspace_path. Never follows a link to decide whether to
+    recurse into it — os.walk(followlinks=False) already refuses that."""
+    removed = 0
+    root_n = os.path.normpath(os.path.abspath(workspace_path))
+    for root, dirs, files in os.walk(workspace_path, followlinks=False):
+        for name in list(dirs) + list(files):
+            full = os.path.join(root, name)
+            if not os.path.islink(full):
+                continue
+            target = os.path.realpath(full)
+            if target == root_n or target.startswith(root_n + os.sep):
+                continue
+            os.unlink(full)
+            removed += 1
+    return removed
+    
+# ---------------- Workspace scanning ----------------
+
+def _scan_workspace(workspace_path):
+    """Count files and total bytes under workspace_path, excluding the
+    .git metadata directory (repository content only)."""
+    file_count = 0
+    total_size = 0
+    for root, dirs, files in os.walk(workspace_path):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                total_size += os.path.getsize(fpath)
+            except OSError:
+                pass
+            file_count += 1
+    return file_count, total_size
+    
+def list_repository_files(repository_id, subpath: Optional[str] = None) -> List[Dict]:
+    info = get_repository_info(repository_id)
+    if not info or not info.get("workspace_id"):
+        return []
+    workspace_path = os.path.join(WORKSPACE_ROOT, info["workspace_id"])
+    
+    base = workspace_path
+    if subpath:
+        candidate = os.path.normpath(os.path.join(workspace_path, subpath))
+        if _is_within(candidate, workspace_path):
+            base = candidate
+        # else: escape attempt is ignored -> fall back to workspace root
