@@ -267,3 +267,196 @@ def list_repository_files(repository_id, subpath: Optional[str] = None) -> List[
         if _is_within(candidate, workspace_path):
             base = candidate
         # else: escape attempt is ignored -> fall back to workspace root
+        
+    results = []
+    if not os.path.isdir(base):
+        return results
+    for root, dirs, files in os.walk(base):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, workspace_path)
+            try:
+                size = os.path.getsize(fpath)
+            except OSError:
+                size = 0
+            results.append({"path": rel, "size": size})
+    return results
+    
+# ---------------- Concurrency slots ----------------
+
+async def _try_acquire_clone_slot() -> bool:
+    global _active_clone_count
+    async with _clone_slot_lock:
+        if _active_clone_count >= MAX_CONCURRENT_CLONES:
+            return False
+        _active_clone_count += 1
+        return True
+        
+async def _release_clone_slot() -> None:
+    global _active_clone_count
+    async with _clone_slot_lock:
+        _active_clone_count = max(0, _active_clone_count - 1)
+        
+# ---------------- git invocation ----------------
+
+def _run_git_clone(clone_url, workspace_path):
+    """Synchronous. Always an argument list, never shell-interpreted,
+    and "--" always separates git's own flags from the untrusted URL."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    cmd = ["git", "clone", "--depth", "1", "--single-branch", "--", clone_url, workspace_path]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=MAX_CLONE_TIME_SECONDS,
+        env=env,
+    )
+
+
+def _get_branch(workspace_path) -> Optional[str]:
+    proc = subprocess.run(
+        ["git", "-C", workspace_path, "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode == 0 and proc.stdout:
+        return proc.stdout.strip()
+    return None
+
+
+def _get_commit_sha(workspace_path) -> Optional[str]:
+    proc = subprocess.run(
+        ["git", "-C", workspace_path, "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode == 0 and proc.stdout:
+        return proc.stdout.strip()
+    return None
+
+
+# ---------------- Clone orchestration ----------------
+
+def _mark_failed(repository_id, workspace_path) -> None:
+    _rmtree_safe(workspace_path)
+    conn = _conn()
+    conn.execute("UPDATE github_repositories SET status='FAILED' WHERE repository_id=?",
+                 (repository_id,))
+    conn.commit()
+    conn.close()
+    
+async def clone_repository(url, chat_id, created_by) -> CloneResult:
+    ref = validate_repository_url(url)
+    if ref is None:
+        return CloneResult(ok=False, reason="INVALID_URL", detail="repository URL failed validation")
+        
+    acquired = await _try_acquire_clone_slot()
+    if not acquired:
+        return CloneResult(ok=False, reason="TOO_MANY_CONCURRENT_CLONES",
+                            detail="too many clones already in progress")
+                            
+    workspace_id, workspace_path = _new_workspace_path()
+    now = int(time.time())
+    expires_at = now + DEFAULT_REPOSITORY_TTL_SECONDS
+    
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO github_repositories "
+        "(chat_id, created_by, owner, name, clone_url, workspace_id, status, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'CLONING', ?, ?)",
+        (chat_id, created_by, ref.owner, ref.name, ref.clone_url, workspace_id, now, expires_at),
+    )
+    conn.commit()
+    repository_id = cur.lastrowid
+    conn.close()
+
+    write_audit_log(chat_id, created_by, actor="user", action="GITHUB_CLONE_STARTED",
+                     detail=f"repository_id={repository_id} url={ref.clone_url}")
+
+    def _fail(reason, detail=""):
+        _mark_failed(repository_id, workspace_path)
+        write_audit_log(chat_id, created_by, actor="system", action="GITHUB_CLONE_FAILED",
+                         detail=f"repository_id={repository_id} reason={reason}")
+        return CloneResult(ok=False, repository_id=repository_id, reason=reason, detail=detail)
+
+    try:
+        proc = await asyncio.to_thread(_run_git_clone, ref.clone_url, workspace_path)
+    except subprocess.TimeoutExpired:
+        await _release_clone_slot()
+        return _fail("CLONE_TIMEOUT", "git clone exceeded the time limit")
+    except OSError as exc:
+        await _release_clone_slot()
+        return _fail("CLONE_ERROR", str(exc))
+
+    if proc.returncode != 0:
+        await _release_clone_slot()
+        return _fail("CLONE_FAILED", (proc.stderr or "").strip())
+
+    _strip_unsafe_symlinks(workspace_path)
+    file_count, size_bytes = _scan_workspace(workspace_path)
+
+    if size_bytes > MAX_REPOSITORY_SIZE_BYTES:
+        await _release_clone_slot()
+        return _fail("REPOSITORY_TOO_LARGE", f"{size_bytes} bytes exceeds the {MAX_REPOSITORY_SIZE_BYTES} byte limit")
+
+    if file_count > MAX_FILE_COUNT:
+        await _release_clone_slot()
+        return _fail("FILE_COUNT_EXCEEDED", f"{file_count} files exceeds the {MAX_FILE_COUNT} file limit")
+
+    branch = _get_branch(workspace_path)
+    commit_sha = _get_commit_sha(workspace_path)
+
+    conn = _conn()
+    conn.execute(
+        "UPDATE github_repositories SET status='READY', branch=?, commit_sha=?, "
+        "file_count=?, size_bytes=? WHERE repository_id=?",
+        (branch, commit_sha, file_count, size_bytes, repository_id),
+    )
+    conn.commit()
+    conn.close()
+
+    await _release_clone_slot()
+    write_audit_log(chat_id, created_by, actor="system", action="GITHUB_CLONE_COMPLETED",
+                     detail=f"repository_id={repository_id} files={file_count} bytes={size_bytes}")
+
+    return CloneResult(ok=True, repository_id=repository_id)
+
+
+# ---------------- Cleanup / TTL ----------------
+
+def cleanup_workspace(repository_id, actor_user_id) -> bool:
+    info = get_repository_info(repository_id)
+    if not info:
+        return False
+    if info.get("workspace_id"):
+        _rmtree_safe(os.path.join(WORKSPACE_ROOT, info["workspace_id"]))
+    conn = _conn()
+    conn.execute("UPDATE github_repositories SET status='DELETED' WHERE repository_id=?",
+                 (repository_id,))
+    conn.commit()
+    conn.close()
+    write_audit_log(info["chat_id"], actor_user_id, actor="user", action="GITHUB_REPO_DELETED",
+                     detail=f"repository_id={repository_id}")
+    return True
+
+
+def _sweep_expired_once() -> int:
+    now = int(time.time())
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT repository_id, workspace_id FROM github_repositories "
+        "WHERE expires_at IS NOT NULL AND expires_at < ? "
+        "AND status NOT IN ('DELETED', 'EXPIRED', 'FAILED')",
+        (now,),
+    ).fetchall()
+    removed = 0
+    for row in rows:
+        if row["workspace_id"]:
+            _rmtree_safe(os.path.join(WORKSPACE_ROOT, row["workspace_id"]))
+        conn.execute("UPDATE github_repositories SET status='EXPIRED' WHERE repository_id=?",
+                     (row["repository_id"],))
+        removed += 1
+    conn.commit()
+    conn.close()
+    return removed
