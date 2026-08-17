@@ -1572,6 +1572,8 @@ def main():
     analytics_db_init()
     news_db_init()
     detection.detection_db_init()
+    scope_policy_db_init()
+    findings_db_init()
     logger.info("DATABASE: OK")
     
     app = (
