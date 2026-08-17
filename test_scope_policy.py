@@ -424,6 +424,56 @@ class ScopePolicyTestCase(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, sp.Reason.TARGET_INVALID.value)
 
+    # ---- effective_authorization_status() (Phase 6) ----
+
+    def test_effective_status_active_not_expired_stays_active(self):
+        pid = self._active_program()
+        now = int(time.time())
+        aid = self._active_authorization(pid, expires_at=now + 3600)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(sp.effective_authorization_status(auth, _now=now),
+                          sp.AuthorizationStatus.ACTIVE.value)
+
+    def test_effective_status_active_past_expiry_reports_expired(self):
+        pid = self._active_program()
+        now = int(time.time())
+        aid = self._active_authorization(pid, expires_at=now + 10)
+        auth = sp.get_authorization(aid)
+        # Stored status column is still literally ACTIVE...
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.ACTIVE.value)
+        # ...but the effective/display status must match what
+        # evaluate_target() would actually decide right now.
+        self.assertEqual(sp.effective_authorization_status(auth, _now=now + 20),
+                          sp.AuthorizationStatus.EXPIRED.value)
+
+    def test_effective_status_active_no_expiry_stays_active(self):
+        pid = self._active_program()
+        aid = self._active_authorization(pid)  # expires_at=None
+        auth = sp.get_authorization(aid)
+        self.assertEqual(sp.effective_authorization_status(auth),
+                          sp.AuthorizationStatus.ACTIVE.value)
+
+    def test_effective_status_non_active_passes_through_unchanged(self):
+        pid = self._active_program()
+        aid = sp.import_authorization(pid, source_type="email", actor_user_id=999)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(auth["status"], sp.AuthorizationStatus.PENDING_REVIEW.value)
+        self.assertEqual(sp.effective_authorization_status(auth),
+                          sp.AuthorizationStatus.PENDING_REVIEW.value)
+        sp.revoke_authorization(aid, actor_user_id=999)
+        auth = sp.get_authorization(aid)
+        self.assertEqual(sp.effective_authorization_status(auth),
+                          sp.AuthorizationStatus.REVOKED.value)
+
+    def test_effective_status_does_not_write_to_database(self):
+        """effective_authorization_status() is read-only display logic --
+        it must never mutate the stored row."""
+        pid = self._active_program()
+        now = int(time.time())
+        aid = self._active_authorization(pid, expires_at=now + 10)
+        sp.effective_authorization_status(sp.get_authorization(aid), _now=now + 20)
+        self.assertEqual(sp.get_authorization(aid)["status"], sp.AuthorizationStatus.ACTIVE.value)
+
     def test_no_scope_rules_denies(self):
         pid = self._active_program()
         self._active_authorization(pid)
