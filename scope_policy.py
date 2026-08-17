@@ -407,6 +407,28 @@ def list_scope_rules(program_id: int) -> List[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def effective_authorization_status(authorization: dict, _now: Optional[int] = None) -> str:
+    """Phase 6: the authorization's DISPLAY status, accounting for
+    time-based expiry the same way evaluate_target() already does
+    internally via _authorization_denial_reason() -- an ACTIVE
+    authorization whose expires_at has passed is reported as EXPIRED
+    even though the stored `status` column still literally says
+    ACTIVE (nothing in this codebase writes EXPIRED back to that
+    column; expiry has always been a live, computed check, never a
+    background job). This is read-only: it never writes to the
+    database and never changes what evaluate_target() decides -- it
+    only makes /bbauth list and reporting show a status that matches
+    what evaluate_target() would actually decide right now, instead of
+    a stale ACTIVE that no longer reflects reality."""
+    now = _now if _now is not None else int(time.time())
+    status = authorization["status"]
+    if status == AuthorizationStatus.ACTIVE.value:
+        expires_at = authorization["expires_at"]
+        if expires_at is not None and now >= expires_at:
+            return AuthorizationStatus.EXPIRED.value
+    return status
     
 # ---------------- Target Normalization ----------------
 
