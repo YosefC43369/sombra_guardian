@@ -34,6 +34,7 @@ from scope_policy import (
     add_scope_rule, remove_scope_rule, list_scope_rules,
     evaluate_target,
 )
+from bb_report import get_bb_report_data, format_bb_report_message
 from findings import (
     findings_db_init, create_finding, get_finding, list_findings,
     update_finding_status, mark_duplicate,
@@ -857,6 +858,19 @@ def _deny_text_evidence(reason: str, detail: str = "") -> str:
     return "❌ " + _EVIDENCE_DENY_TH.get(reason, reason)
 
 
+async def _reply_chunked(update: Update, text: str) -> None:
+    """Sends `text` as one or more messages, splitting on
+    gemini.py's existing split_telegram_message() when it exceeds
+    Telegram's per-message length limit. Phase 6 fix: every /bb...list
+    command previously used a single reply_text() call, so a Program/
+    Authorization/Scope Rule/Finding/Evidence list long enough to pass
+    ~4096 characters would raise a Telegram API error instead of
+    sending. Reuses the exact splitter /ask already relies on --
+    no new chunking logic is introduced."""
+    for chunk in split_telegram_message(text):
+        await update.message.reply_text(chunk)
+
+
 async def _download_evidence_file(message, context: ContextTypes.DEFAULT_TYPE):
     """Downloads a photo/document attached to `message` for Evidence
     storage. Independent of gemini.py's mime allowlist on purpose --
@@ -892,7 +906,8 @@ async def _download_evidence_file(message, context: ContextTypes.DEFAULT_TYPE):
         return None, None, f"❌ ไฟล์ใหญ่เกินไป (จำกัด {MAX_EVIDENCE_BYTES // (1024*1024)}MB)"
 
     return file_bytes, filename, None
-    
+
+
 async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/bbprogram new|active|pause|archive|list -- Program lifecycle.
     State machine (PAUSED<->ACTIVE, either ->ARCHIVED which is terminal)
@@ -951,7 +966,7 @@ async def cmd_bbprogram(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not programs:
             return await update.message.reply_text("ยังไม่มี Program ในกลุ่มนี้")
         lines = [f"#{p['program_id']} [{p['status']}] {p['name']}" for p in programs]
-        await update.message.reply_text("Programs:\n" + "\n".join(lines))
+        await _reply_chunked(update, "Programs:\n" + "\n".join(lines))
 
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (new/active/pause/archive/list)")
@@ -1034,11 +1049,11 @@ async def cmd_bbauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not authorizations:
             return await update.message.reply_text("ยังไม่มี Authorization ใน Program นี้")
         lines = [
-            f"#{a['authorization_id']} [{a['status']}] source={a['source_type']} "
-            f"ref={a['source_reference'] or '-'}"
+            f"#{a['authorization_id']} [{effective_authorization_status(a)}] "
+            f"source={a['source_type']} ref={a['source_reference'] or '-'}"
             for a in authorizations
         ]
-        await update.message.reply_text("Authorizations:\n" + "\n".join(lines))
+        await _reply_chunked(update, "Authorizations:\n" + "\n".join(lines))
 
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (import/review/revoke/list)")
@@ -1097,7 +1112,7 @@ async def cmd_bbscope(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not rules:
             return await update.message.reply_text("ยังไม่มี Scope Rule ใน Program นี้")
         lines = [f"#{r['rule_id']} {r['rule_type']} {r['target_type']} {r['pattern']}" for r in rules]
-        await update.message.reply_text("Scope Rules:\n" + "\n".join(lines))
+        await _reply_chunked(update, "Scope Rules:\n" + "\n".join(lines))
 
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/remove/list)")
@@ -1121,6 +1136,29 @@ async def cmd_bbcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detail = f" ({decision.detail})" if decision.detail else ""
         return await update.message.reply_text(f"✅ ALLOW{detail}")
     await update.message.reply_text(_deny_text_finding(decision.reason, decision.detail))
+
+
+async def cmd_bbreport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bbreport <program_id> -- read-only aggregate summary (counts
+    only: Authorization by effective status, Scope Rule by type,
+    Finding by status/severity, Evidence total) for one Program.
+    Admin-gated to match dashboard_command's existing precedent for
+    aggregate reports (distinct from the open-to-all per-item
+    /bbfinding list /bbauth list etc.). get_bb_report_data() only
+    calls existing scope_policy.py/findings.py read APIs -- no new
+    scope-matching/ALLOW-DENY logic is introduced by this command."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        return await update.message.reply_text("ใช้งาน: /bbreport <program_id>")
+    program_id = int(args[0])
+    data = get_bb_report_data(program_id)
+    if data is None:
+        return await update.message.reply_text("❌ ไม่พบ Program นี้")
+    await _reply_chunked(update, format_bb_report_message(data))
+    write_audit_log(update.effective_chat.id, update.effective_user.id, actor="admin",
+                     action="BB_REPORT_VIEW", detail=f"program_id={program_id}")
 
 
 async def cmd_bbfinding(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1164,7 +1202,7 @@ async def cmd_bbfinding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not findings:
             return await update.message.reply_text("ยังไม่มี Finding ใน Program นี้")
         lines = [f"#{f['finding_id']} [{f['status']}] {f['title']} ({f['severity']})" for f in findings]
-        await update.message.reply_text("Findings:\n" + "\n".join(lines))
+        await _reply_chunked(update, "Findings:\n" + "\n".join(lines))
 
     elif sub == "show":
         if len(args) < 2 or not args[1].isdigit():
@@ -1272,7 +1310,7 @@ async def cmd_bbevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label = e["filename"] or e["evidence_type"]
             hash_note = f" sha256={e['sha256'][:12]}..." if e["sha256"] else ""
             lines.append(f"#{e['evidence_id']} [{e['evidence_type']}] {label}{hash_note}")
-        await update.message.reply_text("Evidence:\n" + "\n".join(lines))
+        await _reply_chunked(update, "Evidence:\n" + "\n".join(lines))
 
     elif sub == "verify":
         if len(args) < 2 or not args[1].isdigit():
