@@ -158,3 +158,57 @@ def read_repository_file(repository_id, path) -> ReadResult:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return ReadResult(ok=True, path=path, is_binary=True, size_bytes=size)
+        
+    truncated = len(text) > MAX_RETURNED_CHARS
+    if truncated:
+        text = text[:MAX_RETURNED_CHARS]
+    return ReadResult(ok=True, path=path, content=text, truncated=truncated, size_bytes=size)
+    
+# ---------------- Step 4: search ----------------
+
+@dataclass
+class SearchMatch:
+    path: str
+    line_nimber: int
+    snippet: str
+    
+    
+@dataclass
+class SearchResult:
+    ok: bool
+    matches: List[SearchMatch] = field(default_factory=list)
+    files_scanned: int = 0
+    truncated: bool = False
+    reason: Optional[str] = None
+    
+
+def search_repository(repository_id, query, path: Optional[str] = None) -> SearchResult:
+    """Plain-text, case-insensitive substring search across the
+    repository (or a subdirectory of it). Deliberately NOT regex --
+    an arbitrary user-supplied regex is a ReDoS risk, and this is a
+    substring search tool, not a general-purpose grep. No shell/grep
+    subprocess is ever invoked; this walks the filesystem in Python."""
+    if not query or not isinstance(query, str):
+        return SearchResult(ok=False, reason="EMPTY_QUERY")
+    if len(query) > MAX_SEARCH_QUERY_LEN:
+        return SearchResult(ok=False, reason="QUERY_TOO_LONG")
+        
+    workspace_path = get_workspace_path(repository_id)
+    if workspace_path is None:
+        return SearchResult(ok=False, reason="REPOSITORY_NOT_AVAILABLE")
+        
+    base = workspace_path
+    if path:
+        base = _resolve_safe_path(workspace_path, path, must_be_file=False)
+        if base is None:
+            return SearchResult(ok=False, reason="INVALID_PATH")
+            
+    query_lower = query.lower()
+    matches: List[SearchMatch] = []
+    files_scanned = 0
+    truncated = False
+    
+    for root, dirs, files in os.walk(base, followlinks=False):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in sorted(files):
