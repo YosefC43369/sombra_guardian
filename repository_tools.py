@@ -393,3 +393,15 @@ def analyze_repository(repository_id) -> AnalysisResult:
             rel = os.path.relpath(fpath, workspace_path)
             fa = _analyze_python_source(rel, source)
             analyzed += 1
+            result.python_files += 1
+            result.todo_count += fa.todos
+            if fa.syntax_error and len(result.syntax_error) MAX_ANALYZE_SYNTAX_ERRORS_LISTED:
+                result.syntax_errors.append(f"{rel}: {fa.syntax_error}")
+            if fa.function or fa.classes:
+                top_files.append(fa)
+                
+    result.files_analyzed = analyzed
+    result.top_files = sorted(
+        top_files, key=lambda fa: len(fa.functions) + len(fa.classes), reverse=True
+    )[:MAX_ANALYZE_TOP_FILES]
+    return result
