@@ -146,3 +146,24 @@ def _pytest_configured(workspace_path: str) -> bool:
         if text and "[tool:pytest]" in text:
             return True
     return False
+    
+    
+def _peak_text(path: str, max_bytes: int = 65536) -> Optional[str]:
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(max_bytes)
+        return raw.decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def _has_python_test_files(workspace_path: str) -> bool:
+    scanned = 0
+    for root, dirs, files in os.walk(workspace_path, followlinks=False):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in files:
+            scanned += 1
+            if scanned > MAX_DETECT_FILES_SCANNED:
+                return False
+            rel = os.path.relpath(os.path.join(root, fname), workspace_path).replace(os.sep, "/")
