@@ -125,3 +125,36 @@ class ReadResult:
     ok: bool
     path: Optional[str] = None
     content: Optional[str] = None
+    truncated: bool = False
+    is_binary: bool = False
+    size_bytes: Optional[int] = None
+    
+    
+def read_repository_file(repository_id, path) -> ReadResult:
+    workspace_path = get_workspace_path(repository_id)
+    if workspace_path is None:
+        return ReadResult(ok=False, reason="INVALID_PATH")
+        
+    resolved = _resolve_safe_path(workspace_path, path, must_be_file=True)
+    if resolved is None:
+        return ReadResult(ok=False, reason="INVALID_PATH")
+      
+    try:
+        size = os.path.getsize(resolved)
+    except OSError:
+        return ReadResult(ok=False, reason="STAT_ERROR")
+    if size > MAX_READ_FILE_BYTES:
+        return ReadResult(ok=False, reason="FILE_TOO_LARGE", size_bytes=size)
+        
+    try:
+        with open(resolved, "rb") as f:
+            raw = f.read(MAX_READ_FILE_BYTES)
+    except OSError:
+        return ReadResult(ok=False, reason="READ_ERROR")
+        
+    if b"\x00" in raw:
+        return ReadResult(ok=True, path=path, is_binary=True, size_bytes=size)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ReadResult(ok=True, path=path, is_binary=True, size_bytes=size)
