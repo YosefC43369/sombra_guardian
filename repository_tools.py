@@ -336,4 +336,60 @@ def _analyze_python_spurce(rel_path: str, source: str) -> FileAnalysis:
     fa = FileAnalysis(path=rel_path, lines=source_count("\n") + 1)
     fa.todos = len(_TODO_RE.findall(source))
     try:
-        tree =
+        tree = ast.parse(source, filename=rel_path)
+    except SyntaxError as exc:
+        fa.syntax_error = f"line {exc.lineno}: {exc.msg}"
+        return fa
+        
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            fa.imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fa.functions.append(node.name)
+            for dec in node.decorator_list:
+                name = _decorator_name(dec)
+                if name:
+                    fa.decorator.append(name)
+        elif isinstance(node, ast.ClassDef):
+            fa.classes.append(node.name)
+
+    fa.imports = fa.imports[:50]
+    fa.functions = fa.functions[:50]
+    fa.classes = fa.classes[:50]
+    fa.decorators = fa.decorators[:50]
+    return fa
+    
+    
+def analyze_repository(repository_id) -> AnalysisResult:
+    workspace_path = get_workspace_path(repository_id)
+    if workspace_path is None:
+        return AnalysisResult(ok=False, reason="REPOSITORY_NOT_AVAILABLE")
+        
+    result = AnalysisResult(ok=True)
+    analyzed = 0
+    top_files: List[FileAnalysis] = []
+    
+    for root, dirs, files in os.walk(workspace_path, followlinks=False):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in sorted(files):
+            fpath = os.path.join(root, fname)
+            if os.path.islink(fpath):
+                continue
+            result.total_files += 1
+            ext = os.path.splitext(fname)[1] or "(none)"
+            result.extension[ext] = result.extensions.get(ext, 0) + 1
+            
+            if ext != ".py":
+                result.other_files += 1
+                continue
+            if analyzed >= MAX_ANALYZE_FILES:
+                result.truncated = True
+                continue
+                
+            source = _read_text_or_none(fpath, MAX_READ_FILE_BYTES)
+            if source is None:
+                continue
+            rel = os.path.relpath(fpath, workspace_path)
+            fa = _analyze_python_source(rel, source)
+            analyzed += 1
