@@ -41,6 +41,11 @@ from findings import (
     add_evidence, get_evidence, list_evidence, remove_evidence, verify_evidence,
     VALID_SEVERITIES, VALID_STATUSES, VALID_EVIDENCE_TYPES, MAX_EVIDENCE_BYTES,
 )
+from github_repo import (
+    github_repo_db_init, clone_repository, get_repository_info,
+    list_repository_files, list_repositories_for_chat, cleanup_workspace,
+    sweep_expired_repositories,
+)
 
 import coordinator
 
@@ -56,6 +61,8 @@ SPAM_TIME_WINDOW = 10
 MAX_WARNINGS = 3
 DEFAULT_MUTE_SECONDS = 600
 TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_photo
+GITHUB_FILES_DISPLAY_CAP = 200  # /github files: max rows shown even after _reply_chunked splitting
+GITHUB_INTERVAL_SECONDS = 3600  # how often the TTL sweep background task runs
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1346,6 +1353,192 @@ async def cmd_bbevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/list/verify/remove)")
+        
+# ---------------- GitHub Repository Manager (Phase 7) ----------------
+#
+# /github clone and /github cleanup are admin-gated, matching every
+# other state-mutating command in this file (/bbprogram new/active/
+# pause/archive, /bbauth import/review/revoke, /bbscope add/remove,
+# /bbfinding status/duplicate, /bbevidence remove). /github status,
+# /github files, and /github list are open to all chat members,
+# matching the existing read-only precedent (/bbfinding list/show,
+# /bbauth list, /bbscope list, /bbcheck) -- none of those add an extra
+# "does this row belong to the calling chat" check beyond the DB
+# lookup itself, and /github follows that same established model rather
+# than inventing a new one.
+#
+# github_repo.py's public API is keyed by the integer `repository_id`
+# (the github_repositories primary key), not by the internal
+# `workspace_id` (a uuid4 hex string that is purely the on-disk
+# directory name). Every /github subcommand below therefore takes
+# <repository_id>; workspace_id is never accepted from or shown to
+# Telegram, consistent with Step 8's "never expose or accept raw
+# filesystem paths / workspace selection from Telegram."
+#
+# CloneResult.detail is intentionally never read here: for CLONE_ERROR
+# (str(OSError), may contain a host path) and CLONE_FAILED (raw git
+# stderr) it can contain host filesystem detail, and none of the other
+# reasons need it since _GITHUB_CLONE_DENY_TH already has a safe,
+# static Thai message per reason code.
+
+_GITHUB_CLONE_DENY_TH = {
+    "INVALID_URL": "URL ไม่ผ่านการตรวจสอบ (ต้องเป็น https://github.com/<owner>/<repo> เท่านั้น)",
+    "TOO_MANY_CONCURRENT_CLONES": "มีการ clone พร้อมกันเต็มจำนวนที่กำหนดไว้ในขณะนี้ ลองใหม่อีกครั้งภายหลัง",
+    "WORKSPACE_QUOTA_EXCEEDED": "พื้นที่ workspace รวมเต็มแล้ว ลองลบ repository เก่าด้วย /github cleanup ก่อน",
+    "CLONE_TIMEOUT": "การ clone ใช้เวลานานเกินกำหนด",
+    "CLONE_ERROR": "เกิดข้อผิดพลาดระหว่าง clone",
+    "CLONE_FAILED": "clone ไม่สำเร็จ (repository อาจไม่มีอยู่จริง หรือเป็น private repository)",
+    "SCAN_ERROR": "ตรวจสอบไฟล์ที่ clone มาไม่สำเร็จ",
+    "REPOSITORY_TOO_LARGE": "repository มีขนาดใหญ่เกินขีดจำกัดที่กำหนดไว้",
+    "FILE_COUNT_EXCEEDED": "repository มีจำนวนไฟล์เกินขีดจำกัดที่กำหนดไว้",
+    "INTERNAL_ERROR": "เกิดข้อผิดพลาดภายในระบบ",
+}
+
+def _deny_github(reason: str, detail: str = "") -> str:
+    return "❌ " + _GITHUB_CLONE_DENY_TH.get(reason, "ไม่ทราบสาเหตุ")
+    
+def _human_size(num_bytes) -> str:
+    if num_bytes is None:
+        return "-"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GB"
+    
+async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/github clone|status|files|cleanup|list -- Telegram integration
+    for github_repo.py's sandboxed clone-for-review workspace manager.
+    app.py only parses Telegram input and formats output; all cloning,
+    URL/workspace validation, quota/size/count/timeout enforcement, and
+    audit logging stay inside github_repo.py, per the Phase 7 brief."""
+    args = context.args or []
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/github clone <repository_url>\n"
+            "/github status <repository_id>\n"
+            "/github files <repository_id> [subpath]\n"
+            "/github cleanup <repository_id>\n"
+            "/github list"
+        )
+    sub = args[0].lower()
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    
+    if sub == "clone":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 2:
+            return await update.message.reply_text("ใช้งาน: /github clone <repository_url>")
+        url = args[1]
+        await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        # clone_repository() runs validate_repository_url() itself as its
+        # first step -- app.py deliberately does not re-validate the URL
+        # here, so there is exactly one place this policy can diverge from.
+        result = await clone_repository(url, chat_id, user.id)
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_github(result.reason))
+        info = get_repository_info(result.repository_id)
+        await update.message.reply_text(
+            "✅ Clone สำเร็จ\n\n"
+            f"Repository ID: #{result.repository_id}\n"
+            f"Repo: {info['owner']}/{info['name']}\n"
+            f"Branch: {info['branch'] or '-'}\n"
+            f"Commit: {(info['commit_sha'] or '-')[:12]}\n"
+            f"ไฟล์: {info['file_count']} ไฟล์ ({_human_size(info['size_bytes'])})\n"
+            f"สถานะ: {info['status']}"
+        )
+        # clone_repository() already writes GITHUB_CLONE_STARTED/
+        # COMPLETED/FAILED to the audit log itself (system-actor
+        # operation events) -- no additional command-event log here
+        # would do anything but duplicate that.
+
+    elif sub == "status":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /github status <repository_id>")
+        repository_id = int(args[1])
+        info = get_repository_info(repository_id)
+        if not info:
+            return await update.message.reply_text("❌ ไม่พบ Repository นี้")
+        await update.message.reply_text(
+            f"Repository #{repository_id} [{info['status']}]\n"
+            f"Repo: {info['owner']}/{info['name']}\n"
+            f"Branch: {info['branch'] or '-'}\n"
+            f"Commit: {(info['commit_sha'] or '-')[:12]}\n"
+            f"ไฟล์: {info['file_count'] if info['file_count'] is not None else '-'}\n"
+            f"ขนาด: {_human_size(info['size_bytes'])}"
+        )
+
+    elif sub == "files":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /github files <repository_id> [subpath]")
+        repository_id = int(args[1])
+        subpath = args[2] if len(args) > 2 else None
+        info = get_repository_info(repository_id)
+        if not info:
+            return await update.message.reply_text("❌ ไม่พบ Repository นี้")
+        if info["status"] != "READY":
+            return await update.message.reply_text(f"❌ Repository นี้ยังไม่พร้อมใช้งาน (สถานะ: {info['status']})")
+        files = list_repository_files(repository_id, subpath=subpath)
+        if not files:
+            return await update.message.reply_text("ไม่พบไฟล์ (หรือ path ที่ระบุไม่มีอยู่ในนี้)")
+        shown = files[:GITHUB_FILES_DISPLAY_CAP]
+        lines = [f"{f['path']} ({_human_size(f['size'])})" for f in shown]
+        header = f"ไฟล์ใน Repository #{repository_id}"
+        if subpath:
+            header += f" ({subpath})"
+        header += f" -- {len(files)} ไฟล์"
+        if len(files) > GITHUB_FILES_DISPLAY_CAP:
+            header += f" (แสดง {GITHUB_FILES_DISPLAY_CAP} รายการแรก)"
+        await _reply_chunked(update, header + "\n" + "\n".join(lines))
+
+    elif sub == "cleanup":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /github cleanup <repository_id>")
+        repository_id = int(args[1])
+        # cleanup_workspace() only audit-logs the DELETED outcome itself
+        # (a system operation event); the request/failure events below
+        # are the distinct "a Telegram command was issued" events, per
+        # Step 14's USER COMMAND EVENT vs SYSTEM OPERATION EVENT split.
+        write_audit_log(chat_id, user.id, actor="admin", action="GITHUB_CLEANUP_REQUESTED",
+                         detail=f"repository_id={repository_id}")
+        ok = cleanup_workspace(repository_id, user.id)
+        if not ok:
+            write_audit_log(chat_id, user.id, actor="admin", action="GITHUB_CLEANUP_FAILED",
+                             detail=f"repository_id={repository_id} reason=NOT_FOUND")
+            return await update.message.reply_text("❌ ไม่พบ Repository นี้")
+        await update.message.reply_text(f"✅ ลบ workspace ของ Repository #{repository_id} แล้ว")
+
+    elif sub == "list":
+        repos = list_repositories_for_chat(chat_id)
+        if not repos:
+            return await update.message.reply_text("ยังไม่มี Repository ที่ clone ไว้ในกลุ่มนี้")
+        lines = [f"#{r['repository_id']} [{r['status']}] {r['owner']}/{r['name']}" for r in repos]
+        await _reply_chunked(update, "GitHub Repositories:\n" + "\n".join(lines))
+
+    else:
+        await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (clone/status/files/cleanup/list)")
+        
+async def github_sweep_loop():
+    """Background polling loop mirroring news_background_loop()'s
+    existing pattern. Makes github_repo.py's DEFAULT_REPOSITORY_TTL_SECONDS
+    actually take effect: sweep_expired_repositories() already existed
+    (as the tested _sweep_expired_once()) but nothing called it on a
+    schedule, so expired workspaces would never actually get cleaned up
+    or flip to EXPIRED in the DB."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            swept = sweep_expired_repositories()
+            if swept:
+                logger.info(f"GITHUB TTL SWEEP: expired {swept} repositories")
+        except Exception:
+            logger.exception("GITHUB SWEEP LOOP ERROR")
+        await asyncio.sleep(GITHUB_SWEEP_INTERVAL_SECONDS)
 
 # ---------------- Message Handler ----------------
 
@@ -1574,6 +1767,7 @@ def main():
     detection.detection_db_init()
     scope_policy_db_init()
     findings_db_init()
+    github_repo_db_init()
     logger.info("DATABASE: OK")
     
     app = (
@@ -1609,6 +1803,7 @@ def main():
     app.add_handler(CommandHandler("bbcheck", cmd_bbcheck))
     app.add_handler(CommandHandler("bbfinding", cmd_bbfinding))
     app.add_handler(CommandHandler("bbevidence", cmd_bbevidence))
+    app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.CaptionRegex(IMAGINE_CAPTION_RE),
