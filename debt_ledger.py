@@ -458,23 +458,8 @@ def summarize_by_debtor(
     status: str = EntryStatus.UNPAID.value,
 ) -> dict:
     """The one function every /debt_summary figure ultimately comes
-    from. Pulls entries in [date_from, date_to] (inclusive Asia/Bangkok
-    calendar dates) and sums them per debtor using plain Python int
-    addition — sum() over already-integer satang values, nothing
-    parsed, nothing estimated, nothing sent to an LLM. Returns:
-
-        {
-          "date_from": ..., "date_to": ..., "status": ...,
-          "by_debtor": [
-            {"debtor_name": ..., "count": ..., "total_satang": ...,
-             "entries": [...]},
-            ...  # sorted by debtor_name
-          ],
-          "grand_total_satang": ..., "grand_total_count": ...,
-        }
-
-    An empty date range (no matching entries) returns an empty
-    by_debtor list and zeroed totals rather than raising."""
+    ... (docstring ทั้งหมด) ...
+    """
     entries = list_entries(
         chat_id, status=status, date_from=date_from, date_to=date_to,
         limit=SUMMARY_ROW_LIMIT,
@@ -489,12 +474,7 @@ def summarize_by_debtor(
     for name in sorted(by_debtor.keys()):
         rows = by_debtor[name]
         total = sum(r["amount_satang"] for r in rows)
-        debtor_summaries.append({
-            "debtor_name": name,
-            "count": len(rows),
-            "total_satang": total,
-            "entries": rows,
-        })
+        debtor_summaries.append({...})
         grand_total_satang += total
         grand_total_count += len(rows)
 
@@ -515,7 +495,7 @@ def _group_entries_by_debtor(entries: List[dict]) -> Tuple[List[dict], int, int]
     for e in entries:
         by_debtor.setdefault(e["debtor_name"], []).append(e)
         
-    dubtor_summaries = []
+    debtor_summaries = []
     grand_total_satang = 0
     grand_total_count = 0
     for name in sorted(by_debtor.keys()):
