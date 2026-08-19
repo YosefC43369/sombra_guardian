@@ -14,8 +14,8 @@ from telegram.constants import ChatMemberStatus, ChatAction, ChatType
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -1428,7 +1428,120 @@ _DEBT_STATUS_KEYWORDS = {
     "all": None,
 }
 
-DEBT_DETAIL_PAGE_SIZE = 10 # Requirement #14
+_DEBT_CB_DASHBOARD = "dbt:dash"
+_DEBT_CB_SELECT = "dbt:sel"     # dbt:sel:<ref>:<page>
+_DEBT_CB_CLOSE_ASK = "dbt:ca"   # dbt:ca:<ref>
+_DEBT_CB_CLOSE_DO = "dbt:cd"    # dbt:cd:<ref>
+DEBT_DETAIL_PAGE_SIZE = 10     # Requirement #14
+
+async def _build_debt_dashboard(chat_id: int):
+    """สร้าง (text, InlineKeyboardMarkup) ของ /debt เปล่า -- ปุ่ม 1 อันต่อคนที่
+    ยังค้างชำระ กดแล้วเปิดการ์ด accordion ของคนนั้น"""
+    summary = dl.summarize_debtors(chat_id, status=dl.EntryStatus.UNPAID.value)
+    text = dr.format_debt_dashboard(summary)
+    buttons = [
+        [InlineKeyboardButton(
+            dr.format_debtor_button_label(d["debtor_name"], d["total_satang"]),
+            callback_data=f"{_DEBT_CB_SELECT}:{dl.debtor_ref(chat_id, d['debtor_name'])}:1",
+        )]
+        for d in summary["by_debtor"]
+    ]
+    return text, (InlineKeyboardMarkup(buttons) if buttons else None)
+    
+    
+async def _build_debtor_detail_view(chat_id: int, debtor_name: str, page: int = 1):
+    entries = dl.list_entries(
+        chat_id, status=dl.EntryStatus.UNPAID.value,
+        debtor_name=debtor_name, limit=dl.SUMMARY_ROW_LIMIT,
+    )
+    total_satang = sum(e["amount_satang"] for e in entries)
+    text = dr.format_debtor_detail(
+        debtor_name, total_satang, entries, page=page, page_size=_DEBT_DETAIL_PAGE_SIZE,
+    )
+    ref = dl.debtor_ref(chat_id, debtor_name)
+    total_pages = max(1, -(-len(entries) // _DEBT_DETAIL_PAGE_SIZE))
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️ ก่อนหน้า", callback_data=f"{_DEBT_CB_SELECT}:{ref}:{page-1}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("ถัดไป ▶️", callback_data=f"{_DEBT_CB_SELECT}:{ref}:{page+1}"))
+
+    rows = [nav_row] if nav_row else []
+    if entries:
+        rows.append([InlineKeyboardButton("✅ ปิดยอดทั้งหมด (Admin)", callback_data=f"{_DEBT_CB_CLOSE_ASK}:{ref}")])
+    rows.append([InlineKeyboardButton("◀️ กลับไปหน้ารวม", callback_data=_DEBT_CB_DASHBOARD)])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def on_debt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Router เดียวสำหรับปุ่มทั้งหมดของ /debt dashboard --
+    resolve_debtor_ref คืน None แบบ safe เมื่อ ref เก่า/คนถูกปิดยอดไปแล้ว
+    ไม่ทำให้ bot crash"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    data = query.data or ""
+    parts = data.split(":")
+
+    if data == _DEBT_CB_DASHBOARD:
+        await query.answer()
+        text, markup = await _build_debt_dashboard(chat_id)
+        try:
+            return await query.edit_message_text(text, reply_markup=markup)
+        except TelegramError as e:
+            logger.info(f"DEBT CALLBACK EDIT ERROR: {e}")
+            return
+
+    if len(parts) < 3:
+        return await query.answer()
+
+    action, ref = parts[1], parts[2]
+
+    if action in ("ca", "cd") and not await is_admin(update, context):
+        return await query.answer("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin", show_alert=True)
+
+    await query.answer()
+
+    try:
+        if action == "sel":
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+            name = dl.resolve_debtor_ref(chat_id, ref)
+            if name is None:
+                text, markup = await _build_debt_dashboard(chat_id)
+                return await query.edit_message_text(
+                    "⚠️ ไม่พบรายการนี้แล้ว (อาจถูกปิดยอดไปแล้ว)\n\n" + text, reply_markup=markup
+                )
+            text, markup = await _build_debtor_detail_view(chat_id, name, page=page)
+            return await query.edit_message_text(text, reply_markup=markup)
+
+        elif action == "ca":
+            name = dl.resolve_debtor_ref(chat_id, ref)
+            if name is None:
+                text, markup = await _build_debt_dashboard(chat_id)
+                return await query.edit_message_text("⚠️ ไม่พบรายการนี้แล้ว\n\n" + text, reply_markup=markup)
+            confirm_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"✅ ยืนยันปิดยอด {name}", callback_data=f"{_DEBT_CB_CLOSE_DO}:{ref}")],
+                [InlineKeyboardButton("◀️ ยกเลิก", callback_data=f"{_DEBT_CB_SELECT}:{ref}:1")],
+            ])
+            return await query.edit_message_text(
+                f"⚠️ ยืนยันปิดยอดค้างชำระทั้งหมดของ {name}?", reply_markup=confirm_markup
+            )
+
+        elif action == "cd":
+            name = dl.resolve_debtor_ref(chat_id, ref)
+            if name is None:
+                text, markup = await _build_debt_dashboard(chat_id)
+                return await query.edit_message_text("⚠️ ไม่พบรายการนี้แล้ว\n\n" + text, reply_markup=markup)
+            result = dl.mark_debtor_paid(chat_id, name, actor_user_id=update.effective_user.id)
+            text, markup = await _build_debt_dashboard(chat_id)
+            if not result.ok:
+                return await query.edit_message_text(_deny_text_debt(result.reason) + "\n\n" + text, reply_markup=markup)
+            return await query.edit_message_text(
+                dr.format_paid_bulk(name, result.updated_count, result.total_satang) + "\n\n" + text,
+                reply_markup=markup,
+            )
+    except TelegramError as e:
+        logger.info(f"DEBT CALLBACK EDIT ERROR: {e}")
 
 
 def _debt_dashboard_keyboard(chat_id: int, summary: dict) -> InlineKeyboardMarkup:
