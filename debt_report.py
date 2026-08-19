@@ -28,7 +28,6 @@ _STATUS_TH_LONG = {
     dl.EntryStatus.PAID.value: "ชำระแล้ว",
 }
 
-
 def _display_date(iso_date: str) -> str:
     """'2026-08-19' -> '19/08/2026' (matches the spec's own examples;
     Gregorian, not Buddhist Era)."""
