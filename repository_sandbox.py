@@ -218,3 +218,31 @@ def detect_test_runner(workspace_path: str):
         return "npm", npm_cmd
         
     return None, None
+    
+    
+# ---------------- Sandboxed subprocess execution (Step 8/9) ----------------
+
+def _limit_resources():  # pragma: no cover - exercised only via a real subprocess
+    """Runs inside the child, after fork, before exec (POSIX only). Sets
+    hard resource ceilings as defense-in-depth alongside the wall-clock
+    timeout enforced by the parent."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (TEST_CPU_TIME_LIMIT_SECONDS, TEST_CPU_TIME_LIMIT_SECONDS))
+    except (ValueError, OSError):
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (TEST_MEMORY_LIMIT_BYTES, TEST_MEMORY_LIMIT_BYTES))
+    except (ValueError, OSError):
+        pass
+        
+        
+def _sandbox_env(workspace_path: str, tmp_dir: str) -> dict:
+    """A minimal, explicit environment allow-list -- never a copy of
+    this process's own os.environ, so a test can never read this bot's
+    BOT_TOKEN / GEMINI_API_KEY / DB_PATH etc. out of its environment."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": tmp_dir,
+        "TMPDIR": tmp_dir,
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
