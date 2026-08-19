@@ -245,4 +245,182 @@ def _sandbox_env(workspace_path: str, tmp_dir: str) -> dict:
         "HOME": tmp_dir,
         "TMPDIR": tmp_dir,
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "npm_config_cache": os.path.join(tmp_dir, "npm-cache"),
+        "CI": "true",
     }
+    return env
+    
+    
+def _kill_process_group(pid: int, sig) -> None:
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+        
+        
+def _run_capped(cmd: List[str], cwd: str, env: dict, timeout_seconds: int,
+                 max_output_bytes: int):
+    """Runs cmd (argument list, never shell=True) with a wall-clock
+    timeout and an in-flight output cap; kills the whole process group
+    (not just the direct child) the instant either limit is hit, so a
+    test can't survive its budget by detaching a grandchild or by
+    printing forever. Returns a dict: returncode, output, truncated,
+    timed_out, duration_seconds. POSIX-only (select/killpg); on a
+    platform without them this falls back to a plain bounded
+    subprocess.run with the timeout still enforced but no in-flight
+    output cap."""
+    import subprocess
+
+    start = time.monotonic()
+    posix = hasattr(os, "killpg") and hasattr(select, "select")
+
+    if not posix:
+        try:
+            proc = subprocess.run(
+                cmd, cwd=cwd, env=env, capture_output=True, text=True,
+                timeout=timeout_seconds,
+            )
+            out = proc.stdout + proc.stderr
+            truncated = len(out) > max_output_bytes
+            if truncated:
+                out = out[:max_output_bytes]
+            return {
+                "returncode": proc.returncode, "output": out, "truncated": truncated,
+                "timed_out": False, "duration_seconds": time.monotonic() - start,
+            }
+        except subprocess.TimeoutExpired as exc:
+            out = (exc.stdout or "") + (exc.stderr or "")
+            return {
+                "returncode": None, "output": out[:max_output_bytes], "truncated": len(out) > max_output_bytes,
+                "timed_out": True, "duration_seconds": time.monotonic() - start,
+            }
+        except OSError as exc:
+            return {
+                "returncode": None, "output": str(exc), "truncated": False,
+                "timed_out": False, "duration_seconds": time.monotonic() - start, "exec_error": True,
+            }
+
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+            preexec_fn=_limit_resources if _HAVE_RESOURCE else None,
+        )
+    except OSError as exc:
+        return {
+            "returncode": None, "output": str(exc), "truncated": False,
+            "timed_out": False, "duration_seconds": 0.0, "exec_error": True,
+        }
+
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+    
+    chunks: List[bytes] = []
+    total = 0
+    timed_out = False
+    output_limit_hit = False
+    
+    while True:
+        elapsed = time.monotonic() - start
+        remaining = timeout_seconds - elapsed
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+        except OSError:
+            break
+        if ready:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                data = b""
+            if data:
+                if total < max_output_bytes:
+                     chunks.append(data[: max_output_bytes - total])
+                total += len(data)
+                if total > max_output_bytes:
+                    output_limit_hit = True
+                    break
+                    
+            else:
+                 if proc.poll() is not None:
+                     break
+        else:
+             if proc.poll() is not None:
+                 break
+                
+    if timed_out or output_limit_hit:
+        _kill_process_group(proc.pid, signal.SIGTERM)
+        time.sleep(0.2)
+        _kill_process_group(proc.pid, signal.SIGKILL)
+        
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc.pid, signal.SIGKILL)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutError:
+            logger.error("sandbox subprocess pid=%s did not exit after SIGKILL", proc.pid)
+            
+    try:
+        proc.stdout.close()
+    except OSError:
+        pass
+        
+    output_text = b"".join(chunks).decode("utf-8", errors="replace")
+    return {
+        "returncode": proc.returncode,
+        "output": output_text,
+        "truncated": output_limit_hit,
+        "timed_out": timed_out,
+        "duration_seconds": time.monotonic() - start,
+    }
+    
+    
+# ---------------- Public entry point (Step 8/9/11) ----------------
+
+def run_repository_tests(repository_id, actor_user_id=None) -> TestRunResult:
+    """Detects and runs the repository's test suite inside its own
+    workspace directory, subject to every control documented at the top
+    of this module. Never raises on expected failure modes (missing
+    repo, unsupported project, disabled feature, concurrency limit,
+    timeout, output overrun) -- only a TestRunResult.ok=False +
+    `reason` is returned."""
+    if not TEST_EXECUTION_ENABLED:
+        _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TEST_EXECUTION_DISABLED")
+        return TestRunResult(ok=False, reason="TEST_EXECUTION_DISABLED")
+        
+    workspace_path = get_workspace_path(repository_id)
+    if workspace_path is None:
+        return TestRunResult(ok=False, reason="REPOSITORY_NOT_AVAILABLE")
+        
+    runner, command = detect_test_runner(workspace_path)
+    if runner is None:
+        _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TOO_MANY_CONCURRENT_TEST_RUNS")
+        return TestRunResult(ok=False, reason="NO_SUPPORTED_TEST_RUNNER")
+        
+    if not _try_acquire_test_slot():
+        _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TOO_MANY_CONCURRENT_TEST_RUNS")
+        return TestRunResult(ok=False, reason="TOO_MANY_CONCURRENT_TEST_RUNS", runner=runner, command=command)
+        
+import tempfile
+tmp_dir = tempfile.mkdtemp(prefix="repo_test_home_")
+try:
+    _audit(repository_id, actor_user_id, "REPO_TEST_STARTED", f"runner={runner} command={' '.join(command)}")
+    
+    env = _sandbox_env(workspace_path, tmp_dir)
+    outcome = _run_capped(command, cwd=workspace_path, env=env,
+                           timeout_seconds=TEST_RUN_TIMEOUT_SECONDS,
+                            max_output_bytes=MAX_TEST_OUTPUT_BYTES)
+                            
+    if outcome.get("exec_error"):
+        _audit(repository_id, actor_user_id, "REPO_TEST_TIMEOUT",
