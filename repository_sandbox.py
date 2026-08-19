@@ -167,3 +167,30 @@ def _has_python_test_files(workspace_path: str) -> bool:
             if scanned > MAX_DETECT_FILES_SCANNED:
                 return False
             rel = os.path.relpath(os.path.join(root, fname), workspace_path).replace(os.sep, "/")
+            if _TEST_FILE_RE.search(rel):
+                return True
+    return False
+    
+
+def _npm_test_command(workspace_path: str) -> Optional[List[str]]:
+    """Returns ["npm", "test"] if package.json defines a real (non
+    placeholder) "test" script and npm is actually installed on this
+    host, else None. package.json is only ever parsed with json.load
+    (never eval'd/imported), and the script itself is never read out
+    and re-executed as a shell string -- `npm test` is what's actually
+    invoked, exactly like `python -m pytest` below."""
+    pkg_path = os.path.join(workspace_path, "package.json")
+    if not os.path.isfile(pkg_path):
+        return None
+    if shutil.which("npm") is None:
+        return None
+    text = _peak_text(pkg_path, max_bytes=1_000_000)
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if not isinstance(scripts, dict):
+        return None
