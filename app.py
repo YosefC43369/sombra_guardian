@@ -1673,7 +1673,7 @@ async def cmd_debt_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
          date_from, date_to = dl.previous_month_range()
         
     summary = dl.summarize_by_debtor(chat_id, date_from, date_to)
-    text = dr.format_debt_summary
+    text = dr.format_debt_summary(summary)
     
     if use_ai:
         ok, ai_text = await gemini.ask_gemini(
