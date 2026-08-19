@@ -398,29 +398,74 @@ def run_repository_tests(repository_id, actor_user_id=None) -> TestRunResult:
     if not TEST_EXECUTION_ENABLED:
         _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TEST_EXECUTION_DISABLED")
         return TestRunResult(ok=False, reason="TEST_EXECUTION_DISABLED")
-        
+
     workspace_path = get_workspace_path(repository_id)
     if workspace_path is None:
         return TestRunResult(ok=False, reason="REPOSITORY_NOT_AVAILABLE")
-        
+
     runner, command = detect_test_runner(workspace_path)
     if runner is None:
-        _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TOO_MANY_CONCURRENT_TEST_RUNS")
+        _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=NO_SUPPORTED_TEST_RUNNER")
         return TestRunResult(ok=False, reason="NO_SUPPORTED_TEST_RUNNER")
-        
+
     if not _try_acquire_test_slot():
         _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED", "reason=TOO_MANY_CONCURRENT_TEST_RUNS")
         return TestRunResult(ok=False, reason="TOO_MANY_CONCURRENT_TEST_RUNS", runner=runner, command=command)
+
+    import tempfile
+    tmp_dir = tempfile.mkdtemp(prefix="repo_test_home_")
+    try:
+        _audit(repository_id, actor_user_id, "REPO_TEST_STARTED", f"runner={runner} command={' '.join(command)}")
+
+        env = _sandbox_env(workspace_path, tmp_dir)
+        outcome = _run_capped(command, cwd=workspace_path, env=env,
+                               timeout_seconds=TEST_RUN_TIMEOUT_SECONDS,
+                               max_output_bytes=MAX_TEST_OUTPUT_BYTES)
+
+        if outcome.get("exec_error"):
+            _audit(repository_id, actor_user_id, "REPO_TEST_REJECTED",
+                   f"runner={runner} reason=EXEC_ERROR")
+            return TestRunResult(ok=False, reason="EXEC_ERROR", runner=runner, command=command,
+                                  output=outcome["output"])
+
+        if outcome["timed_out"]:
+            _audit(repository_id, actor_user_id, "REPO_TEST_TIMEOUT",
+                   f"runner={runner} timeout={TEST_RUN_TIMEOUT_SECONDS}s")
+            return TestRunResult(ok=False, reason="TIMEOUT", runner=runner, command=command,
+                                  output=outcome["output"], output_truncated=outcome["truncated"],
+                                  timed_out=True, duration_seconds=outcome["duration_seconds"])
+
+        if outcome["truncated"] and outcome["returncode"] is None:
+            _audit(repository_id, actor_user_id, "REPO_TEST_COMPLETED",
+                   f"runner={runner} reason=OUTPUT_LIMIT_EXCEEDED")
+            return TestRunResult(ok=False, reason="OUTPUT_LIMIT_EXCEEDED", runner=runner, command=command,
+                                  output=outcome["output"], output_truncated=True,
+                                  duration_seconds=outcome["duration_seconds"])
+
+        passed = outcome["returncode"] == 0
+        _audit(repository_id, actor_user_id, "REPO_TEST_COMPLETED",
+               f"runner={runner} passed={passed} returncode={outcome['returncode']} "
+               f"duration={outcome['duration_seconds']:.1f}s truncated={outcome['truncated']}")
+        return TestRunResult(
+            ok=True, runner=runner, command=command, passed=passed,
+            returncode=outcome["returncode"], output=outcome["output"],
+            output_truncated=outcome["truncated"], duration_seconds=outcome["duration_seconds"],
+        )
+    finally:
+        _release_test_slot()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         
-import tempfile
-tmp_dir = tempfile.mkdtemp(prefix="repo_test_home_")
-try:
-    _audit(repository_id, actor_user_id, "REPO_TEST_STARTED", f"runner={runner} command={' '.join(command)}")
-    
-    env = _sandbox_env(workspace_path, tmp_dir)
-    outcome = _run_capped(command, cwd=workspace_path, env=env,
-                           timeout_seconds=TEST_RUN_TIMEOUT_SECONDS,
-                            max_output_bytes=MAX_TEST_OUTPUT_BYTES)
-                            
-    if outcome.get("exec_error"):
-        _audit(repository_id, actor_user_id, "REPO_TEST_TIMEOUT",
+        
+def _audit(repository_id, actor_user_id, action: str, detail: str = "") -> None:
+    """Same best-effort-audit-write pattern as repository_tools._audit;
+    duplicated locally (a few lines) rather than imported across modules
+    to keep repository_sandbox.py's own safety-critical path free of a
+    cross-module dependency on repository_tools.py."""
+    try:
+        info = get_repository_info(repository_id)
+        chat_id = info["chat_id"] if info else None
+        if chat_id is None:
+            return
+        write_audit_log(chat_id, actor_user_id, actor="user", action=action, detail=detail)
+    except Exception:
+        logger.exception("audit log write failed action=%s repository_id=%s", action, repository_id)
