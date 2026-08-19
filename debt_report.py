@@ -107,6 +107,58 @@ def format_debt_summary(summary: dict, show_details: bool = True) -> str:
                 )
 
     return "\n".join(lines)
+    
+
+def format_debt_dashboard(summary: dict) -> str:
+    """Header text ของ Dashboard /debt เปล่า -- ปุ่มสร้างใน app.py,
+    ฟังก์ชันนี้คืนแค่ข้อความด้านบน keyboard เท่านั้น."""
+    if not summary["by_debtor"]:
+        return "📋 ยอดค้างทั้งหมด\nไม่มีรายการค้างชำระ 🎉"
+    return (
+        "📋 ยอดค้างทั้งหมด\n"
+        f"💰 ยอดรวม: {dl.format_baht(summary['grand_total_satang'])}\n"
+        f"👥 ผู้ค้างทั้งหมด: {len(summary['by_debtor'])} คน\n"
+        "เลือกบุคคลเพื่อดูรายละเอียด:"
+    )
+
+
+def format_debtor_button_label(debtor_name: str, total_satang: int) -> str:
+    return f"👤 {debtor_name} — {dl.format_baht(total_satang)}"
+
+
+def format_debtor_detail(
+    debtor_name: str,
+    total_satang: int,
+    entries: List[dict],
+    expanded: bool = True,
+    page: int = 1,
+    page_size: int = 10,
+) -> str:
+    """การ์ด Accordion ของคนหนึ่งคน -- ใช้ร่วมกันทั้ง callback handler
+    และ /debt <ชื่อ> (Requirement #9) ตัด pagination ไม่ให้เกิน Telegram
+    message limit (Requirement #14)."""
+    icon = "📋" if expanded else "👤"
+    lines = [f"{icon} {debtor_name}", f"💰 ยอดค้าง: {dl.format_baht(total_satang)}"]
+    if not expanded:
+        return "\n".join(lines)
+
+    lines.append("รายละเอียด:")
+    if not entries:
+        lines.append("ไม่มีรายการ")
+        return "\n".join(lines)
+
+    total_pages = max(1, -(-len(entries) // page_size))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    for e in entries[start:start + page_size]:
+        item = e.get("item_description") or ""
+        suffix = f" — {item}" if item else ""
+        lines.append(
+            f"• {_display_date(e['entry_date'])}  +{dl.format_baht(e['amount_satang'])}{suffix}"
+        )
+    if total_pages > 1:
+        lines.append(f"\nหน้า {page}/{total_pages}")
+    return "\n".join(lines)
 
 
 def format_paid_single(entry_id: int, total_satang: int) -> str:
