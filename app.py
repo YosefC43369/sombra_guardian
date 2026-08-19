@@ -1424,6 +1424,28 @@ _DEBT_STATUS_KEYWORDS = {
 }
 
 
+async def cmd_debt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/debt [ชื่อ|unpaid|paid|all] -- ดูรายการค้างชำระ (เปิดให้สมาชิกทุกคน
+    ดูได้ ไม่ต้องเป็น Admin). ไม่ใส่ argument = รายการที่ยังไม่จ่ายทั้งหมด."""
+    args = context.args or []
+    chat_id = update.effective_chat.id
+    status_filter = dl.EntryStatus.UNPAID.value
+    debtor_name = None
+    title = "รายการค้างชำระ"
+    if args:
+        first = args[0].lower()
+        if first in _DEBT_STATUS_KEYWORDS:
+            status_filter = _DEBT_STATUS_KEYWORDS[first]
+            title = {"unpaid": "รายการค้างชำระ", "paid": "รายการที่จ่ายแล้ว",
+                     "all": "รายการทั้งหมด"}[first]
+        else:
+            debtor_name = args[0]
+            title = f"รายการค้างชำระของ {debtor_name}"
+
+    entries = dl.list_entries(chat_id, status=status_filter, debtor_name=debtor_name)
+    await _reply_chunked(update, dr.format_entries_table(entries, title=title))
+
+
 async def cmd_debt_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/debt_summary [YYYY-MM] [ai] -- สรุปยอดค้างชำระต่อคนของรอบเดือนหนึ่ง
     (ไม่ใส่เดือน = เดือนก่อนหน้าเดือนปัจจุบัน ตาม Asia/Bangkok). เปิดให้
