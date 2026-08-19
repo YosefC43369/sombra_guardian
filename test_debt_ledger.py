@@ -10,6 +10,7 @@ test's rows.
 """
 
 import os
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -305,6 +306,100 @@ class DebtLedgerTestCase(unittest.TestCase):
         self.assertEqual(len(summary["by_debtor"]), 1)
         self.assertEqual(summary["by_debtor"][0]["count"], 3)
         self.assertEqual(summary["by_debtor"][0]["total_satang"], 6000)
+        
+    def test_repeated_sign_same_name_accumulates_total(self):
+        self._sign(name="สมชาย", amount="50")
+        self._sign(name="สมชาย", amount="50")
+        self._sign(name="สมชาย", amount="30")
+        summary = dl.summarize_debtors(1)
+        somchai = next(d for d in summary["by_debtor"] if d["debtor_name"] == "สมชาย")
+        self.assertEqual(somchai["total_satang"], 13000)  # 130 บาท
+
+    def test_repeated_sign_same_name_keeps_every_transaction_row(self):
+        self._sign(name="สมชาย", amount="50")
+        self._sign(name="สมชาย", amount="50")
+        self._sign(name="สมชาย", amount="30")
+        rows = dl.list_entries(1, debtor_name="สมชาย")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r["amount_satang"] for r in rows], [5000, 5000, 3000])
+
+    def test_summarize_debtors_multiple_people_grand_total(self):
+        self._sign(name="สมชาย", amount="130")
+        self._sign(name="สมหญิง", amount="80")
+        self._sign(name="John", amount="50")
+        summary = dl.summarize_debtors(1)
+        self.assertEqual(len(summary["by_debtor"]), 3)
+        self.assertEqual(summary["grand_total_satang"], 26000)  # 260 บาท
+
+    def test_summarize_debtors_ignores_date(self):
+        self._sign(name="สมชาย", amount="50", entry_date="2020-01-01")
+        self._sign(name="สมชาย", amount="30", entry_date="2026-08-19")
+        summary = dl.summarize_debtors(1)
+        self.assertEqual(summary["grand_total_satang"], 8000)
+
+    def test_summarize_debtors_paid_reduces_unpaid_total(self):
+        r1 = self._sign(name="สมชาย", amount="50")
+        self._sign(name="สมชาย", amount="30")
+        dl.mark_entry_paid(r1.entry_id, actor_user_id=999)
+        summary = dl.summarize_debtors(1)
+        somchai = next(d for d in summary["by_debtor"] if d["debtor_name"] == "สมชาย")
+        self.assertEqual(somchai["total_satang"], 3000)
+
+    def test_summarize_debtors_fully_paid_debtor_excluded_from_unpaid(self):
+        r1 = self._sign(name="สมชาย", amount="50")
+        dl.mark_entry_paid(r1.entry_id, actor_user_id=999)
+        summary = dl.summarize_debtors(1)
+        names = [d["debtor_name"] for d in summary["by_debtor"]]
+        self.assertNotIn("สมชาย", names)
+
+    def test_summarize_debtors_reflects_new_sign_after_refresh(self):
+        self._sign(name="สมชาย", amount="50")
+        before = dl.summarize_debtors(1)["grand_total_satang"]
+        self._sign(name="สมชาย", amount="50")
+        after = dl.summarize_debtors(1)["grand_total_satang"]
+        self.assertEqual(before, 5000)
+        self.assertEqual(after, 10000)
+
+    # ---- debtor_ref / resolve_debtor_ref (Requirement #4/#5/#6/#7) ----
+
+    def test_debtor_ref_is_short_and_callback_safe(self):
+        ref = dl.debtor_ref(1, "สมชาย" * 20)
+        self.assertLessEqual(len(f"debt:user:{ref}".encode("utf-8")), 64)
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{10}", ref))
+
+    def test_debtor_ref_stable_and_resolves_back_to_name(self):
+        self._sign(name="สมชาย", amount="50")
+        ref = dl.debtor_ref(1, "สมชาย")
+        self.assertEqual(dl.debtor_ref(1, "สมชาย"), ref)
+        self.assertEqual(dl.resolve_debtor_ref(1, ref), "สมชาย")
+
+    def test_debtor_ref_scoped_by_chat_id(self):
+        self._sign(name="สมชาย", amount="50", chat_id=1)
+        self._sign(name="สมชาย", amount="50", chat_id=2)
+        ref_chat1 = dl.debtor_ref(1, "สมชาย")
+        self.assertIsNone(dl.resolve_debtor_ref(2, ref_chat1))
+
+    def test_resolve_debtor_ref_unknown_returns_none_not_crash(self):
+        self._sign(name="สมชาย", amount="50")
+        self.assertIsNone(dl.resolve_debtor_ref(1, "0000000000"))
+
+    # ---- pagination stays within Telegram message limits (Requirement #14) ----
+
+    def test_format_debtor_detail_paginates_long_history(self):
+        for i in range(25):
+            self._sign(name="สมชาย", amount="10", entry_date="2026-08-01")
+        entries = dl.list_entries(1, debtor_name="สมชาย", limit=dl.SUMMARY_ROW_LIMIT)
+        text = dr.format_debtor_detail("สมชาย", 25000, entries, expanded=True,
+                                        page=1, page_size=10)
+        self.assertEqual(text.count("•"), 10)
+        self.assertIn("หน้า 1/3", text)
+
+    def test_format_debtor_detail_collapsed_has_no_transaction_lines(self):
+        self._sign(name="สมชาย", amount="50")
+        entries = dl.list_entries(1, debtor_name="สมชาย")
+        text = dr.format_debtor_detail("สมชาย", 5000, entries, expanded=False)
+        self.assertNotIn("•", text)
+        self.assertIn("สมชาย", text)
 
     # ---- month_range / previous_month_range / parse_month_arg (boundaries) ----
 
