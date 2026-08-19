@@ -36,3 +36,35 @@ findings.py):
   signature made late at night in Thailand never lands in the wrong
   month just because the server clock is UTC.
 """
+
+import re
+import time
+import sqlite3
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from security import DB_PATH, write_audit_log
+
+logger = logging.getLogger("modbot.debt_ledger")
+
+BANGKOK_TZ_NAME = "Asia/Bangkok"
+try:
+    BANGKOK_TZ = ZoneInfo(BANGKOK_TZ_NAME)
+except ZoneInfoNotFoundError: # pragma: no cover - only if tzdata truly missing
+    logger.exception(
+        "DEBT LEDGER: Asia/Bangkok tzdata not found on this system — "
+        "install the 'tzdata' package (see requirements.txt)."
+    )
+    raise
+    
+MAX_NAME_LEN = 100
+MAX_DESCRIPTION_LEN = 500
+MAX_RAW_AMOUNT_LEN = 32    # sanity cap before we even try Decimal()
+MAX_ENTRY_AMOUNT = Decimal("1000000") # 1,000,000 บาท per single entry
+DEFAULT_LIST_LIMIT = 200
+SUMMARY_ROW_LIMIT = 100000 # effectively "no cap" for one summary query
