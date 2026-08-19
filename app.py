@@ -347,6 +347,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ส่งรูปภาพ/ไฟล์ PDF/TXT พร้อม caption แท็ก @{context.bot.username} "
         f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์\n"
         "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท"
+        "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
+        "/debt [ชื่อ|unpaid|paid|all] - ดูรายการค้างชำระ\n"
+        "/debt_summary [YYYY-MM] [ai] - สรุปยอดค้างชำระรายเดือน\n"
+        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM] - ปิดยอดชำระ (Admin)"
     )
     await update.message.reply_text(text)
     
