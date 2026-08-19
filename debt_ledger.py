@@ -513,7 +513,7 @@ def _group_entries_by_debtor(entries: List[dict]) -> Tuple[List[dict], int, int]
     Requirement #2)."""
     by_debtor: Dict[str, List[dict]] = {}
     for e in entries:
-        by_debtor.stdefault(e["debtor_name"], []).append(e)
+        by_debtor.setdefault(e["debtor_name"], []).append(e)
         
     dubtor_summaries = []
     grand_total_satang = 0
