@@ -200,3 +200,21 @@ def _npm_test_command(workspace_path: str) -> Optional[List[str]]:
     if "no test specified" in test_script:
         return None # npm's own placeholder for "no tests configured"
     return ["npm", "test"]
+    
+    
+def detect_test_runner(workspace_path: str):
+    """Returns (runner_name, command_list) for the first supported,
+    explicitly allow-listed test runner detected from repository
+    files/configuration, or (None, None) if nothing supported is found.
+    Precedence: Python test files (pytest if importable+configured,
+    else unittest), then a Node package.json with a real test script."""
+    if _hash_python_test_files(workspace_path):
+        if _pytest_available() and _pytest_configured(workspace_path):
+            return "pytest", [sys.executable, "-m", "pytest", "-q"]
+        return "unittest", [sys.executable, "-m", "unittest", "discover", "-s", ".", "-t", "."]
+        
+    npm_cmd = _npm_test_command(workspace_path)
+    if npm_cmd is not None:
+        return "npm", npm_cmd
+        
+    return None, None
