@@ -194,3 +194,9 @@ def _npm_test_command(workspace_path: str) -> Optional[List[str]]:
     scripts = data.get("scripts") if isinstance(data, dict) else None
     if not isinstance(scripts, dict):
         return None
+    test_script = scripts.get("test")
+    if not test_script or not isinstance(test_script, str):
+        return None
+    if "no test specified" in test_script:
+        return None # npm's own placeholder for "no tests configured"
+    return ["npm", "test"]
