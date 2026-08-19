@@ -20,10 +20,10 @@ from typing import List, Optional
 import debt_ledger as dl
 
 _STATUS_TH = {
-    dl.EntryStatus.UNPAID.value: "ยังไม่จ่าย"
-    dl.EntryStatus.PAID.value: "จ่ายแล้ว"
+    dl.EntryStatus.UNPAID.value: "ยังไม่จ่าย",
+    dl.EntryStatus.PAID.value: "จ่ายแล้ว",
 }
-_STATUS_TH_LONG {
+_STATUS_TH_LONG = {
     dl.EntryStatus.UNPAID.value: "ยังไม่ชำระ",
     dl.EntryStatus.PAID.value: "ชำระแล้ว",
 }
