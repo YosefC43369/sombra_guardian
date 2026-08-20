@@ -94,7 +94,7 @@ class WithdrawalStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     COMPLETED = "completed"
-    CANCELLED = "cancelled
+    CANCELLED = "cancelled"
     
     
 class PaymentStatus(str, Enum):
