@@ -960,21 +960,21 @@ def cancel_payment_request(chat_id: int, payment_id: int, actor_id: int,
                             is_admin_actor: bool = False) -> OpResult:
     try:
         with _tx() as conn:
-             row = conn.execute(
-                "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
-                (payment_id, chat_id),
-            ).fetchone()
-            if not row:
-                raise _Abort("NOT_FOUND")
-            req = dict(row)
-            if req["status"] != PaymentStatus.PENDING.value:
-                raise _Abort("ALREADY_PROCESSED")
-            if not is_admin_actor and req["requested_by"] != actor_id:
-                raise _Abort("FORBIDDEN")
-            conn.execute(
-                "UPDATE payment_requests SET status=? WHERE payment_id=?",
-                (PaymentStatus.CANCELLED.value, payment_id),
-            )
+            row = conn.execute(
+              "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
+              (payment_id, chat_id),
+          ).fetchone()
+          if not row:
+              raise _Abort("NOT_FOUND")
+          req = dict(row)
+          if req["status"] != PaymentStatus.PENDING.value:
+              raise _Abort("ALREADY_PROCESSED")
+          if not is_admin_actor and req["requested_by"] != actor_id:
+              raise _Abort("FORBIDDEN")
+          conn.execute(
+              "UPDATE payment_requests SET status=? WHERE payment_id=?",
+              (PaymentStatus.CANCELLED.value, payment_id),
+          )
     except _Abort as e:
         return OpResult(False, reason=e.reason)
     except sqlite3.Error:
