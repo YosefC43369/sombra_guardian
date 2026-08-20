@@ -1052,6 +1052,7 @@ def pay_debt_with_wallet(chat_id: int, entry_id: int, payer_user_id: int,
             if debit_tx is None:
                 raise _Abort("INSUFFICIENT_BALANCE")
 
+            amount_satang = fresh_entry["amount_satang"]
             paid_entry = dl._mark_entry_paid_in_conn(conn, fresh_entry, payer_user_id)
     except _Abort as e:
         return OpResult(False, reason=e.reason)
