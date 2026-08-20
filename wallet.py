@@ -299,3 +299,16 @@ def parse_amount_to_satang(raw: Optional[str]) -> Optional[int]:
     satang = int((amount * 100).to_integral_exact(rounding=ROUND_HALF_UP))
     if satang <= 0:
         return None
+    return satang
+    
+    
+def format_baht(satang: int) -> str:
+    """Integer satang -> Thai baht display text with thousands
+    separators. Whole-baht amounts render without decimals."""
+    baht = Decimal(satang) / 100
+    if satang % 100 == 0:
+        return f"{int(baht):,} บาท"
+    return f"{baht:,.2f} บาท"
+    
+    
+def parse_signed_amount_to_satang
