@@ -311,4 +311,274 @@ def format_baht(satang: int) -> str:
     return f"{baht:,.2f} บาท"
     
     
-def parse_signed_amount_to_satang
+def parse_signed_amount_to_satang(raw: Optional[str]) -> Optional[int]:
+    """Like parse_amount_to_satang() but allows a leading '-' -- used
+    only by /admin adjust, where a negative amount is a deliberate
+    balance deduction. Magnitude is still capped by MAX_TX_AMOUNT."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    negative = text.startswith(text)
+    if negative:
+        text = text[1:]
+    satang = parse_amount_to_stang(text)
+    if satang is None:
+        return None
+    return -satang if negative else satang
+    
+# ---------------- Known-users cache (for @username resolution) ----------------
+
+def remember_user(chat_id: int, user_id: int, username: Optional[str] = None,
+                   display_name: Optional[str] = None) -> None:
+    now = int(time.time())
+    conn = _conn()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "INSERT INTO wallet_known_users (chat_id, user_id, username, display_name, last_seen_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET "
+        "username=excluded.username, display_name=excluded.display_name, "
+        "last_seen_at=excluded.last_seen_at",
+        (chat_id, user_id, (username or None), (display_name or None), now),
+    )
+    conn.commit()
+    conn.close()
+    
+    
+def resolve_username(chat_id: int, username: str) -> Optional[int]:
+    """'@name' or 'name' -> user_id, only if this bot has seen that
+    username speak in this chat before. Returns None otherwise (never
+    raises) -- callers should suggest Reply-to-message instead."""
+    uname = (username or "").lstrip("@").strip()
+    if not uname:
+        return None
+    conn = _conn()
+    row = conn.execute(
+        "SELECT user_id FROM wallet_known_users WHERE chat_id=? AND username=? COLLATE NOCASE",
+        (chat_id, uname),
+    ).fetchone()
+    conn.close()
+    return row["user_id"] if row else None
+    
+    
+# ---------------- Core ledger primitives (must run inside an open _tx()) ----------------
+
+def _get_or_create_balance(conn, chat_id: int, user_id: int) -> int:
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO wallets (chat_id, user_id, balance_satang, created_at, updated_at) "
+        "VALUES (?, ?, 0, ?, ?) ON CONFLICT(chat_id, user_id) DO NOTHING",
+        (chat_id, user_id, now, now),
+    )
+    row = conn.execute(
+        "SELECT balance_satang FROM wallets WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()
+    return row["balance_satang"]
+    
+    
+def  _find_by_idempotency_key(conn, chat_id: int, idempotency_key: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM wallet_transactions WHERE chat_id=? AND idempotency_key=?",
+        (chat_id, idempotency_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _insert_tx(conn, chat_id, user_id, tx_type, amount_satang, balance_before, balance_after,
+               status, reference_id, counterparty_user_id, reason, metadata, idempotency_key,
+               created_by) -> dict:
+    now = int(time.time())
+    meta_json = json.dumps(metadata) if isinstance(metadata, (dict, list)) else metadata
+    cur = conn.execute(
+        "INSERT INTO wallet_transactions "
+        "(chat_id, user_id, type, amount_satang, balance_before_satang, balance_after_satang, "
+        " status, reference_id, counterparty_user_id, reason, metadata, idempotency_key, "
+        " created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (chat_id, user_id, tx_type, amount_satang, balance_before, balance_after,
+         status, reference_id, counterparty_user_id, reason, meta_json, idempotency_key,
+         created_by, now),
+    )
+    return {
+        "transaction_id": cur.lastrowid, "chat_id": chat_id, "user_id": user_id,
+        "type": tx_type, "amount_satang": amount_satang,
+        "balance_before_satang": balance_before, "balance_after_satang": balance_after,
+        "status": status, "reference_id": reference_id,
+        "counterparty_user_id": counterparty_user_id, "reason": reason,
+        "metadata": meta_json, "idempotency_key": idempotency_key,
+        "created_by": created_by, "created_at": now,
+    }
+    
+
+def _credit(conn, chat_id, user_id, amount_satang, tx_type, status=TxStatus.COMPLETED.value,
+            reference_id=None, counterparty_user_id=None, reason=None, metadata=None,
+            idempotency_key=None, created_by=None) -> dict:
+    """Increases balance and inserts one ledger row. Always succeeds
+    (crediting can never be 'insufficient')."""
+    balance_before = _get_or_create_balance(conn, chat_id, user_id)
+    balance_after = balance_before + amount_satang
+    conn.execute(
+        "UPDATE wallets SET balance_satang=?, updated_at=? WHERE chat_id=? AND user_id=?",
+        (balance_after, int(time.time()), chat_id, user_id),
+    )
+    return _insert_tx(conn, chat_id, user_id, tx_type, amount_satang, balance_before,
+                       balance_after, status, reference_id, counterparty_user_id, reason,
+                       metadata, idempotency_key, created_by or user_id)
+
+
+def _debit(conn, chat_id, user_id, amount_satang, tx_type, status=TxStatus.COMPLETED.value,
+           reference_id=None, counterparty_user_id=None, reason=None, metadata=None,
+           idempotency_key=None, created_by=None) -> Optional[dict]:
+    """Atomic conditional debit. The `WHERE balance_satang >= ?` clause
+    is what actually prevents a negative balance / double-spend under
+    concurrency -- there is no separate 'check balance' read the debit
+    could race against, because BEGIN IMMEDIATE already means no other
+    writer is touching this row at the same time. Returns None (no row
+    inserted, caller's transaction should abort) if funds are
+    insufficient."""
+    _get_or_create_balance(conn, chat_id, user_id)
+    row = conn.execute(
+        "SELECT balance_satang FROM wallets WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()
+    balance_before = row["balance_satang"]
+    cur = conn.execute(
+        "UPDATE wallets SET balance_satang = balance_satang - ?, updated_at=? "
+        "WHERE chat_id=? AND user_id=? AND balance_satang >= ?",
+        (amount_satang, int(time.time()), chat_id, user_id, amount_satang),
+    )
+    if cur.rowcount == 0:
+        return None
+    balance_after = balance_before - amount_satang
+    return _insert_tx(conn, chat_id, user_id, tx_type, amount_satang, balance_before,
+                       balance_after, status, reference_id, counterparty_user_id, reason,
+                       metadata, idempotency_key, created_by or user_id)
+                      
+                
+# ---------------- Wallet: read ----------------
+
+def get_wallet(chat_id: int, user_id: int) -> dict:
+    """Returns {chat_id, user_id, balance_satang}, lazily creating an
+    empty wallet on first look (Requirement #1: every user should have
+    one)."""
+    with _tx() as conn:
+        balance = _get_or_create_balance(conn, chat_id, user_id)
+    return {"chat_id": chat_id, "user_id": user_id, "balance_satang": balance}
+
+
+def get_transaction(transaction_id: int) -> Optional[dict]:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT * FROM wallet_transactions WHERE transaction_id=?", (transaction_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_transactions(chat_id: int, user_id: int, page: int = 1,
+                       page_size: int = DEFAULT_HISTORY_PAGE_SIZE) -> dict:
+    """Paginated, newest-first transaction history for one user's
+    wallet in one chat (/history)."""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    conn = _conn()
+    total = conn.execute(
+        "SELECT COUNT(*) AS c FROM wallet_transactions WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()["c"]
+    rows = conn.execute(
+        "SELECT * FROM wallet_transactions WHERE chat_id=? AND user_id=? "
+        "ORDER BY transaction_id DESC LIMIT ? OFFSET ?",
+        (chat_id, user_id, page_size, (page - 1) * page_size),
+    ).fetchall()
+    conn.close()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "items": [dict(r) for r in rows], "page": page, "page_size": page_size,
+        "total_count": total, "total_pages": total_pages,
+    }
+    
+    
+def recompute_balance(chat_id: int, user_id: int) -> int:
+    """Rebuilds a balance from the ledger alone (credits minus debits,
+    ignoring pending rows) -- for tests/audits only, never used on any
+    write path. Any mismatch with wallets.balance_satang would indicate
+    a bug, not something this function itself can fix."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT type, amount_satang FROM wallet_transactions "
+        "WHERE chat_id=? AND user_id=? AND status='completed'",
+        (chat_id, user_id),
+    ).fetchall()
+    conn.close()
+    credit_types = {TxType.DEPOSIT.value, TxType.TRANSFER_IN.value, TxType.REFUND.value}
+    total = 0
+    for r in rows:
+        if r["type"] in credit_types or (r["type"] == TxType.ADJUSTMENT.value and r["amount_satang"] >= 0):
+            total += r["amount_satang"]
+        else:
+             total -= abs(r["amount_satang"])
+    return total
+    
+    
+# ---------------- Admin manual adjustment ----------------
+
+def admin_adjust(chat_id: int, target_user_id: int, delta_satang: int, admin_id: int,
+                  reason: str) -> OpResult:
+    """Manual balance correction by an Admin (+ to credit, - to debit).
+    `reason` is required and stored on the ledger row -- Requirement
+    #10: every Admin Adjustment must record admin_id/target_user_id/
+    amount/reason/timestamp/transaction_id, all of which this one
+    wallet_transactions row already carries."""
+    if not reason or not reason.strip():
+        return OpResult(False, reason="REASON_REQUIRED")
+    if delta_satang is None or delta_satang == 0:
+        return OpResult(False, reason="INVALID_AMOUNT")
+    if abs(delta_satang) > int(MAX_TX_AMOUNT * 100):
+        return OpResult(False, reason="INVALID_AMOUNT")
+
+    try:
+        with _tx() as conn:
+            if delta_satang > 0:
+                tx = _credit(conn, chat_id, target_user_id, delta_satang, TxType.ADJUSTMENT.value,
+                             reason=reason.strip(), created_by=admin_id)
+            else:
+                tx = _debit(conn, chat_id, target_user_id, -delta_satang, TxType.ADJUSTMENT.value,
+                            reason=reason.strip(), created_by=admin_id)
+                if tx is None:
+                    raise _Abort("INSUFFICIENT_BALANCE")
+    except _Abort as e:
+        return OpResult(False, reason=e.reason, detail=e.detail)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on admin_adjust")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, target_user_id, actor="admin", action="WALLET_ADMIN_ADJUST",
+                     detail=f"admin={admin_id} delta_satang={delta_satang} reason={reason!r} "
+                            f"transaction_id={tx['transaction_id']}")
+    return OpResult(True, data={"transaction": tx})
+
+
+# ---------------- Deposits ----------------
+
+def request_deposit(chat_id: int, user_id: int, amount_satang: int) -> OpResult:
+    """Records a PENDING deposit claim -- balance is NOT credited yet.
+    An Admin must /admin deposit confirm it after verifying the money
+    actually arrived (cash handed over, bank transfer checked, etc.);
+    see the module docstring / payment_provider.py for why a user's own
+    'โอนแล้ว' message is never enough by itself."""
+    if amount_satang is None or amount_satang <= 0:
+        return OpResult(False, reason="INVALID_AMOUNT")
+    try:
+        with _tx() as conn:
+            balance_now = _get_or_create_balance(conn, chat_id, user_id)
+            tx = _insert_tx(conn, chat_id, user_id, TxType.DEPOSIT.value, amount_satang,
+                             balance_now, balance_now, TxStatus.PENDING.value,
+                             None, None, None, None, None, user_id)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on request_deposit")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, user_id, actor="user", action="WALLET_DEPOSIT_REQUESTED",
+                     detail=f"amount_satang={amount_satang} transaction_id={tx['transaction_id']}")
+    return OpResult(True, data={"transaction": tx})
