@@ -158,3 +158,137 @@ class _Tx:
                 pass
         self.conn.close()
         return False  # never suppress the exception
+        
+        
+def _tx():
+    return _Tx()
+    
+    
+def wallet_db_init() -> None:
+    """Creates the Wallet/Ledger tables only. Idempotent: safe on every
+    process start, never resets or drops data. Never touches bot.py's,
+    security.py's, or debt_ledger.py's tables."""
+    conn = _conn()
+    conn.execute("BEGIN")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wallets (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        balance_satang INTEGER NOT NULL DEFAULT 0 CHECK (balance_satang >= 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wallet_transactions (
+        transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        balance_before_satang INTEGER NOT NULL,
+        balance_after_satang INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'completed',
+        reference_id TEXT,
+        counterparty_user_id INTEGER,
+        reason TEXT,
+        metadata TEXT,
+        idempotency_key TEXT,
+        created_by INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wtx_chat_user "
+        "ON wallet_transactions (chat_id, user_id, transaction_id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wtx_chat_status "
+        "ON wallet_transactions (chat_id, status)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_wtx_idempotency "
+        "ON wallet_transactions (chat_id, idempotency_key) "
+        "WHERE idempotency_key IS NOT NULL"
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS withdrawal_requests (
+        request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        transaction_id INTEGER,
+        requested_at INTEGER NOT NULL,
+        decided_by INTEGER,
+        decided_at INTEGER,
+        reason TEXT
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wreq_chat_status "
+        "ON withdrawal_requests (chat_id, status)"
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS payment_requests (
+        payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        requested_by INTEGER NOT NULL,
+        payer_user_id INTEGER,
+        amount_satang INTEGER NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        provider TEXT NOT NULL DEFAULT 'internal_wallet',
+        provider_ref TEXT,
+        transaction_id INTEGER,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        paid_at INTEGER
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pay_chat_payer_status "
+        "ON payment_requests (chat_id, payer_user_id, status)"
+    )
+    # Lightweight opportunistic username -> user_id cache, populated by
+    # remember_user() (called from app.py's handle_message for every
+    # text message, and from every wallet command handler). Telegram's
+    # Bot API has no endpoint to resolve an arbitrary @username to a
+    # user_id, so /transfer @username and /payment @username only work
+    # for members this bot has already seen speak in the same chat --
+    # /transfer and /payment also accept Reply-to-message instead (same
+    # convention /mute and /unmute already use), which always works.
+    conn.execute("""CREATE TABLE IF NOT EXISTS wallet_known_users (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        display_name TEXT,
+        last_seen_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wku_chat_username "
+        "ON wallet_known_users (chat_id, username COLLATE NOCASE)"
+    )
+    conn.commit()
+    conn.close()
+    logger.info("WALLET DATABASE: OK")
+
+
+# ---------------- Money helpers ----------------
+# (Deliberately duplicated from debt_ledger.py rather than imported --
+# every data-layer module in this repo (security/quota/scope_policy/
+# findings/debt_ledger) only ever imports `security`, never each other;
+# keeping that pattern means this module still loads/tests in complete
+# isolation from debt_ledger.py, same as debt_ledger.py itself must
+# keep working if some *other* module is broken.)
+
+def parse_amount_to_satang(raw: Optional[str]) -> Optional[int]:
+    """Parses user-supplied text into a positive integer number of
+    satang. Returns None (never raises) for missing/non-numeric/zero/
+    negative/absurdly-large input -- callers turn None into a Thai
+    validation-error reply. The only place free-text money is parsed;
+    every other function in this module only moves an already-validated
+    int around."""
+    if raw is None:
+        return None
+    text = raw.strip().replace(",", "")
+    if not text or len(text) > MAX_RAW_AMOUNT_LEN:
+        return None
+    try:
+        amount = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
