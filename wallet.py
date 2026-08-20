@@ -292,3 +292,10 @@ def parse_amount_to_satang(raw: Optional[str]) -> Optional[int]:
         amount = Decimal(text)
     except (InvalidOperation, ValueError):
         return None
+    if amount.is_nan() or amount.is_infinite():
+        return None
+    if amount <= 0 or amount > MAX_TX_AMOUNT:
+        return None
+    satang = int((amount * 100).to_integral_exact(rounding=ROUND_HALF_UP))
+    if satang <= 0:
+        return None
