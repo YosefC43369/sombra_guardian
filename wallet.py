@@ -665,3 +665,428 @@ def request_withdrawal(chat_id: int, user_id: int, amount_satang: int) -> OpResu
     -- this is what stops a user from requesting the same money twice
     while an Admin decision is pending (Requirement #3's double-spend
     protection). Rejected/cancelled requests refund the hold."""
+    if amount_satang is None or amount_satang <= 0:
+        return OpResult(False, reason="INVALID_AMOUNT")
+    try:
+        with _tx() as conn:
+             tx = _debit(conn, chat_id, user_id, amount_satang, TxType.WITHDRAWAL.value,
+                        status=TxStatus.PENDING.value, created_by=user_id)
+              if tx is None:
+                  raise _Abort("INSUFFICIENT_BALANCE")
+              now = int(time.time())
+              cur = conn.execute(
+                "INSERT INTO withdrawal_requests "
+                "(chat_id, user_id, amount_satang, status, transaction_id, requested_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (chat_id, user_id, amount_satang, WithdrawalStatus.PENDING.value,
+                 tx["transaction_id"], now),
+            )
+            request_id = cur.lastrowid
+            conn.execute(
+                "UPDATE wallet_transactions SET reference_id=? WHERE transaction_id=?",
+                (str(request_id), tx["transaction_id"]),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on request_withdrawal")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, user_id, actor="user", action="WALLET_WITHDRAWAL_REQUESTED",
+                     detail=f"request_id={request_id} amount_satang={amount_satang}")
+    return OpResult(True, data={"request_id": request_id, "transaction": tx})
+    
+    
+def _get_withdrawal_in_conn(conn, chat_id: int, request_id: int) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM withdrawal_requests WHERE request_id=? AND chat_id=?",
+        (request_id, chat_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_withdrawal_request(chat_id: int, request_id: int) -> Optional[dict]:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT * FROM withdrawal_requests WHERE request_id=? AND chat_id=?",
+        (request_id, chat_id),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def approve_withdrawal(chat_id: int, request_id: int, admin_id: int) -> OpResult:
+    """Funds already left the spendable balance at request time; this
+    just finalizes the paper trail once the admin has actually handed
+    over the cash / sent the transfer outside the bot."""
+    try:
+        with _tx() as conn:
+            req = _get_withdrawal_in_conn(conn, chat_id, request_id)
+            if not req:
+                raise _Abort("NOT_FOUND")
+            if req["status"] != WithdrawalStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            now = int(time.time())
+            conn.execute(
+                "UPDATE withdrawal_requests SET status=?, decided_by=?, decided_at=? "
+                "WHERE request_id=?",
+                (WithdrawalStatus.COMPLETED.value, admin_id, now, request_id),
+            )
+            conn.execute(
+                "UPDATE wallet_transactions SET status=? WHERE transaction_id=?",
+                (TxStatus.COMPLETED.value, req["transaction_id"]),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on approve_withdrawal")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, req["user_id"], actor="admin", action="WALLET_WITHDRAWAL_APPROVED",
+                     detail=f"admin={admin_id} request_id={request_id} "
+                            f"amount_satang={req['amount_satang']}")
+    return OpResult(True, data={"request_id": request_id})
+    
+    
+def _reject_or_cancel_withdrawal(chat_id: int, request_id: int, actor_id: int, actor: str,
+                                  new_status: str, action_tag: str, reason: str = "") -> OpResult:
+    try:
+        with _tx() as conn:
+            req = _get_withdrawal_in_conn(conn, chat_id, request_id)
+            if not req:
+                raise _Abort("NOT_FOUND")
+            if req["status"] != WithdrawalStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            now = int(time.time())
+            conn.execute(
+                "UPDATE withdrawal_requests SET status=?, decided_by=?, decided_at=?, reason=? "
+                "WHERE request_id=?",
+                (new_status, actor_id, now, (reason or None), request_id),
+            )
+            conn.execute(
+                "UPDATE wallet_transactions SET status=? WHERE transaction_id=?",
+                (TxStatus.CANCELLED.value, req["transaction_id"]),
+            )
+            refund_tx = _credit(conn, chat_id, req["user_id"], req["amount_satang"],
+                                 TxType.REFUND.value, reference_id=str(request_id),
+                                 reason=f"withdrawal {new_status}: {reason}".strip(),
+                                 created_by=actor_id)
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on reject/cancel withdrawal")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, req["user_id"], actor=actor, action=action_tag,
+                     detail=f"actor={actor_id} request_id={request_id} reason={reason!r} "
+                            f"refund_transaction_id={refund_tx['transaction_id']}")
+    return OpResult(True, data={"request_id": request_id, "refund_transaction": refund_tx})
+
+
+def reject_withdrawal(chat_id: int, request_id: int, admin_id: int, reason: str = "") -> OpResult:
+    return _reject_or_cancel_withdrawal(chat_id, request_id, admin_id, "admin",
+                                         WithdrawalStatus.REJECTED.value,
+                                         "WALLET_WITHDRAWAL_REJECTED", reason)
+
+
+def cancel_withdrawal(chat_id: int, request_id: int, user_id: int) -> OpResult:
+    """Self-service cancel by the requester themselves, while still
+    pending -- refunds the same way an admin rejection does."""
+    req = get_withdrawal_request(chat_id, request_id)
+    if req and req["user_id"] != user_id:
+        return OpResult(False, reason="FORBIDDEN")
+    return _reject_or_cancel_withdrawal(chat_id, request_id, user_id, "user",
+                                         WithdrawalStatus.CANCELLED.value,
+                                         "WALLET_WITHDRAWAL_CANCELLED", "cancelled by requester")
+
+
+def list_pending_withdrawals(chat_id: int, limit: int = 50) -> List[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM withdrawal_requests WHERE chat_id=? AND status=? "
+        "ORDER BY request_id ASC LIMIT ?",
+        (chat_id, WithdrawalStatus.PENDING.value, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------- Transfers ----------------
+
+def transfer(chat_id: int, sender_id: int, recipient_id: int, amount_satang: int,
+             note: str = "", idempotency_key: Optional[str] = None) -> OpResult:
+    """Atomically moves money from sender to recipient inside this chat.
+    Both legs (transfer_out for the sender, transfer_in for the
+    recipient) are written in the same transaction and share a
+    `reference_id`, so either both happen or neither does."""
+    if sender_id == recipient_id:
+        return OpResult(False, reason="SELF_TRANSFER_NOT_ALLOWED")
+    if amount_satang is None or amount_satang <= 0:
+        return OpResult(False, reason="INVALID_AMOUNT")
+
+    try:
+        with _tx() as conn:
+            if idempotency_key:
+                existing = _find_by_idempotency_key(conn, chat_id, idempotency_key)
+                if existing:
+                    return OpResult(True, data={"out_tx": existing, "already_processed": True})
+            ref = f"tr-{int(time.time() * 1000)}-{sender_id}-{recipient_id}"
+            out_tx = _debit(conn, chat_id, sender_id, amount_satang, TxType.TRANSFER_OUT.value,
+                             reference_id=ref, counterparty_user_id=recipient_id,
+                             reason=(note or None), idempotency_key=idempotency_key,
+                             created_by=sender_id)
+            if out_tx is None:
+                raise _Abort("INSUFFICIENT_BALANCE")
+            in_tx = _credit(conn, chat_id, recipient_id, amount_satang, TxType.TRANSFER_IN.value,
+                             reference_id=ref, counterparty_user_id=sender_id,
+                             reason=(note or None), created_by=sender_id)
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on transfer")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, sender_id, actor="user", action="WALLET_TRANSFER",
+                     detail=f"to={recipient_id} amount_satang={amount_satang} ref={ref}")
+    return OpResult(True, data={"out_tx": out_tx, "in_tx": in_tx})
+
+
+# ---------------- Payment requests ("bills") ----------------
+
+def create_payment_request(chat_id: int, requested_by: int, amount_satang: int,
+                            description: str = "", payer_user_id: Optional[int] = None,
+                            expires_in_seconds: Optional[int] = None) -> OpResult:
+    if amount_satang is None or amount_satang <= 0:
+        return OpResult(False, reason="INVALID_AMOUNT")
+    if payer_user_id is not None and payer_user_id == requested_by:
+        return OpResult(False, reason="SELF_PAYMENT_NOT_ALLOWED")
+    now = int(time.time())
+    expires_at = now + expires_in_seconds if expires_in_seconds else None
+    try:
+        with _tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO payment_requests "
+                "(chat_id, requested_by, payer_user_id, amount_satang, description, status, "
+                " provider, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (chat_id, requested_by, payer_user_id, amount_satang, (description or None),
+                 PaymentStatus.PENDING.value, "internal_wallet", now, expires_at),
+            )
+            payment_id = cur.lastrowid
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on create_payment_request")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, requested_by, actor="user", action="WALLET_PAYMENT_REQUEST_CREATED",
+                     detail=f"payment_id={payment_id} amount_satang={amount_satang} "
+                            f"payer={payer_user_id}")
+    return OpResult(True, data={"payment_id": payment_id})
+    
+    
+def get_payment_request(chat_id: int, payment_id: int) -> Optional[dict]:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
+        (payment_id, chat_id),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    data = dict(row)
+    if (data["status"] == PaymentStatus.PENDING.value and data["expires_at"]
+            and data["expires_at"] < int(time.time())):
+        data["status"] = PaymentStatus.EXPIRED.value  # lazy view-time expiry; see pay_payment_request
+    return data
+    
+    
+def pay_payment_request(chat_id: int, payment_id: int, payer_user_id: int,
+                         idempotency_key: Optional[str] = None) -> OpResult:
+    try:
+        with _tx() as conn:
+            if idempotency_key:
+                existing = _find_by_idempotency_key(conn, chat_id, idempotency_key)
+                if existing:
+                    return OpResult(True, data={"transaction": existing, "already_processed": True})
+
+            row = conn.execute(
+                "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
+                (payment_id, chat_id),
+            ).fetchone()
+            if not row:
+                raise _Abort("NOT_FOUND")
+            req = dict(row)
+            if req["status"] != PaymentStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            if req["expires_at"] and req["expires_at"] < int(time.time()):
+                conn.execute(
+                    "UPDATE payment_requests SET status=? WHERE payment_id=?",
+                    (PaymentStatus.EXPIRED.value, payment_id),
+                )
+                raise _Abort("EXPIRED")
+            if req["payer_user_id"] is not None and req["payer_user_id"] != payer_user_id:
+                raise _Abort("FORBIDDEN")
+            if req["requested_by"] == payer_user_id:
+                raise _Abort("SELF_PAYMENT_NOT_ALLOWED")
+
+            debit_tx = _debit(conn, chat_id, payer_user_id, req["amount_satang"],
+                               TxType.PAYMENT.value, reference_id=str(payment_id),
+                               counterparty_user_id=req["requested_by"],
+                               reason=req["description"], idempotency_key=idempotency_key,
+                               created_by=payer_user_id)
+            if debit_tx is None:
+                raise _Abort("INSUFFICIENT_BALANCE")
+            credit_tx = _credit(conn, chat_id, req["requested_by"], req["amount_satang"],
+                                 TxType.PAYMENT.value, reference_id=str(payment_id),
+                                 counterparty_user_id=payer_user_id,
+                                 reason=req["description"], created_by=payer_user_id)
+            now = int(time.time())
+            conn.execute(
+                "UPDATE payment_requests SET status=?, transaction_id=?, paid_at=? "
+                "WHERE payment_id=?",
+                (PaymentStatus.PAID.value, debit_tx["transaction_id"], now, payment_id),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on pay_payment_request")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, payer_user_id, actor="user", action="WALLET_PAYMENT_PAID",
+                     detail=f"payment_id={payment_id} amount_satang={req['amount_satang']} "
+                            f"to={req['requested_by']}")
+    return OpResult(True, data={"debit_tx": debit_tx, "credit_tx": credit_tx})
+    
+    
+def cancel_payment_request(chat_id: int, payment_id: int, actor_id: int,
+                            is_admin_actor: bool = False) -> OpResult:
+    try:
+        with _tx() as conn:
+             row = conn.execute(
+                "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
+                (payment_id, chat_id),
+            ).fetchone()
+            if not row:
+                raise _Abort("NOT_FOUND")
+            req = dict(row)
+            if req["status"] != PaymentStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            if not is_admin_actor and req["requested_by"] != actor_id:
+                raise _Abort("FORBIDDEN")
+            conn.execute(
+                "UPDATE payment_requests SET status=? WHERE payment_id=?",
+                (PaymentStatus.CANCELLED.value, payment_id),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on cancel_payment_request")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, req["requested_by"], actor=("admin" if is_admin_actor else "user"),
+                     action="WALLET_PAYMENT_CANCELLED",
+                     detail=f"actor={actor_id} payment_id={payment_id}")
+    return OpResult(True, data={"payment_id": payment_id})
+
+
+def list_payment_requests(chat_id: int, user_id: int, role: str = "payer",
+                           status: Optional[str] = None, limit: int = 50) -> List[dict]:
+    """role='payer' -> bills directed at me or open to anyone (payer_user_id
+    IS NULL OR = me); role='requester' -> bills I created. Used by /bill."""
+    conn = _conn()
+    if role == "requester":
+        query = "SELECT * FROM payment_requests WHERE chat_id=? AND requested_by=?"
+    else:
+        query = ("SELECT * FROM payment_requests WHERE chat_id=? AND "
+                  "(payer_user_id=? OR payer_user_id IS NULL)")
+    params: List = [chat_id, user_id]
+    if status:
+        query += " AND status=?"
+        params.append(status)
+    query += " ORDER BY payment_id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------- Debt integration ----------------
+
+def pay_debt_with_wallet(chat_id: int, entry_id: int, payer_user_id: int,
+                          idempotency_key: Optional[str] = None) -> OpResult:
+    """Settles one unpaid debt_ledger entry using payer_user_id's OWN
+    wallet balance, atomically: the wallet debit and the debt_entries
+    update commit together or neither does (spec Requirement #8).
+
+    Deliberately open to ANY chat member, not just the named debtor and
+    not Admin-only: paying with your own money never risks anyone
+    else's balance, so gating it like /paid (which lets an Admin erase
+    *anyone's* tab for free) would block the very normal case of one
+    member settling a colleague's tab for them. See app.py's
+    cmd_debt_pay() for the same rationale next to the handler."""
+    import debt_ledger as dl  # local import: the one deliberate cross-module
+                               # dependency in this file, see module docstring
+                              
+    entry = dl.get_entry(entry_id)
+    if not entry or entry["chat_id"] != chat_id:
+        return OpResult(False, reason="ENTRY_NOT_FOUND")
+    if entry["status"] != dl.EntryStatus.UNPAID.value:
+        return OpResult(False, reason="ALREADY_PAID")
+    amount_satang = entry["amount_satang"]
+    
+    try:
+        with _tx() as conn:
+            if idempotency_key:
+                existing = _find_by_idempotency_key(conn, chat_id, idempotency_key)
+                if existing:
+                    return OpResult(True, data={"transaction": existing, "already_processed": True})
+
+            fresh_entry = dl.get_entry_in_conn(conn, entry_id)
+            if not fresh_entry or fresh_entry["chat_id"] != chat_id:
+                raise _Abort("ENTRY_NOT_FOUND")
+            if fresh_entry["status"] != dl.EntryStatus.UNPAID.value:
+                raise _Abort("ALREADY_PAID")
+
+            debit_tx = _debit(conn, chat_id, payer_user_id, amount_satang,
+                               TxType.DEBT_PAYMENT.value, reference_id=str(entry_id),
+                               reason=f"debt entry #{entry_id}: {fresh_entry.get('item_description') or ''}".strip(),
+                               idempotency_key=idempotency_key, created_by=payer_user_id)
+            if debit_tx is None:
+                raise _Abort("INSUFFICIENT_BALANCE")
+
+            paid_entry = dl._mark_entry_paid_in_conn(conn, fresh_entry, payer_user_id)
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on pay_debt_with_wallet")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, payer_user_id, actor="user", action="DEBT_PAID_VIA_WALLET",
+                     detail=f"entry_id={entry_id} amount_satang={amount_satang} "
+                            f"transaction_id={debit_tx['transaction_id']}")
+    return OpResult(True, data={"transaction": debit_tx, "debt_entry": paid_entry})
+
+
+# ---------------- Admin views ----------------
+
+def list_all_transactions_admin(chat_id: int, user_id: Optional[int] = None, page: int = 1,
+                                 page_size: int = 20) -> dict:
+    """/admin transactions [user] -- every wallet transaction in this
+    chat, optionally filtered to one member, newest first."""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    conn = _conn()
+    query = "SELECT * FROM wallet_transactions WHERE chat_id=?"
+    params: List = [chat_id]
+    if user_id is not None:
+        query += " AND user_id=?"
+        params.append(user_id)
+    count_row = conn.execute(query.replace("SELECT *", "SELECT COUNT(*) AS c"), params).fetchone()
+    total = count_row["c"]
+    query += " ORDER BY transaction_id DESC LIMIT ? OFFSET ?"
+    params += [page_size, (page - 1) * page_size]
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "items": [dict(r) for r in rows], "page": page, "page_size": page_size,
+        "total_count": total, "total_pages": total_pages,
+    }
