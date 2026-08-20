@@ -61,3 +61,100 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from typing import Dict, List, Optional
+
+from security import DB_PATH, write_audit_log
+
+logger = logging.getLogger("modbot.wallet")
+
+MAX_RAW_AMOUNT_LEN = 32      # sanity cap before we even try Decimal()
+MAX_TX_AMOUNT = Decimal("1000000")  # 1,000,000 บาท per single operation
+DEFAULT_HISTORY_PAGE_SIZE = 10
+CONN_TIMEOUT_SECONDS = 30    # let concurrent writers wait out BEGIN IMMEDIATE instead of erroring
+
+
+class TxType(str, Enum):
+    DEPOSIT = "deposit"
+    WITHDRAWAL = "withdrawal"
+    TRANSFER_OUT = "transfer_out"
+    TRANSFER_IN = "transfer_in"
+    PAYMENT = "payment"
+    REFUND = "refund"
+    DEBT_PAYMENT = "debt_payment"
+    ADJUSTMENT = "adjustment"
+    
+    
+class TxStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    
+    
+class WithdrawalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled
+    
+    
+class PaymentStatus(str, Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    REFUNDED = "refunded"
+
+
+VALID_WITHDRAWAL_STATUSES = {e.value for e in WithdrawalStatus}
+VALID_PAYMENT_STATUSES = {e.value for e in PaymentStatus}
+
+
+@dataclass
+class OpResult:
+    ok: bool
+    reason: str = ""
+    detail: str = ""
+    data: dict = field(default_factory=dict)
+
+
+class _Abort(Exception):
+    """Internal control-flow only: raised inside a `with _tx() as conn:`
+    block to trigger a rollback, caught immediately outside it and
+    turned into an OpResult. Never escapes a public function."""
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+# ---------------- Database ----------------
+
+def _conn():
+    conn = sqlite3.connect(DB_PATH, timeout=CONN_TIMEOUT_SECONDS)
+    conn.row_factory = sqlite3.Row
+    conn.isolation_level = None  # manual transaction control (BEGIN IMMEDIATE below)
+    return conn
+    
+    
+class _Tx:
+    """Opens one connection, BEGIN IMMEDIATE (acquire the write lock up
+    front), commit on clean exit, rollback on any exception. Every
+    public mutating function below does its work inside `with _tx() as
+    conn:` instead of hand-rolling try/commit/rollback each time."""
+    
+    def __enter__(self):
+        self.conn = _conn()
+        self.conn.execute("BEGIN IMMEDIATE")
+        return self.conn
+        
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.conn.commit()
+        else:
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass
+        self.conn.close()
+        return False  # never suppress the exception
