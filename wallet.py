@@ -582,3 +582,86 @@ def request_deposit(chat_id: int, user_id: int, amount_satang: int) -> OpResult:
     write_audit_log(chat_id, user_id, actor="user", action="WALLET_DEPOSIT_REQUESTED",
                      detail=f"amount_satang={amount_satang} transaction_id={tx['transaction_id']}")
     return OpResult(True, data={"transaction": tx})
+    
+
+def confirm_deposit(chat_id: int, transaction_id: int, admin_id: int) -> OpResult:
+    try:
+        with _tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM wallet_transactions WHERE transaction_id=? AND chat_id=?",
+                (transaction_id, chat_id),
+            ).fetchone()
+            if not row:
+                raise _Abort("NOT_FOUND")
+            if row["type"] != TxType.DEPOSIT.value:
+                raise _Abort("NOT_A_DEPOSIT")
+            if row["status"] != TxStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            credited = _credit(conn, chat_id, row["user_id"], row["amount_satang"],
+                                TxType.DEPOSIT.value, created_by=admin_id)
+            conn.execute(
+                "UPDATE wallet_transactions SET status=?, balance_before_satang=?, "
+                "balance_after_satang=? WHERE transaction_id=?",
+                (TxStatus.COMPLETED.value, credited["balance_before_satang"],
+                 credited["balance_after_satang"], transaction_id),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on confirm_deposit")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, row["user_id"], actor="admin", action="WALLET_DEPOSIT_CONFIRMED",
+                     detail=f"admin={admin_id} transaction_id={transaction_id} "
+                            f"amount_satang={row['amount_satang']}")
+    return OpResult(True, data={"transaction_id": transaction_id, "user_id": row["user_id"],
+                                 "amount_satang": row["amount_satang"]})
+                                
+                                
+def reject_deposit(chat_id: int, transaction_id: int, admin_id: int, reason: str = "") -> OpResult:
+    try:
+        with _tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM wallet_transactions WHERE transaction_id=? AND chat_id=?",
+                (transaction_id, chat_id),
+            ).fetchone()
+            if not row:
+                raise _Abort("NOT_FOUND")
+            if row["type"] != TxType.DEPOSIT.value:
+                raise _Abort("NOT_A_DEPOSIT")
+            if row["status"] != TxStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            conn.execute(
+                "UPDATE wallet_transactions SET status=?, reason=? WHERE transaction_id=?",
+                (TxStatus.CANCELLED.value, (reason or None), transaction_id),
+            )
+    except _Abort as e:
+        return OpResult(False, reason=e.reason)
+    except sqlite3.Error:
+        logger.exception("WALLET DB ERROR on reject_deposit")
+        return OpResult(False, reason="DB_ERROR")
+
+    write_audit_log(chat_id, row["user_id"], actor="admin", action="WALLET_DEPOSIT_REJECTED",
+                     detail=f"admin={admin_id} transaction_id={transaction_id} reason={reason!r}")
+    return OpResult(True, data={"transaction_id": transaction_id})
+
+
+def list_pending_deposits(chat_id: int, limit: int = 50) -> List[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM wallet_transactions WHERE chat_id=? AND type=? AND status=? "
+        "ORDER BY transaction_id ASC LIMIT ?",
+        (chat_id, TxType.DEPOSIT.value, TxStatus.PENDING.value, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------- Withdrawals ----------------
+
+def request_withdrawal(chat_id: int, user_id: int, amount_satang: int) -> OpResult:
+    """Creates a withdrawal request AND immediately holds the funds
+    (debits the spendable balance right away, ledger status='pending')
+    -- this is what stops a user from requesting the same money twice
+    while an Admin decision is pending (Requirement #3's double-spend
+    protection). Rejected/cancelled requests refund the hold."""
