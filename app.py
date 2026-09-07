@@ -57,6 +57,9 @@ from telegram.constants import ParseMode
 import debt_ledger as dl
 import debt_report as dr
 
+import wallet as wt
+import wallet_report as wr
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
 
