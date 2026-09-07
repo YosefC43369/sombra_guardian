@@ -597,13 +597,20 @@ def confirm_deposit(chat_id: int, transaction_id: int, admin_id: int) -> OpResul
                 raise _Abort("NOT_A_DEPOSIT")
             if row["status"] != TxStatus.PENDING.value:
                 raise _Abort("ALREADY_PROCESSED")
-            credited = _credit(conn, chat_id, row["user_id"], row["amount_satang"],
-                                TxType.DEPOSIT.value, created_by=admin_id)
+            # Credit the balance and finalize the SAME pending row in place --
+            # deliberately not calling _credit() here, since _credit() always
+            # INSERTs a brand-new ledger row, which would leave two completed
+            # rows (the original + _credit()'s) for one deposit.
+            balance_before = _get_or_create_balance(conn, chat_id, row["user_id"])
+            balance_after = balance_before + row["amount_satang"]
+            conn.execute(
+                "UPDATE wallets SET balance_satang=?, updated_at=? WHERE chat_id=? AND user_id=?",
+                (balance_after, int(time.time()), chat_id, row["user_id"]),
+            )
             conn.execute(
                 "UPDATE wallet_transactions SET status=?, balance_before_satang=?, "
                 "balance_after_satang=? WHERE transaction_id=?",
-                (TxStatus.COMPLETED.value, credited["balance_before_satang"],
-                 credited["balance_after_satang"], transaction_id),
+                (TxStatus.COMPLETED.value, balance_before, balance_after, transaction_id),
             )
     except _Abort as e:
         return OpResult(False, reason=e.reason)
@@ -669,12 +676,12 @@ def request_withdrawal(chat_id: int, user_id: int, amount_satang: int) -> OpResu
         return OpResult(False, reason="INVALID_AMOUNT")
     try:
         with _tx() as conn:
-             tx = _debit(conn, chat_id, user_id, amount_satang, TxType.WITHDRAWAL.value,
+            tx = _debit(conn, chat_id, user_id, amount_satang, TxType.WITHDRAWAL.value,
                         status=TxStatus.PENDING.value, created_by=user_id)
-              if tx is None:
-                  raise _Abort("INSUFFICIENT_BALANCE")
-              now = int(time.time())
-              cur = conn.execute(
+            if tx is None:
+                raise _Abort("INSUFFICIENT_BALANCE")
+            now = int(time.time())
+            cur = conn.execute(
                 "INSERT INTO withdrawal_requests "
                 "(chat_id, user_id, amount_satang, status, transaction_id, requested_at) "
                 "VALUES (?,?,?,?,?,?)",
@@ -961,20 +968,20 @@ def cancel_payment_request(chat_id: int, payment_id: int, actor_id: int,
     try:
         with _tx() as conn:
             row = conn.execute(
-              "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
-              (payment_id, chat_id),
-          ).fetchone()
-          if not row:
-              raise _Abort("NOT_FOUND")
-          req = dict(row)
-          if req["status"] != PaymentStatus.PENDING.value:
-              raise _Abort("ALREADY_PROCESSED")
-          if not is_admin_actor and req["requested_by"] != actor_id:
-              raise _Abort("FORBIDDEN")
-          conn.execute(
-              "UPDATE payment_requests SET status=? WHERE payment_id=?",
-              (PaymentStatus.CANCELLED.value, payment_id),
-          )
+                "SELECT * FROM payment_requests WHERE payment_id=? AND chat_id=?",
+                (payment_id, chat_id),
+            ).fetchone()
+            if not row:
+                raise _Abort("NOT_FOUND")
+            req = dict(row)
+            if req["status"] != PaymentStatus.PENDING.value:
+                raise _Abort("ALREADY_PROCESSED")
+            if not is_admin_actor and req["requested_by"] != actor_id:
+                raise _Abort("FORBIDDEN")
+            conn.execute(
+                "UPDATE payment_requests SET status=? WHERE payment_id=?",
+                (PaymentStatus.CANCELLED.value, payment_id),
+            )
     except _Abort as e:
         return OpResult(False, reason=e.reason)
     except sqlite3.Error:
@@ -1024,14 +1031,7 @@ def pay_debt_with_wallet(chat_id: int, entry_id: int, payer_user_id: int,
     cmd_debt_pay() for the same rationale next to the handler."""
     import debt_ledger as dl  # local import: the one deliberate cross-module
                                # dependency in this file, see module docstring
-                              
-    entry = dl.get_entry(entry_id)
-    if not entry or entry["chat_id"] != chat_id:
-        return OpResult(False, reason="ENTRY_NOT_FOUND")
-    if entry["status"] != dl.EntryStatus.UNPAID.value:
-        return OpResult(False, reason="ALREADY_PAID")
-    amount_satang = entry["amount_satang"]
-    
+
     try:
         with _tx() as conn:
             if idempotency_key:
@@ -1045,6 +1045,7 @@ def pay_debt_with_wallet(chat_id: int, entry_id: int, payer_user_id: int,
             if fresh_entry["status"] != dl.EntryStatus.UNPAID.value:
                 raise _Abort("ALREADY_PAID")
 
+            amount_satang = fresh_entry["amount_satang"]
             debit_tx = _debit(conn, chat_id, payer_user_id, amount_satang,
                                TxType.DEBT_PAYMENT.value, reference_id=str(entry_id),
                                reason=f"debt entry #{entry_id}: {fresh_entry.get('item_description') or ''}".strip(),
@@ -1052,7 +1053,6 @@ def pay_debt_with_wallet(chat_id: int, entry_id: int, payer_user_id: int,
             if debit_tx is None:
                 raise _Abort("INSUFFICIENT_BALANCE")
 
-            amount_satang = fresh_entry["amount_satang"]
             paid_entry = dl._mark_entry_paid_in_conn(conn, fresh_entry, payer_user_id)
     except _Abort as e:
         return OpResult(False, reason=e.reason)
