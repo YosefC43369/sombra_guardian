@@ -2612,6 +2612,7 @@ def main():
     app.add_handler(CommandHandler("bill", cmd_bill))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("debt_pay", cmd_debt_pay))
+    app.add_handler(CommandHandler("wallet_admin", cmd_wallet_admin))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
