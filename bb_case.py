@@ -40,6 +40,7 @@ from scope_policy import get_program
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------- Enums / Constants ----------------
 
 class CasePriority(str, Enum):
@@ -67,7 +68,8 @@ class CaseEvent(str, Enum):
     PRIORITY_CHANGED = "PRIORITY_CHANGED"
     STATUS_CHANGED = "STATUS_CHANGED"
     NOTE_ADDED = "NOTE_ADDED"
-    
+
+
 VALID_PRIORITIES = {p.value for p in CasePriority}
 VALID_CASE_STATUSES = {s.value for s in CaseStatus}
 VALID_CASE_EVENTS = {e.value for e in CaseEvent}
@@ -147,11 +149,12 @@ class CaseResult:
     case_id: Optional[int] = None
     reason: str = ""
     detail: str = ""
-    
+
+
 def _cr(ok: bool, reason: str, case_id: Optional[int] = None, detail: str = "") -> CaseResult:
     return CaseResult(ok=ok, case_id=case_id, reason=reason, detail=detail)
-    
-    
+
+
 # ---------------- Validation helpers ----------------
 
 def _valid_id(value: Any) -> bool:
@@ -161,8 +164,8 @@ def _valid_id(value: Any) -> bool:
     if isinstance(value, bool):
         return False
     return isinstance(value, int) and value > 0
-    
-    
+
+
 def _valid_user_id(value: Any) -> bool:
     """Telegram user ids are positive integers. Same bool guard as above.
     This module never invents its own identity space -- the id stored in
@@ -171,8 +174,8 @@ def _valid_user_id(value: Any) -> bool:
     if isinstance(value, bool):
         return False
     return isinstance(value, int) and value > 0
-    
-    
+
+
 def _clean_text(value: Optional[str], max_len: int) -> Optional[str]:
     """Returns trimmed text, or None if it is empty/oversized/contains a
     NUL byte. Text is only ever stored and displayed -- this function
@@ -470,7 +473,7 @@ def assign_case(case_id: int, assignee_user_id: int, actor_user_id: int) -> Case
     if case["assignee"] == assignee_user_id:
         return _cr(False, "ALREADY_ASSIGNED", case_id=case_id,
                    detail=f"already assigned to {assignee_user_id}")
-                  
+
     previous = case["assignee"]
     now = int(time.time())
     conn = _conn()
@@ -503,7 +506,8 @@ def assign_case(case_id: int, assignee_user_id: int, actor_user_id: int) -> Case
                     detail=f"case_id={case_id} assignee={assignee_user_id} previous={previous}")
     logger.info("BB CASE ASSIGNED | case_id=%s assignee=%s", case_id, assignee_user_id)
     return _cr(True, "OK", case_id=case_id)
-    
+
+
 def unassign_case(case_id: int, actor_user_id: int) -> CaseResult:
     """Clears the assignee.
 
@@ -516,7 +520,7 @@ def unassign_case(case_id: int, actor_user_id: int) -> CaseResult:
     """
     if not _valid_user_id(actor_user_id):
         return _cr(False, "INVALID_ACTOR", detail=f"actor={actor_user_id!r}")
-        
+
     case = get_case(case_id)
     if not case:
         return _cr(False, "CASE_NOT_FOUND", detail=f"case_id={case_id!r}")
