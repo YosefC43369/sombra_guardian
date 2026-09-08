@@ -321,3 +321,57 @@ async def resolve_and_validate(host: str, port: int) -> Tuple[List[str], Optiona
         if reason:
             return [], reason
     return addresses, None
+    
+
+# ---------------- Target derivation ----------------
+
+def _endpoint_from_target(normalized) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Turns an allowed NormalizedTarget into the concrete endpoint to
+    request, or an error reason. Refuses IP/CIDR targets and non-web
+    ports here so no later code has to remember to."""
+    if normalized.target_type not in SCANNABLE_TARGET_TYPES:
+        return None, "TARGET_TYPE_NOT_SCANNABLE"
+        
+    if normalized.target_type == TargetType.DOMAIN.value:
+        return {"scheme": "https", "host": normalized.domain,
+                "port": 443, "path": "/"}, None
+                
+    scheme = (normalized.scheme or "https").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return None, "SCHEME_NOT_ALLOWED"
+    port = normalized.port or (443 if scheme == "https" else 80)
+    if port not in ALLOWED_PORTS:
+        return None, "PORT_NOT_ALLOWED"
+    return {"scheme": scheme, "host": normalized.domain, "port": port,
+            "path": normalized.path or "/"}, None
+            
+
+def _endpoint_url(endpoint: Dict[str, Any]) -> str:
+    default = 443 if endpoint["scheme"] == "https" else 80
+    netloc = endpoint["host"] if endpoint["port"] == default \
+        else f"{endpoint['host']}:{endpoint['port']}"
+    return f"{endpoint['scheme']}://{netloc}{endpoint['path']}"
+    
+    
+async def _validate_destination(program_id: int, endpoint: Dict[str, Any],
+                                original_host: str,
+                                original_target_type: str) -> Optional[str]:
+    """Full destination check, applied to the first request and again to
+    every redirect hop. Three independent gates, all of which must pass:
+
+      1. the network guard (loopback/private/link-local/metadata),
+      2. the port allow-list,
+      3. scope_policy -- the hop's own host must itself be in scope.
+
+    Gate 3 is what keeps a redirect from walking off the authorized
+    target: example.com redirecting to evil.test stops here, because
+    evil.test was never authorized.
+
+    The hop is re-checked in the *same shape the operator authorized*.
+    scope_policy does not treat a DOMAIN rule as covering a URL target
+    (verified against the real API), so asking the wrong way round would
+    reject every hop of a perfectly in-scope domain program. A DOMAIN
+    target therefore re-checks the hop host as a domain; a URL target
+    re-checks the full hop URL, which keeps URL rules' path-prefix
+    matching meaningful.
+    """
