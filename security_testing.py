@@ -392,3 +392,149 @@ async def _validate_destination(program_id: int, endpoint: Dict[str, Any],
 
 
 # ---------------- HTTP primitive ----------------
+
+@dataclass
+class HttpResponse:
+    status_code: int
+    headers: Dict[str, str]
+    set_cookies: List[str]
+    body_preview: str
+    url: str
+    truncated: bool = False
+
+
+async def _fetch_once(endpoint: Dict[str, Any]) -> Tuple[Optional[HttpResponse], Optional[str]]:
+    """Exactly one HTTP request. Redirects are never auto-followed --
+    the caller re-validates each hop instead. The body is read as a
+    stream and abandoned at MAX_RESPONSE_BYTES so a hostile or merely
+    enormous response cannot exhaust memory."""
+    if not _HTTPX_AVAILABLE:
+        return None, "HTTP_CLIENT_UNAVAILABLE"
+
+    url = _endpoint_url(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
+            max_redirects=0,
+            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+        ) as client:
+            async with client.stream("GET", url) as response:
+                chunks, total, truncated = [], 0, False
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_RESPONSE_BYTES:
+                        chunks.append(chunk[: max(0, MAX_RESPONSE_BYTES - (total - len(chunk)))])
+                        truncated = True
+                        break
+                    chunks.append(chunk)
+                raw = b"".join(chunks)[:MAX_RESPONSE_BYTES]
+
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                set_cookies = [
+                    v for k, v in response.headers.multi_items() if k.lower() == "set-cookie"
+                ]
+                return HttpResponse(
+                    status_code=response.status_code,
+                    headers=headers,
+                    set_cookies=set_cookies,
+                    body_preview=raw.decode("utf-8", errors="replace")[:4000],
+                    url=url,
+                    truncated=truncated,
+                ), None
+    except asyncio.TimeoutError:
+        return None, "REQUEST_TIMEOUT"
+    except Exception as exc:  # httpx.HTTPError and anything below it
+        # Never surface the exception text: it can carry the resolved
+        # host, local paths, or proxy details.
+        logger.info("SECURITY CHECK HTTP ERROR | %s", type(exc).__name__)
+        return None, "REQUEST_FAILED"
+        
+        
+async def _fetch_chain(program_id: int, endpoint: Dict[str, Any],
+                       original_host: str,
+                       original_target_type: str) -> Tuple[List[HttpResponse], Optional[str]]:
+    """Follows redirects manually, re-validating every hop, up to
+    MAX_REDIRECTS. Returns the chain of responses actually fetched."""
+    chain: List[HttpResponse] = []
+    current = dict(endpoint)
+    
+    for _hop in range(MAX_REDIRECTS +1):
+        response, error = await _fetch_once(current)
+        if error:
+            return chain, error
+        chain.append(response)
+        
+        location = response.headers.get("location")
+        if not (300 <= response.status_code < 400 and location):
+            return chain, None
+            
+        next_endpoint, parse_error = _next_endpoint(current, location)
+        if parse_error:
+            return chain, parse_error
+        reason = await _validate_destination(program_id, next_endpoint, original_host,
+                                               original_target_type)
+        if reason:
+            return chain, reason
+        current = next_endpoint
+        
+    return chain, "TOO_MANY_REDIRECTS"
+    
+    
+def _next_endpoint(current: Dict[str, Any], location: str):
+    """Resolves a Location header against the current endpoint."""
+    from urllib.parse import urlsplit
+    try:
+        absolute = urljoin(_endpoint_url(current), location)
+        parts = urlsplit(absolute)
+    except ValueError:
+        return None, "REDIRECT_UNPARSEABLE"
+        
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return None, "SCHEME_NOT_ALLOWED"
+    try:
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None, "REDIRECT_UNPARSEABLE"
+    if not host:
+        return None, "REDIRECT_UNPARSEABLE"
+
+    normalized = normalize_target(f"{scheme}://{host}")
+    if normalized is None or not normalized.domain:
+        return None, "REDIRECT_UNPARSEABLE"
+
+    return {"scheme": scheme, "host": normalized.domain,
+            "port": port or (443 if scheme == "https" else 80),
+            "path": parts.path or "/"}, None
+
+
+# ---------------- TLS primitive ----------------
+
+def _tls_peek(host: str, ip: str, port: int) -> Dict[str, Any]:
+    """Blocking TLS handshake against a pre-validated IP, with SNI set to
+    the hostname so the right certificate comes back and validation still
+    applies. Connecting to the IP we already checked -- rather than
+    re-resolving the name -- is what closes the rebinding window for this
+    check. Reads metadata only; sends no application data."""
+    context = ssl.create_default_context()
+    with socket.create_connection((ip, port), timeout=TLS_TIMEOUT_SECONDS) as raw_sock:
+        with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
+        cert = tls_sock.getpeercert() or {}
+        return {
+                "tls_version": tls_sock.version(),
+                "cipher": (tls_sock.cipher() or (None,))[0],
+                "subject": _flatten_name(cert.get("subject")),
+                "issuer": _flatten_name(cert.get("issuer")),
+                "not_before": cert.get("notBefore"),
+                "not_after": cert.get("notAfter"),
+                "san_count": len(cert.get("subjectAltName", ())),
+            }
+            
+            
+def _flatten_name(name) -> Dict[str, str]:
+    flat = {}
+    for rdn in (name or ()):
+        for key, value in rdn:
+            flat[key] = value
+    return flat
