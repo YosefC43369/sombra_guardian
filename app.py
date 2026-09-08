@@ -494,7 +494,14 @@ async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("chat_id ต้องเป็นตัวเลข")
 
-    typed_text = " ".join(context.args[1:]).strip()
+    # context.args is built by python-telegram-bot as message.text.split(),
+    # which splits on ALL whitespace -- newlines included -- so rejoining the
+    # pieces with " " silently flattens a multi-line announcement into one
+    # paragraph. Slice the raw message text instead: peel off only the
+    # command and the chat_id, and keep everything after them exactly as the
+    # admin typed it, blank lines and all.
+    _raw_parts = (update.message.text or "").split(None, 2)
+    typed_text = _raw_parts[2].strip() if len(_raw_parts) > 2 else ""
 
     if is_photo_announce:
         announce_text = typed_text or (reply_msg.caption or "").strip()
