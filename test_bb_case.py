@@ -599,14 +599,33 @@ class BBCaseTestCase(unittest.TestCase):
 
     # ================= Security invariants =================
 
+    def _module_ast(self):
+        import ast
+        with open(os.path.abspath(bc.__file__), encoding="utf-8") as fh:
+            return ast.parse(fh.read())
+
     def test_module_does_not_import_the_policy_gate(self):
         """A Case is downstream management metadata. If bb_case ever
         gained evaluate_target, it would be able to make (or appear to
-        make) an authorization decision -- same guard as bb_report."""
+        make) an authorization decision -- same guard as bb_report.
+
+        Checked against the parsed module, not the raw text: the module
+        docstring legitimately *names* evaluate_target while explaining
+        that it is deliberately not imported."""
+        import ast
         self.assertNotIn("evaluate_target", dir(bc))
-        source = open(os.path.join(os.path.dirname(os.path.abspath(bc.__file__)),
-                                   "bb_case.py"), encoding="utf-8").read()
-        self.assertNotIn("evaluate_target", source)
+        imported = set()
+        for node in ast.walk(self._module_ast()):
+            if isinstance(node, ast.ImportFrom):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+        self.assertNotIn("evaluate_target", imported)
+        called = {
+            node.func.id for node in ast.walk(self._module_ast())
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertNotIn("evaluate_target", called)
 
     def test_no_case_function_takes_an_is_admin_argument(self):
         import inspect
@@ -679,12 +698,54 @@ class BBCaseTestCase(unittest.TestCase):
         self.assertEqual(bc.list_timeline(case_id)[-1]["message"], payload)
 
     def test_module_contains_no_dynamic_execution(self):
-        source = open(os.path.join(os.path.dirname(os.path.abspath(bc.__file__)),
-                                   "bb_case.py"), encoding="utf-8").read()
-        for forbidden in ("eval(", "exec(", "__import__(", "subprocess",
-                          "os.system(", "shell=True", "pickle"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
+        """AST-level check rather than a text grep: the module docstring
+        legitimately says the words 'subprocess' and 'evaluated' while
+        promising it does neither."""
+        import ast
+        tree = self._module_ast()
+
+        called = {
+            node.func.id for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        for forbidden in ("eval", "exec", "compile", "__import__", "open"):
+            with self.subTest(call=forbidden):
+                self.assertNotIn(forbidden, called)
+
+        attr_calls = {
+            node.func.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        for forbidden in ("system", "popen", "run", "Popen", "loads", "load"):
+            with self.subTest(call=forbidden):
+                self.assertNotIn(forbidden, attr_calls)
+
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        for forbidden in ("subprocess", "os", "pickle", "marshal", "importlib", "socket"):
+            with self.subTest(module=forbidden):
+                self.assertNotIn(forbidden, imported)
+
+    def test_module_only_imports_expected_dependencies(self):
+        """Standard library plus the three project modules it is allowed
+        to lean on. Anything else appearing here is a design change that
+        should be argued for, not slipped in."""
+        import ast
+        imported = set()
+        for node in ast.walk(self._module_ast()):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        self.assertEqual(
+            imported,
+            {"time", "sqlite3", "logging", "enum", "dataclasses", "typing",
+             "security", "findings", "scope_policy"},
+        )
 
     def test_audit_log_uses_the_existing_system(self):
         case_id = self._case()
