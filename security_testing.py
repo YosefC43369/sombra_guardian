@@ -375,3 +375,20 @@ async def _validate_destination(program_id: int, endpoint: Dict[str, Any],
     re-checks the full hop URL, which keeps URL rules' path-prefix
     matching meaningful.
     """
+    if endpoint["port"] not in ALLOWED_PORTS:
+        return "PORT_NOT_ALLOWED"
+    if endpoint["scheme"] not in ALLOWED_SCHEMES:
+        return "SCHEME_NOT_ALLOWED"
+        
+    if endpoint["host"] != original_host:
+        probe = (endpoint["host"] if original_target_type == TargetType.DOMAIN.value
+                  else _endpoint_url(endpoint))
+        hop_decision = evaluate_target(program_id, probe)
+        if not hop_decision.allowed:
+            return f"REDIRECT_OUT_OF_SCOPE:{hop_decision.reason}"
+            
+    _addresses, reason = await resolve_and_validate(endpoint["host"], endpoint["port"])
+    return reason
+
+
+# ---------------- HTTP primitive ----------------
