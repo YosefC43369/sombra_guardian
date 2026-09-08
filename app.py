@@ -54,6 +54,18 @@ from dashboard import get_dashboard_data, format_dashboard_message
 from security import write_audit_log
 from telegram.constants import ParseMode
 
+from bb_case import(
+  bb_case_db_init, create_case, get_case, get_case_by_finding, list_cases,
+  assign_case, unassign_case, set_case_priority, update_case_status,
+  add_case_note, list_timeline, get_case_summary,
+  format_case_summary, format_case_list, format_timeline,
+  VALID_PRIORITIES, VALID_CASE_STATUSES,
+)
+from security_testing import(
+  security_testing_db_init, run_security_check, format_check_result,
+  VALID_CHECK_TYPES,
+)
+
 import debt_ledger as dl
 import debt_report as dr
 
@@ -835,6 +847,37 @@ async def cmd_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /bbfinding new can succeed for that program. This is a known gap --
 # see "Remaining limitations" in the Phase 4 report.
 
+_CASE_DENY_TH = {
+    "FINDING_NOT_FOUND": "ไม่พบ Finding นี้",
+    "INVALID_FINDING_ID": "finding_id ไม่ถูกต้อง"
+    "INVALID_ASSIGNEE": "ผู้รับผิดชอบไม่ถูกต้อง (ต้องเปลี่ยน user id หรือ reply ข้อความของคนนั้นนะ ไอ้โง่)",
+    "INVALID_PRIORITY": "ระดับความเร่งด่วนไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_PRIORITIES)) + ")",
+    "INVALID_STATUS": "สถานะ Case ไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_CASE_STATUSES)) + ")",
+    "INVALID_TRANSITION": "เปลี่ยนสถานะ Case แบบนี้ไม่ได้จากสถานะปัจจุบัน",
+    "INVALID_NOTE": "โน้ตต้องไม่ว่างและยาวไม่เกินที่กำหนด",
+    "INVALID_MESSAGE": "ข้อความแนบยาวเกินไป",
+    "CASE_NOT_FOUND": "ไม่พบ Case นี้",
+    "CASE_TERMINAL": "Case นี้ปิด/ยกเลิกไปแล้ว แก้ไขไม่ได้",
+    "ACTIVE_CASE_EXISTS": "Finding นี้มี Case ที่ยังไม่ปิดอยู่แล้ว",
+    "ALREADY_ASSIGNED": "มอบหมายให้คนนี้อยู่แล้ว",
+    "NOT_ASSIGNED": "Case นี้ยังไม่มีผู้รับผิดชอบ",
+    "ASSIGNEE_REQUIRED": "สถานะนี้ต้องมีผู้รับผิดชอบก่อน (ใช้ /bbcase assign)",
+    "PRIORITY_UNCHANGED": "ระดับความเร่งด่วนเดิมอยู่แล้ว",
+    "CONCURRENT_MODIFICATION": "มีคนแก้ Case นี้พร้อมกัน ลองใหม่อีกครั้ง",
+    "DATABASE_ERROR": "เกิดข้อผิดพลาดกับฐานข้อมูล",
+}
+
+def _deny_text_finding(reason: str, detail: str = "") -> str:
+     return "❌ " + _FINDING_DENY_TH.get(reason, reason)
+    
+    
+def _deny_text_case(reason: str, detail: str = "") -> str:
+    return "❌ " + _CASE_DENY_TH.get(reason, reason)
+    
+    
+def _deny_text_evidence(reason: str, detail: str = "") -> str:
+     return "❌ " + _EVIDENCE_DENY_TH.get(reason, reason)
+
 _FINDING_DENY_TH = {
     "TITLE_REQUIRED": "กรุณาระบุชื่อเรื่อง (title)",
     "TITLE_TOO_LONG": "ชื่อเรื่องยาวเกินไป",
@@ -894,6 +937,8 @@ async def _reply_chunked(update: Update, text: str) -> None:
     no new chunking logic is introduced."""
     for chunk in split_telegram_message(text):
         await update.message.reply_text(chunk)
+    else:
+         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/list/verify/remove)")
 
 
 async def _download_evidence_file(message, context: ContextTypes.DEFAULT_TYPE):
@@ -1372,6 +1417,218 @@ async def cmd_bbevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/list/verify/remove)")
         
+        
+# ---------------- Bug Bounty Case Management (Phase 7) ----------------
+#
+# /bbcase is Telegram wiring only. Every decision -- state machine,
+# priority validation, "one active case per finding", terminal-state
+# protection -- lives in bb_case.py; this handler parses args and
+# renders bb_case.py's formatters, matching the /bbreport / /bbfinding
+# split already used above.
+#
+# Permission model follows the Phase 4/5 rationale unchanged. Opening a
+# Case and adding a management note are reporting-side actions, open to
+# any chat member (the real gate stayed at Finding creation, where
+# evaluate_target() already ran). Triage-manager actions that change who
+# owns a Case or where it sits in the workflow -- assign, unassign,
+# priority, status -- are admin-gated, the same gate that guards
+# /bbfinding status.
+#
+# Chat-admin status still grants nothing in scope terms: a Case cannot
+# create, widen, or revive an Authorization, and bb_case.py does not
+# import evaluate_target at all.
+
+def _case_assignee_from(update, args, index):
+    """Resolves the assignee for /bbcase assign. Reply-to-message is the
+    primary convention across this bot (/transfer, /payment, /mute), with
+    a raw numeric user id as the fallback for when the person isn't in
+    the thread. Returns (user_id, error_text)."""
+    if update.message.reply_to_message:
+        return update.message.reply_to_message.from_user.id, None
+    if len(args) > index and args[index].isdigit():
+        return int(args[index]), None
+    return None, ("ใช้งาน: Reply ข้อความของผู้รับผิดชอบแล้วพิมพ์ "
+            "/bbcase assign <case_id>\nหรือ /bbcase assign <case_id> <user_id>")
+            
+async def cmd_bbcase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bbcase new|list|show|assign|unassign|priority|status|note|timeline"""
+    args = context.args or []
+    if not args:
+        return await update.message.reply_text(
+           "ใช้งาน:\n"
+           "/bbcase new <finding_id> [priority] [โน้ตเปิดเคส...]\n"
+           "/bbcase list [program <id>|status <สถานะ>|priority <ระดับ>|assignee <user_id>]\n"
+           "/bbcase show <case_id>\n"
+           "/bbcase assign <case_id> [user_id]  (Reply ข้อความของคนนั้นได้)\n"
+           "/bbcase unassign <case_id>\n"
+           "/bbcase priority <case_id> <" + "|".join(sorted(VALID_PRIORITIES)) + ">\n"
+           "/bbcase status <case_id> <สถานะใหม่> [หมายเหตุ...]\n"
+           "/bbcase note <case_id> <ข้อความ...>\n"
+           "/bbcase timeline <case_id>"
+        )
+    sub = args[0].lower()
+    user = update.effective_user
+    
+    if sub == "new":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text(
+               "ใช้งาน: /bbcase new <finding_id> [priority] [โน้ตเปิดเคส...]"
+            )
+        finding_id = int(args[1])
+        priority = "NORMAL"
+        rest = args[2:]
+        if rest and rest[0].upper() in VALID_PRIORITIES:
+            priority = rest[0].upper()
+            rest = rest[1:]
+        result = create_case(finding_id, created_by=user.id, priority=priority,
+                              note=" ".join(rest))
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+            await update.message.reply_text(
+              f"✅ เปิด Case #{result.case_id} สำหรับ Finding #{finding_id} แล้ว "
+              f"(สถานะ OPEN, priority {priority})"
+            )
+            
+    elif sub == "list":
+        filters = {}
+        if len(args) >= 3:
+            key, value = args[1].lower(), args[2]
+            if key == "program" and value.isdigit():
+                filters["program_id"] = int(value)
+            elif key == "status":
+                filters["status"] = value.upper()
+            elif key == "priority":
+                filters["priority"] = value.upper()
+            elif key == "assignee" and value.isdigit():
+                filters["assignee"] = int(value)
+            else:
+                 return await update.message.reply_text(
+                    "ใช้งาน: /bbcase list [program <id>|status <สถานะ>|"
+                    "priority <ระดับ>|assignee <user_id>]"
+                )
+            await _reply_chunked(update, format_case_list(list_cases(**filters)))
+            
+    elif sub == "show":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbcase show <case_id>")
+        await _reply_chunked(update, format_case_summary(get_case_summary(int(args[1]))))
+        
+    elif sub == "timeline":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbcase timeline <case_id>")
+        await _reply_chunked(update, format_timeline(list_timeline(int(args[1]))))
+        
+    elif sub == "note":
+        if len(args) < 3 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbcase note <case_id> <ข้อความ...>")
+        result = add_case_note(int(args[1]), user.id, " ".join(args[2:]))
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+        await update.message.reply_text(f"✅ บันทึกโน้ตลง Case #{args[1]} แล้ว")
+        
+    elif sub == "assign":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbcase assign <case_id> [user_id]")
+        assignee, err = _case_assignee_from(update, args, 2)
+        if err:
+            return await update.message.reply_text(err)
+        result = assign_case(int(args[1]), assignee, actor_user_id=user.id)
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+        await update.message.reply_text(f"✅ มอบหมาย Case #{args[1]} ให้ {assignee} แล้ว")
+        
+    elif sub == "unassign":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /bbcase unassign <case_id>")
+            result = unassign_case(int(args[1]), actor_user_id=user.id)
+            if not result.ok:
+                return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+            case = get_case(int(args[1]))
+            note = f" (สถานะกลับไป {case['status']})" if case else ""
+            await update.message.reply_text(f"✅ ยกเลิกผู้รับผิดชอบของ Case #{args[1]} แล้ว{note}")
+            
+    elif sub == "priority":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 3 or not args[1].isdigit():
+            return await update.message.reply_text(
+               "ใช้งาน: /bbcase priority <case_id> <" + "|".join(sorted(VALID_PRIORITIES)) + ">"
+            )
+        result = set_case_priority(int(args[1]), args[2].upper(), actor_user_id=user.id)
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+        await update.message.reply_text(f"✅ Case #{args[1]} priority -> {args[2].upper()}")
+        
+    elif sub == "status":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+        if len(args) < 3 or not args[1].isdigit():
+            return await update.message.reply_text(
+               "ใช้งาน: /bbcase status <case_id> <สถานะใหม่> [หมายเหตุ...]"
+            )
+        result = update_case_status(int(args[1]), args[2].upper(), actor_user_id=user.id,
+                                     message=" ".join(args[3:]))
+        if not result.ok:
+            return await update.message.reply_text(_deny_text_case(result.reason, result.detail))
+        await update.message.reply_text(f"✅ Case #{args[1]} -> {args[2].upper()}")
+        
+    else:
+         await update.message.reply_text(
+            "❌ subcommand ไม่ถูกต้อง "
+            "(new/list/show/assign/unassign/priority/status/note/timeline)"
+        )
+        
+        
+# ---------------- Authorized Security Testing (Phase 8) ----------------
+#
+# /bbscan is Telegram wiring only. The authorization decision belongs
+# entirely to scope_policy.evaluate_target(), called inside
+# security_testing.run_security_check() before any DNS lookup, socket,
+# or HTTP request happens.
+#
+# Permission model: admin-gated, because a scan sends real traffic to a
+# third party from this bot's IP address -- that is an action with
+# outside consequences, which is this bot's existing test for admin
+# gating (/mute, /announce, /bbfinding status).
+#
+# Admin is NECESSARY BUT NOT SUFFICIENT, and this is the important part:
+# being a chat admin does not widen scope by one byte. run_security_check()
+# has no is_admin parameter at all, so a non-admin cannot scan and an
+# admin cannot scan anything the Program/Authorization/Scope chain has
+# not already authorized. ADMIN != TARGET AUTHORIZATION still holds.
+
+async def cmd_bbscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bbscan <program_id> <check_type> <target>"""
+    args = context.args or []
+    if len(args) < 3:
+        return await update.message.reply_text(
+           "ใช้งาน: /bbscan <program_id> <check_type> <target>\n"
+           "check_type: " + ", ".join(sorted(VALID_CHECK_TYPES))
+"\n"
+           "ตัวอย่าง: /bbscan 1 headers https://example.com\n\n"
+           "ตรวจได้เฉพาะ target ที่ Program/Authorization/Scope อนุญาตไว้แล้วเท่านั้น"
+        )
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not args[0].isdigit():
+        return await update.message.reply_text("❌ program_id ต้องเป็นตัวเลข")
+        
+    program_id = int(args[0])
+    check_type = args[1].lower()
+    target = args[2]
+    
+    await update.message.chat.send_action(ChatAction.TYPING)
+    result = await run_security_check(
+      program_id=program_id, target=target,
+      check_type=check_type, actor=update.effective_user.id,
+    )
+    await _reply_chunked(update, format_check_result(result))
+
+
 # ---------------- Debt Ledger ("เซ็นของ") ----------------
 #
 # /sign, /debt, /debt_summary, /paid -- Telegram wiring only. Every
@@ -2571,9 +2828,12 @@ def main():
     detection.detection_db_init()
     scope_policy_db_init()
     findings_db_init()
+    bb_case_db_init()
+    security_testing_db_init()
     github_repo_db_init()
     dl.debt_ledger_db_init()
     wt.wallet_db_init()
+    ex.expense_db_init()
     logger.info("DATABASE: OK")
     
     app = (
@@ -2609,6 +2869,8 @@ def main():
     app.add_handler(CommandHandler("bbcheck", cmd_bbcheck))
     app.add_handler(CommandHandler("bbfinding", cmd_bbfinding))
     app.add_handler(CommandHandler("bbevidence", cmd_bbevidence))
+    app.add_handler(CommandHandler("bbcase", cmd_bbcase))
+    app.add_handler(CommandHandler("bbscan", cmd_bbscan))
     app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(CommandHandler("sign", cmd_sign))
     app.add_handler(CommandHandler("debt", cmd_debt))
