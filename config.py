@@ -92,3 +92,145 @@ def resolve_classifier_model() -> str:
     """The classifier falls back to the general chat model, matching the
     behaviour gemini.classify_spam() already had."""
     return _resolve(CLASSIFIER_MODEL_NAMES) or resolve_model()
+    
+    
+def ai_configured() -> bool:
+    """True when optional AI features can run. Core moderation, ledger and
+    bug-bounty commands do not depend on this."""
+    return resolve_api_key() is not None
+    
+    
+def api_key_source() -> Optional[str]:
+    """Which environment variable name supplied the key, for startup
+    logging and diagnostics. Returns the NAME, never the value."""
+    for name in API_KEY_NAMES:
+        value = os.getenv(name)
+        if value and value.strip():
+            return name
+        return None
+        
+        
+def log_startup_summary() -> None:
+    """One line at startup so an operator learns AI is unconfigured then,
+    rather than when a user first runs /imagine. Logs variable names and
+    model names only — never a key, never a fragment of one."""
+    if ai_configured():
+        logger.info(
+            "CONFIG: AI enabled (key from %s, model=%s, image=%s)",
+            api_key_source(), resolve_model(), resolve_image_model(),
+        )
+    else:
+        logger.warning(
+            "CONFIG: AI disabled — none of %s is set. The bot runs "
+            "normally; AI features will return a configuration message.",
+            ", ".join(API_KEY_NAMES),
+        )
+        
+        
+# ---------------- Environment variable registry ----------------
+
+class EnvVar(NamedTuple):
+    name: str
+    module: str
+    purpose: str
+    required: bool
+    default: str
+
+
+ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
+    # Telegram — the only genuinely required setting
+    EnvVar("BOT_TOKEN", "app.py", "Telegram bot token", True,
+           "none — app.py exits if unset"),
+
+    # AI provider (optional; canonical names first)
+    EnvVar("GPT_API_KEY", "config.py/gemini.py", "AI provider API key", False,
+           "unset — AI features return a configuration message"),
+    EnvVar("GPT_MODEL", "config.py/gemini.py", "chat model", False, DEFAULT_MODEL),
+    EnvVar("GPT_IMAGE_MODEL", "config.py/gemini.py", "image model", False,
+           DEFAULT_IMAGE_MODEL),
+    EnvVar("GPT_CLASSIFIER_MODEL", "config.py/gemini.py",
+           "spam-classifier model", False, "falls back to GPT_MODEL"),
+
+    # Quotas
+    EnvVar("AI_MEMBER_DAILY_LIMIT", "quota.py", "per-member daily AI calls",
+           False, "10"),
+    EnvVar("AI_ADMIN_DAILY_LIMIT", "quota.py", "per-admin daily AI calls",
+           False, "0 (unlimited)"),
+    EnvVar("AI_CLASSIFIER_DAILY_LIMIT", "quota.py",
+           "chat-wide daily classifier calls", False, "300"),
+
+    # News background service
+    EnvVar("NEWS_CHECK_INTERVAL", "news.py", "seconds between RSS polls",
+           False, "module default"),
+    EnvVar("NEWS_HTTP_TIMEOUT", "news.py", "RSS/article fetch timeout",
+           False, "module default"),
+    EnvVar("NEWS_MAX_ITEMS_PER_CYCLE", "news.py", "items posted per cycle",
+           False, "module default"),
+    EnvVar("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "news.py",
+           "post existing items on first run", False, "module default"),
+    EnvVar("NEWS_AI_SUMMARY_MAX_CHARS", "news.py", "AI summary length cap",
+           False, "module default"),
+    EnvVar("NEWS_ARTICLE_MAX_CHARS", "news.py", "article text cap", False,
+           "module default"),
+    EnvVar("NEWS_RSS_SUMMARY_MIN_CHARS", "news.py",
+           "min RSS summary before fetching the page", False, "module default"),
+    EnvVar("NEWS_FEED_URL_HACKERNEWS", "news.py", "feed URL", False, "module default"),
+    EnvVar("NEWS_PAGE_URL_HACKERNEWS", "news.py", "site URL", False, "module default"),
+    EnvVar("NEWS_CHAT_ID_HACKERNEWS", "news.py", "destination chat", False, "unset"),
+    EnvVar("NEWS_TOPIC_ID_HACKERNEWS", "news.py", "destination topic", False, "unset"),
+    EnvVar("NEWS_FEED_URL_KREBSONSECURITY", "news.py", "feed URL", False,
+           "module default"),
+    EnvVar("NEWS_PAGE_URL_KREBSONSECURITY", "news.py", "site URL", False,
+           "module default"),
+    EnvVar("NEWS_CHAT_ID_KREBSONSECURITY", "news.py", "destination chat", False,
+           "unset"),
+    EnvVar("NEWS_TOPIC_ID_KREBSONSECURITY", "news.py", "destination topic", False,
+           "unset"),
+
+    # Tor-backed lookups used by /identity and /corporate
+    EnvVar("TOR_SOCKS_HOST", "search.py/scrape.py", "Tor SOCKS host", False,
+           "127.0.0.1"),
+    EnvVar("TOR_SOCKS_PORT", "search.py/scrape.py", "Tor SOCKS port", False, "9050"),
+    EnvVar("TOR_GATEWAY_SUFFIXES", "search.py", "onion gateway suffixes", False,
+           ".ly,.ps"),
+
+    # Coordinator
+    EnvVar("COORDINATOR_MAX_WORKERS", "coordinator.py", "concurrent workers",
+           False, "module default"),
+
+    # Repository test sandbox (disabled by default)
+    EnvVar("REPO_TEST_EXECUTION_ENABLED", "repository_sandbox.py",
+           "master safety switch", False, "off"),
+    EnvVar("REPO_TEST_TIMEOUT_SECONDS", "repository_sandbox.py",
+           "wall-clock cap", False, "module default"),
+    EnvVar("REPO_TEST_MEMORY_LIMIT_BYTES", "repository_sandbox.py",
+           "RLIMIT_AS ceiling", False, "module default"),
+    EnvVar("REPO_TEST_MAX_PROCESSES", "repository_sandbox.py",
+           "RLIMIT_NPROC ceiling", False, "module default"),
+    EnvVar("REPO_TEST_MAX_OUTPUT_BYTES", "repository_sandbox.py",
+           "captured output cap", False, "module default"),
+    EnvVar("REPO_MAX_CONCURRENT_TEST_RUNS", "repository_sandbox.py",
+           "concurrent sandboxed runs", False, "module default"),
+
+    # Blockchain anchoring (optional; bot runs without it)
+    EnvVar("CHAIN_ENABLED", "blockchain/src/chain.py", "enable anchoring",
+           False, "off"),
+    EnvVar("CHAIN_BINARY", "blockchain/src/chain.py", "path to sombra-chain",
+           False, "module default"),
+    EnvVar("CHAIN_TIMEOUT", "blockchain/src/chain.py", "subprocess timeout",
+           False, "module default"),
+    EnvVar("CHAIN_ANCHOR_INTERVAL", "blockchain/src/chain.py",
+           "seconds between anchors", False, "module default"),
+    EnvVar("CHAIN_MAX_TX_PER_BLOCK", "blockchain/src/chain.py",
+           "transactions per block", False, "module default"),
+    EnvVar("CHAIN_STARTUP_DELAY", "blockchain/src/chain.py",
+           "delay before first anchor", False, "module default"),
+]}
+
+
+def required_names() -> List[str]:
+    return [v.name for v in ENV_REGISTRY.values() if v.required]
+
+
+def optional_names() -> List[str]:
+    return [v.name for v in ENV_REGISTRY.values() if not v.required]
