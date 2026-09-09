@@ -12,6 +12,11 @@ from urllib.parse import quote_plus, urlparse
 
 logger = logging.getLogger("modbot.search")
 
+# Same env vars and defaults scrape.py already uses (scrape.py lines 46-47);
+# this module referenced them without ever defining them.
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
+TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+
 TOR_GATEWAY_SUFFIXES = [
     s.strip() for s in os.getenv("TOR_GATEWAY_SUFFIXES", ".ly,.ps").split(",") if s.strip()
 ]
