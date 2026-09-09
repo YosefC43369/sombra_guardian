@@ -34,8 +34,8 @@ import scrape
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
-import openai
 import news
+import gemini
 from security import get_behavior
 from analytics import get_group_summary
 from detection import extract_urls
