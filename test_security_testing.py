@@ -1,901 +1,907 @@
 """
-test_security_testing.py — Phase 8 test suite.
+security_testing.py — Phase 8: Authorized Security Testing Engine.
 
-Same isolation pattern as the other suites: a fresh temp SQLite file per
-test, Programs/Authorizations/Scope built through scope_policy.py's real
-API. Every network operation is mocked -- no test in this file resolves
-a real hostname, opens a socket, or contacts a real host.
+Runs a small, fixed set of *passive* web-configuration checks against a
+target, and only after scope_policy.evaluate_target() has explicitly
+allowed it. Every check is one ordinary unauthenticated request whose
+traffic is indistinguishable from a browser loading the page once; the
+"testing" is entirely in how the response is read, not in what is sent.
 
-The most important tests here are the negative ones: that no DNS lookup,
-TCP connection, or HTTP request happens unless evaluate_target() said
-ALLOW first.
+What this module deliberately is NOT, and must never become:
+  - No credential attacks, password guessing, brute force, or stuffing.
+  - No exploitation, payload generation, RCE, persistence, or privilege
+    escalation.
+  - No destructive testing, DoS, or traffic flooding.
+  - No port scanning, IP-range scanning, or network sweeps. Bare IP and
+    CIDR targets are refused outright (see SCANNABLE_TARGET_TYPES) even
+    when a scope rule allows them, and only web ports are reachable.
+  - No crawling, content discovery, or path guessing. One target in,
+    one request out. Nothing is ever harvested from a response and
+    fetched in turn.
+  - No background or autonomous scanning. Every run starts from an
+    explicit authorized request by a named actor.
+  - No automatic Finding creation. Results are advisory; a human decides
+    whether anything here is worth reporting, through the existing
+    findings.create_finding() gate.
+
+Authorization model (unchanged from Phase 4/5, reused not reimplemented):
+scope_policy.evaluate_target() is the single source of truth for
+Program -> ACTIVE -> Authorization (reviewed + in force) -> normalized
+target -> EXCLUDE -> INCLUDE -> deny-by-default. This module calls it
+and obeys it. It contains no `is_admin` input anywhere, so chat-admin
+status cannot widen what may be tested.
+
+Network guard (stricter than scope on purpose): scope_policy accepts IP
+and CIDR targets, so an operator *could* write a scope rule for
+127.0.0.1 or 10.0.0.0/8. For a record-keeping system that is harmless;
+for an engine that opens sockets it would be an SSRF primitive against
+the host running the bot. _forbidden_ip_reason() therefore sits ABOVE
+scope and is unconditional: no scope rule, program, or authorization can
+re-enable loopback, private, link-local, or cloud-metadata destinations.
+
+Design constraints (matches scope_policy.py / findings.py / bb_case.py):
+  - Reuses security.DB_PATH and security.write_audit_log(). No second
+    database, no second audit system.
+  - CREATE TABLE IF NOT EXISTS only; idempotent init.
+  - Every query parameterized.
+  - httpx only (already a dependency, used by news.py) plus stdlib
+    ssl/socket/asyncio. No shell, no subprocess, no eval/exec.
 """
 
-import os
 import ssl
+import time
 import socket
-import asyncio
 import sqlite3
-import tempfile
-import unittest
-from unittest import mock
+import asyncio
+import logging
+import ipaddress
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Tuple
 
-import security
-import scope_policy as sp
-import security_testing as st
+from security import DB_PATH, write_audit_log
+from scope_policy import evaluate_target, get_program, normalize_target, TargetType
+
+logger = logging.getLogger(__name__)
+
+try:  # httpx arrives with python-telegram-bot and is used by news.py
+    import httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only on a broken install
+    httpx = None
+    _HTTPX_AVAILABLE = False
 
 
-class _Tripwire(Exception):
-    """Raised by a stub that must never be reached."""
+# ---------------- Limits (all fixed; never user-supplied) ----------------
+
+REQUEST_TIMEOUT_SECONDS = 10.0
+TLS_TIMEOUT_SECONDS = 10.0
+MAX_RESPONSE_BYTES = 256 * 1024
+MAX_REDIRECTS = 5
+MAX_CONCURRENT_CHECKS = 2
+MAX_REQUESTS_PER_PROGRAM = 60      # per rolling window
+MAX_REQUESTS_PER_TARGET = 20       # per rolling window
+RATE_LIMIT_WINDOW_SECONDS = 3600
+
+USER_AGENT = "Sombra-Bot-Authorized-Security-Check/1.0"
+
+# Only web ports are reachable. This is what structurally prevents the
+# engine from being used as a port prober: there is no code path that
+# connects to anything else, whatever the scope rules say.
+ALLOWED_PORTS = frozenset({80, 443})
+ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+# Scanning a CIDR is network scanning and a bare IP is the shape of IP
+# scanning -- both are forbidden by Phase 8 regardless of scope.
+SCANNABLE_TARGET_TYPES = frozenset({TargetType.DOMAIN.value, TargetType.URL.value})
+
+_SECURITY_HEADERS = (
+    "strict-transport-security",
+    "content-security-policy",
+    "x-content-type-options",
+    "x-frame-options",
+    "referrer-policy",
+    "permissions-policy",
+)
+
+# Headers that routinely disclose software versions. Read from the
+# response we already have -- nothing is probed to obtain them.
+_VERSION_DISCLOSING_HEADERS = ("server", "x-powered-by", "x-aspnet-version",
+                               "x-aspnetmvc-version", "x-generator", "x-drupal-cache")
+
+_concurrency = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
 
 
-class SecurityTestingTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        fd, path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        self._db_path = path
-        security.DB_PATH = path
-        sp.DB_PATH = path
-        st.DB_PATH = path
-        security.security_db_init()
-        sp.scope_policy_db_init()
-        st.security_testing_db_init()
+# ---------------- Result shapes ----------------
 
-    def tearDown(self):
-        try:
-            os.remove(self._db_path)
-        except OSError:
-            pass
+@dataclass
+class Observation:
+    """One thing noticed in a response. Advisory only: an Observation is
+    never promoted to a Finding by this module."""
+    severity_hint: str      # INFO / LOW / MEDIUM  (a hint, not a Finding severity)
+    code: str
+    detail: str = ""
 
-    # ---- fixture helpers ----
 
-    def _program(self, status="ACTIVE", chat_id=1):
-        pid = sp.create_program(chat_id, "Acme BB", created_by=999)
-        if status != "PAUSED":
-            sp.set_program_status(pid, status, 999)
-        return pid
+@dataclass
+class CheckResult:
+    ok: bool
+    status: str                       # COMPLETED / DENIED / FAILED
+    reason: str = "OK"
+    program_id: Optional[int] = None
+    target: Optional[str] = None       # normalized, never the raw input
+    check_type: Optional[str] = None
+    observations: List[Observation] = field(default_factory=list)
+    data: Dict[str, Any] = field(default_factory=dict)
 
-    def _authorize(self, pid, approve=True, revoke=False,
-                   effective_at=None, expires_at=None):
-        aid = sp.import_authorization(
-            pid, source_type="email", actor_user_id=999,
-            source_reference="security@acme.test", authorization_reference="A-1",
-            effective_at=effective_at, expires_at=expires_at,
-        )
-        sp.review_authorization(aid, approve=approve, reviewer_user_id=1000)
-        if revoke:
-            sp.revoke_authorization(aid, actor_user_id=999)
-        return aid
-
-    def _scoped_program(self, include="example.com", exclude=None,
-                        include_type="DOMAIN", **kwargs):
-        pid = self._program()
-        self._authorize(pid, **kwargs)
-        if include:
-            sp.add_scope_rule(pid, "INCLUDE", include_type, include, actor_user_id=999)
-        if exclude:
-            sp.add_scope_rule(pid, "EXCLUDE", "DOMAIN", exclude, actor_user_id=999)
-        return pid
-
-    def _url_scoped_program(self, include="https://example.com/"):
-        """scope_policy treats DOMAIN and URL rules as distinct: a DOMAIN
-        rule does not cover a URL target. A program that will be scanned
-        by URL therefore needs a URL rule, plus a DOMAIN rule so redirect
-        hops to sibling hosts can be re-checked."""
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "URL", include, actor_user_id=999)
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "example.com", actor_user_id=999)
-        return pid
-
-    def _audit_actions(self):
-        conn = sqlite3.connect(self._db_path)
-        rows = [r[0] for r in conn.execute("SELECT action FROM audit_log ORDER BY id")]
-        conn.close()
-        return rows
-
-    # ---- stubs ----
-
-    def _no_network(self):
-        """Patches every active primitive with a tripwire. Any test using
-        this asserts that authorization failed *before* the network."""
-        async def boom_resolve(host, port):
-            raise _Tripwire(f"DNS lookup attempted for {host}")
-
-        async def boom_fetch(endpoint):
-            raise _Tripwire("HTTP request attempted")
-
-        def boom_tls(host, ip, port):
-            raise _Tripwire("TLS handshake attempted")
-
-        return (
-            mock.patch.object(st, "resolve_and_validate", boom_resolve),
-            mock.patch.object(st, "_fetch_once", boom_fetch),
-            mock.patch.object(st, "_tls_peek", boom_tls),
-        )
-
-    async def _run_expecting_no_network(self, **kwargs):
-        patches = self._no_network()
-        for p in patches:
-            p.start()
-        self.addCleanup(lambda: [p.stop() for p in patches])
-        return await st.run_security_check(**kwargs)
-
-    def _ok_resolver(self, addresses=("93.184.216.34",)):
-        async def resolver(host, port):
-            return list(addresses), None
-        return mock.patch.object(st, "resolve_and_validate", resolver)
-
-    def _response(self, status_code=200, headers=None, set_cookies=None, url=None):
-        return st.HttpResponse(
-            status_code=status_code,
-            headers={k.lower(): v for k, v in (headers or {}).items()},
-            set_cookies=list(set_cookies or []),
-            body_preview="",
-            url=url or "https://example.com/",
-        )
-
-    def _fetcher(self, responses):
-        """Serves canned responses in order, recording requested URLs."""
-        calls = []
-
-        async def fetch(endpoint):
-            calls.append(st._endpoint_url(endpoint))
-            if not responses:
-                return None, "REQUEST_FAILED"
-            item = responses.pop(0)
-            if isinstance(item, str):
-                return None, item
-            return item, None
-
-        return mock.patch.object(st, "_fetch_once", fetch), calls
-
-    # ================= Authorization gate =================
-
-    async def test_unknown_program_denied_without_touching_network(self):
-        result = await self._run_expecting_no_network(
-            program_id=999999, target="example.com", check_type="headers", actor=555)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "DENIED")
-        self.assertEqual(result["reason"], "PROGRAM_NOT_FOUND")
-
-    async def test_inactive_program_denied(self):
-        pid = self._program(status="PAUSED")
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "example.com", actor_user_id=999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "PROGRAM_NOT_ACTIVE")
-
-    async def test_archived_program_denied(self):
-        pid = self._scoped_program()
-        sp.set_program_status(pid, "ARCHIVED", 999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "PROGRAM_NOT_ACTIVE")
-
-    async def test_missing_authorization_denied(self):
-        pid = self._program()
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "example.com", actor_user_id=999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_NOT_FOUND")
-
-    async def test_unreviewed_authorization_denied(self):
-        pid = self._program()
-        sp.import_authorization(pid, source_type="email", actor_user_id=999,
-                                source_reference="s@acme.test",
-                                authorization_reference="A-1")
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "example.com", actor_user_id=999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_PENDING")
-
-    async def test_rejected_authorization_denied(self):
-        pid = self._scoped_program(approve=False)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_REJECTED")
-
-    async def test_revoked_authorization_denied(self):
-        pid = self._scoped_program(revoke=True)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_REVOKED")
-
-    async def test_expired_authorization_denied(self):
-        now = int(__import__("time").time())
-        pid = self._scoped_program(expires_at=now - 10)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_EXPIRED")
-
-    async def test_not_yet_effective_authorization_denied(self):
-        now = int(__import__("time").time())
-        pid = self._scoped_program(effective_at=now + 3600)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "AUTHORIZATION_NOT_EFFECTIVE")
-
-    async def test_out_of_scope_target_denied(self):
-        pid = self._scoped_program(include="example.com")
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="evil.test", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "NO_INCLUDE_MATCH")
-
-    async def test_program_with_no_scope_rules_denies(self):
-        pid = self._program()
-        self._authorize(pid)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "TARGET_OUT_OF_SCOPE")
-
-    async def test_exclude_overrides_include(self):
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "example.com", actor_user_id=999)
-        sp.add_scope_rule(pid, "EXCLUDE", "DOMAIN", "internal.example.com",
-                          actor_user_id=999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="internal.example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "TARGET_EXCLUDED")
-
-    async def test_engine_has_no_is_admin_input_anywhere(self):
-        """Admin status cannot be expressed to this engine, so it cannot
-        widen scope. Structural, not a runtime check."""
-        import ast, inspect, textwrap
-        self.assertNotIn("is_admin", inspect.signature(st.run_security_check).parameters)
-        tree = ast.parse(textwrap.dedent(inspect.getsource(st)))
-        identifiers = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        identifiers |= {n.arg for n in ast.walk(tree) if isinstance(n, ast.arg)}
-        identifiers |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        self.assertNotIn("is_admin", identifiers)
-
-    async def test_admin_actor_gets_the_same_denial_as_anyone_else(self):
-        pid = self._scoped_program(include="example.com")
-        results = [
-            await self._run_expecting_no_network(
-                program_id=pid, target="evil.test", check_type="headers", actor=actor)
-            for actor in (555, 999)   # 999 created the program and reviewed it
-        ]
-        self.assertEqual(results[0]["reason"], results[1]["reason"])
-        self.assertTrue(all(r["status"] == "DENIED" for r in results))
-
-    # ================= Check type validation =================
-
-    async def test_all_declared_check_types_are_callable(self):
-        self.assertEqual(st.VALID_CHECK_TYPES,
-                         {"headers", "tls", "cookies", "redirects", "cors", "technology"})
-        for name, fn in st.CHECK_TYPES.items():
-            with self.subTest(check=name):
-                self.assertTrue(asyncio.iscoroutinefunction(fn))
-
-    async def test_unknown_check_type_denied(self):
-        pid = self._scoped_program()
-        for bad in ("nmap", "HEADERS", "", "exploit", "sqlmap", None, 7, ["headers"]):
-            with self.subTest(check_type=bad):
-                result = await self._run_expecting_no_network(
-                    program_id=pid, target="example.com", check_type=bad, actor=555)
-                self.assertEqual(result["reason"], "UNKNOWN_CHECK")
-
-    async def test_command_and_code_strings_rejected_as_check_type(self):
-        pid = self._scoped_program()
-        for payload in ("__import__('os').system('id')",
-                        "; rm -rf /",
-                        "headers; curl evil.test",
-                        "eval(open('/etc/passwd').read())",
-                        "../../etc/passwd"):
-            with self.subTest(payload=payload):
-                result = await self._run_expecting_no_network(
-                    program_id=pid, target="example.com", check_type=payload, actor=555)
-                self.assertEqual(result["reason"], "UNKNOWN_CHECK")
-
-    async def test_check_type_is_never_resolved_dynamically(self):
-        """The dispatch table is the only path to a check function."""
-        import ast, inspect
-        tree = ast.parse(inspect.getsource(st))
-        called = {n.func.id for n in ast.walk(tree)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        for forbidden in ("eval", "exec", "compile", "__import__"):
-            with self.subTest(call=forbidden):
-                self.assertNotIn(forbidden, called)
-        # dispatch happens through the literal table subscript and nowhere else
-        source = inspect.getsource(st.run_security_check)
-        self.assertIn("CHECK_TYPES[check_type]", source)
-
-    async def test_module_never_uses_a_shell(self):
-        import ast, inspect
-        tree = ast.parse(inspect.getsource(st))
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(a.name.split(".")[0] for a in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".")[0])
-        for forbidden in ("subprocess", "os", "pty", "commands"):
-            with self.subTest(module=forbidden):
-                self.assertNotIn(forbidden, imported)
-
-    # ================= Target-type and port restrictions =================
-
-    async def test_bare_ip_target_refused_even_when_in_scope(self):
-        """Scanning IPs is IP scanning. Scope may allow the record; the
-        engine still refuses to connect."""
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "IP", "93.184.216.34", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "93.184.216.34").allowed)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="93.184.216.34", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "TARGET_TYPE_NOT_SCANNABLE")
-
-    async def test_cidr_target_refused_even_when_in_scope(self):
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "CIDR", "93.184.216.0/24", actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "93.184.216.0/24").allowed)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="93.184.216.0/24", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "TARGET_TYPE_NOT_SCANNABLE")
-
-    async def test_non_web_port_refused(self):
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "URL", "https://example.com:8443/",
-                          actor_user_id=999)
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="https://example.com:8443/", check_type="headers",
-            actor=555)
-        self.assertIn(result["reason"], ("PORT_NOT_ALLOWED", "NO_INCLUDE_MATCH"))
-
-    def test_only_web_ports_are_reachable(self):
-        self.assertEqual(st.ALLOWED_PORTS, frozenset({80, 443}))
-        self.assertEqual(st.ALLOWED_SCHEMES, frozenset({"http", "https"}))
-
-    # ================= SSRF / destination guard =================
-
-    def test_forbidden_destination_classes(self):
-        cases = {
-            "127.0.0.1": "DESTINATION_LOOPBACK",
-            "127.10.20.30": "DESTINATION_LOOPBACK",
-            "::1": "DESTINATION_LOOPBACK",
-            "169.254.169.254": "DESTINATION_LINK_LOCAL",   # AWS/Azure metadata
-            "169.254.170.2": "DESTINATION_LINK_LOCAL",     # ECS task metadata
-            "fe80::1": "DESTINATION_LINK_LOCAL",
-            "10.0.0.5": "DESTINATION_PRIVATE",
-            "172.16.31.4": "DESTINATION_PRIVATE",
-            "192.168.1.1": "DESTINATION_PRIVATE",
-            "fd00::1": "DESTINATION_PRIVATE",
-            "0.0.0.0": "DESTINATION_UNSPECIFIED",
-            "::": "DESTINATION_UNSPECIFIED",
-            "224.0.0.1": "DESTINATION_MULTICAST",
-            "not-an-ip": "DESTINATION_UNPARSEABLE",
-            "": "DESTINATION_UNPARSEABLE",
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "reason": self.reason,
+            "program_id": self.program_id,
+            "target": self.target,
+            "check_type": self.check_type,
+            "findings": [
+                {"severity_hint": o.severity_hint, "code": o.code, "detail": o.detail}
+                for o in self.observations
+            ],
+            "data": self.data,
         }
-        for address, expected in cases.items():
-            with self.subTest(address=address):
-                self.assertEqual(st._forbidden_ip_reason(address), expected)
 
-    def test_ipv4_mapped_ipv6_cannot_smuggle_a_private_address(self):
-        for address in ("::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1"):
-            with self.subTest(address=address):
-                self.assertIsNotNone(st._forbidden_ip_reason(address))
 
-    def test_public_addresses_are_allowed(self):
-        for address in ("93.184.216.34", "1.1.1.1", "2606:2800:220:1:248:1893:25c8:1946"):
-            with self.subTest(address=address):
-                self.assertIsNone(st._forbidden_ip_reason(address))
+def _denied(reason: str, program_id=None, target=None, check_type=None) -> CheckResult:
+    return CheckResult(ok=False, status="DENIED", reason=reason, program_id=program_id,
+                       target=target, check_type=check_type)
 
-    async def test_scope_rule_cannot_re_enable_loopback(self):
-        """The whole point of the network guard: an operator writing an
-        INCLUDE rule for their own host must still not get a connection.
-        Scope says ALLOW; the engine says DENY anyway."""
-        pid = self._program()
-        self._authorize(pid)
-        sp.add_scope_rule(pid, "INCLUDE", "DOMAIN", "localhost.attacker.test",
-                          actor_user_id=999)
-        self.assertTrue(sp.evaluate_target(pid, "localhost.attacker.test").allowed)
 
-        def resolves_to_loopback(host, port):
-            return ["127.0.0.1"]
+def _failed(reason: str, program_id=None, target=None, check_type=None) -> CheckResult:
+    return CheckResult(ok=False, status="FAILED", reason=reason, program_id=program_id,
+                       target=target, check_type=check_type)
 
-        with mock.patch.object(st, "_resolve_host", resolves_to_loopback), \
-             mock.patch.object(st, "_fetch_once", mock.AsyncMock(
-                 side_effect=_Tripwire("must not connect"))):
-            result = await st.run_security_check(
-                program_id=pid, target="localhost.attacker.test",
-                check_type="headers", actor=555)
-        self.assertEqual(result["status"], "DENIED")
-        self.assertEqual(result["reason"], "DESTINATION_LOOPBACK")
 
-    async def test_metadata_endpoint_is_refused(self):
-        pid = self._scoped_program(include="metadata.attacker.test")
-        with mock.patch.object(st, "_resolve_host", lambda h, p: ["169.254.169.254"]), \
-             mock.patch.object(st, "_fetch_once", mock.AsyncMock(
-                 side_effect=_Tripwire("must not connect"))):
-            result = await st.run_security_check(
-                program_id=pid, target="metadata.attacker.test",
-                check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "DESTINATION_LINK_LOCAL")
+# ---------------- Database (rate limiting only) ----------------
 
-    async def test_any_forbidden_address_in_the_set_rejects_the_host(self):
-        """A host answering with one public and one private address is
-        the DNS-rebinding shape; rejecting on *any* bad address closes it."""
-        with mock.patch.object(st, "_resolve_host",
-                               lambda h, p: ["93.184.216.34", "10.0.0.7"]):
-            addresses, reason = await st.resolve_and_validate("example.com", 443)
-        self.assertEqual(addresses, [])
-        self.assertEqual(reason, "DESTINATION_PRIVATE")
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    async def test_dns_failure_fails_closed(self):
-        with mock.patch.object(st, "_resolve_host",
-                               mock.Mock(side_effect=socket.gaierror("nope"))):
-            addresses, reason = await st.resolve_and_validate("example.com", 443)
-        self.assertEqual(addresses, [])
-        self.assertEqual(reason, "DNS_RESOLUTION_FAILED")
 
-    async def test_empty_dns_answer_fails_closed(self):
-        with mock.patch.object(st, "_resolve_host", lambda h, p: []):
-            addresses, reason = await st.resolve_and_validate("example.com", 443)
-        self.assertEqual(reason, "DNS_NO_ADDRESS")
+def security_testing_db_init() -> None:
+    """Creates the scan rate-limit table only.
 
-    # ================= Redirect handling =================
+    quota.py is deliberately NOT reused here: its tables are ai_usage /
+    ai_classifier_usage, keyed per chat+user+day for AI spend. Charging a
+    network check against a user's daily AI allowance would be the wrong
+    meter on the wrong axis. This table follows quota.py's exact
+    allow-then-increment / ON CONFLICT pattern instead, keyed by program
+    and target over a rolling window, and touches nothing else.
+    """
+    conn = _conn()
+    conn.execute("""CREATE TABLE IF NOT EXISTS bb_scan_usage (
+        program_id INTEGER NOT NULL,
+        target TEXT NOT NULL,
+        window_start INTEGER NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (program_id, target, window_start)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bb_scan_usage_program "
+        "ON bb_scan_usage (program_id, window_start)"
+    )
+    conn.commit()
+    conn.close()
+    logger.info("SECURITY TESTING DATABASE: OK")
 
-    async def test_redirect_to_out_of_scope_host_is_stopped(self):
-        pid = self._url_scoped_program()
-        patch, calls = self._fetcher([
-            self._response(301, {"location": "https://evil.test/"}),
-            self._response(200),   # must never be served
-        ])
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="https://example.com/",
-                check_type="redirects", actor=555)
-        self.assertEqual(len(calls), 1)
-        self.assertNotIn("https://evil.test/", calls)
-        codes = [o["code"] for o in result["findings"]]
-        self.assertIn("REDIRECT_CHAIN_STOPPED", codes)
 
-    async def test_redirect_within_scope_is_followed(self):
-        """A sibling host must be in scope in its own right. scope_policy
-        does not let a URL rule for example.com cover www.example.com, so
-        following the hop requires authorizing it -- which is the correct
-        conservative behaviour, not something to loosen."""
-        pid = self._url_scoped_program()
-        sp.add_scope_rule(pid, "INCLUDE", "URL", "https://www.example.com/",
-                          actor_user_id=999)
-        patch, calls = self._fetcher([
-            self._response(301, {"location": "https://www.example.com/"}),
-            self._response(200, url="https://www.example.com/"),
-        ])
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="https://example.com/",
-                check_type="redirects", actor=555)
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(result["data"]["hop_count"], 1)
+def _check_and_use_scan_quota(program_id: int, target: str,
+                              now: Optional[int] = None) -> Tuple[bool, str]:
+    """Allow-then-increment, same shape as quota.check_and_use_quota().
+    A blocked request never increments, so being rate limited does not
+    make the next window worse. Returns (allowed, reason)."""
+    now = now if now is not None else int(time.time())
+    window = now - (now % RATE_LIMIT_WINDOW_SECONDS)
 
-    async def test_redirect_limit_enforced(self):
-        pid = self._url_scoped_program()
-        loop = [self._response(302, {"location": "https://example.com/next"})
-                for _ in range(st.MAX_REDIRECTS + 3)]
-        patch, calls = self._fetcher(loop)
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="https://example.com/",
-                check_type="redirects", actor=555)
-        self.assertLessEqual(len(calls), st.MAX_REDIRECTS + 1)
-        self.assertIn("TOO_MANY_REDIRECTS",
-                      [o["detail"] for o in result["findings"]])
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        program_used = conn.execute(
+            "SELECT COALESCE(SUM(count), 0) AS n FROM bb_scan_usage "
+            "WHERE program_id=? AND window_start=?",
+            (program_id, window),
+        ).fetchone()["n"]
+        if program_used >= MAX_REQUESTS_PER_PROGRAM:
+            conn.rollback()
+            return False, "RATE_LIMIT_PROGRAM"
 
-    async def test_redirect_into_a_private_address_is_refused(self):
-        pid = self._url_scoped_program()
-        patch, calls = self._fetcher([
-            self._response(302, {"location": "https://internal.example.com/"}),
-            self._response(200),
-        ])
-
-        def resolver(host, port):
-            return ["10.0.0.9"] if host.startswith("internal") else ["93.184.216.34"]
-
-        with mock.patch.object(st, "_resolve_host", resolver), patch:
-            await st.run_security_check(
-                program_id=pid, target="https://example.com/",
-                check_type="redirects", actor=555)
-        self.assertEqual(len(calls), 1)
-
-    async def test_unparseable_redirect_stops_the_chain(self):
-        pid = self._url_scoped_program()
-        patch, calls = self._fetcher([
-            self._response(302, {"location": "gopher://example.com/x"}),
-            self._response(200),
-        ])
-        with self._ok_resolver(), patch:
-            await st.run_security_check(
-                program_id=pid, target="https://example.com/",
-                check_type="redirects", actor=555)
-        self.assertEqual(len(calls), 1)
-
-    # ================= Network safety primitives =================
-
-    async def test_timeout_is_reported_not_raised(self):
-        pid = self._scoped_program(include="example.com")
-        patch, _calls = self._fetcher(["REQUEST_TIMEOUT"])
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "FAILED")
-        self.assertEqual(result["reason"], "REQUEST_TIMEOUT")
-
-    async def test_response_size_limit_truncates(self):
-        """Exercises the real streaming loop in _fetch_once against a
-        fake httpx, so the cap is tested rather than assumed."""
-        oversized = b"A" * (st.MAX_RESPONSE_BYTES * 3)
-        fake = _FakeHttpx(status_code=200, headers={"Server": "test"}, body=oversized)
-        with mock.patch.object(st, "httpx", fake), \
-             mock.patch.object(st, "_HTTPX_AVAILABLE", True):
-            response, error = await st._fetch_once(
-                {"scheme": "https", "host": "example.com", "port": 443, "path": "/"})
-        self.assertIsNone(error)
-        self.assertTrue(response.truncated)
-        self.assertLessEqual(fake.bytes_delivered, st.MAX_RESPONSE_BYTES + fake.chunk_size)
-
-    async def test_http_client_missing_is_reported_cleanly(self):
-        with mock.patch.object(st, "_HTTPX_AVAILABLE", False):
-            response, error = await st._fetch_once(
-                {"scheme": "https", "host": "example.com", "port": 443, "path": "/"})
-        self.assertIsNone(response)
-        self.assertEqual(error, "HTTP_CLIENT_UNAVAILABLE")
-
-    def test_limits_are_fixed_constants_not_user_input(self):
-        import inspect
-        params = inspect.signature(st.run_security_check).parameters
-        for knob in ("timeout", "max_redirects", "max_bytes", "limit", "concurrency"):
-            with self.subTest(knob=knob):
-                self.assertNotIn(knob, params)
-        self.assertGreater(st.REQUEST_TIMEOUT_SECONDS, 0)
-        self.assertGreater(st.MAX_RESPONSE_BYTES, 0)
-        self.assertGreater(st.MAX_REDIRECTS, 0)
-
-    # ================= Rate limiting =================
-
-    async def test_per_target_rate_limit(self):
-        pid = self._scoped_program(include="example.com")
-        for _ in range(st.MAX_REQUESTS_PER_TARGET):
-            allowed, _reason = st._check_and_use_scan_quota(pid, "example.com")
-            self.assertTrue(allowed)
-        allowed, reason = st._check_and_use_scan_quota(pid, "example.com")
-        self.assertFalse(allowed)
-        self.assertEqual(reason, "RATE_LIMIT_TARGET")
-
-    async def test_rate_limited_request_is_denied_before_the_network(self):
-        pid = self._scoped_program(include="example.com")
-        for _ in range(st.MAX_REQUESTS_PER_TARGET):
-            st._check_and_use_scan_quota(pid, "example.com")
-        result = await self._run_expecting_no_network(
-            program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(result["reason"], "RATE_LIMIT_TARGET")
-
-    def test_blocked_request_does_not_consume_quota(self):
-        pid = self._scoped_program(include="example.com")
-        for _ in range(st.MAX_REQUESTS_PER_TARGET):
-            st._check_and_use_scan_quota(pid, "example.com")
-        before = self._target_count(pid, "example.com")
-        st._check_and_use_scan_quota(pid, "example.com")
-        self.assertEqual(self._target_count(pid, "example.com"), before)
-
-    def _target_count(self, pid, target):
-        conn = sqlite3.connect(self._db_path)
         row = conn.execute(
-            "SELECT COALESCE(SUM(count), 0) FROM bb_scan_usage WHERE program_id=? AND target=?",
-            (pid, target)).fetchone()
+            "SELECT count FROM bb_scan_usage "
+            "WHERE program_id=? AND target=? AND window_start=?",
+            (program_id, target, window),
+        ).fetchone()
+        if row and row["count"] >= MAX_REQUESTS_PER_TARGET:
+            conn.rollback()
+            return False, "RATE_LIMIT_TARGET"
+
+        conn.execute(
+            "INSERT INTO bb_scan_usage (program_id, target, window_start, count) "
+            "VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(program_id, target, window_start) DO UPDATE SET count = count + 1",
+            (program_id, target, window),
+        )
+        conn.commit()
+        return True, "OK"
+    except sqlite3.Error:
+        conn.rollback()
+        logger.exception("SCAN QUOTA ERROR | program_id=%s", program_id)
+        return False, "RATE_LIMIT_ERROR"   # fail closed
+    finally:
         conn.close()
-        return row[0]
-
-    def test_scan_quota_does_not_reuse_the_ai_quota_tables(self):
-        conn = sqlite3.connect(self._db_path)
-        names = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        conn.close()
-        self.assertIn("bb_scan_usage", names)
-        self.assertNotIn("ai_usage", names)   # quota.py owns that, untouched here
-
-    def test_db_init_is_idempotent(self):
-        pid = self._scoped_program(include="example.com")
-        st._check_and_use_scan_quota(pid, "example.com")
-        before = self._target_count(pid, "example.com")
-        for _ in range(3):
-            st.security_testing_db_init()
-        self.assertEqual(self._target_count(pid, "example.com"), before)
-
-    # ================= Check behaviour =================
-
-    async def _run_ok(self, check_type, response, include="example.com", target=None):
-        pid = self._scoped_program(include=include)
-        patch, _calls = self._fetcher([response])
-        with self._ok_resolver(), patch:
-            return await st.run_security_check(
-                program_id=pid, target=target or "example.com",
-                check_type=check_type, actor=555)
-
-    async def test_headers_check_flags_missing_security_headers(self):
-        result = await self._run_ok("headers", self._response(200, {"Server": "nginx/1.2"}))
-        self.assertTrue(result["ok"])
-        codes = [o["code"] for o in result["findings"]]
-        self.assertIn("MISSING_SECURITY_HEADER", codes)
-        self.assertIn("VERSION_DISCLOSURE", codes)
-
-    async def test_headers_check_is_quiet_on_a_well_configured_host(self):
-        headers = {h: "x" for h in st._SECURITY_HEADERS}
-        result = await self._run_ok("headers", self._response(200, headers))
-        self.assertEqual(result["findings"], [])
-
-    async def test_cookie_flags_are_inspected(self):
-        response = self._response(200, set_cookies=["sid=abc; Path=/"])
-        result = await self._run_ok("cookies", response)
-        codes = {o["code"] for o in result["findings"]}
-        self.assertEqual(codes, {"COOKIE_MISSING_SECURE", "COOKIE_MISSING_HTTPONLY",
-                                 "COOKIE_MISSING_SAMESITE"})
-
-    async def test_secure_cookie_produces_no_observations(self):
-        response = self._response(
-            200, set_cookies=["sid=abc; Secure; HttpOnly; SameSite=Lax"])
-        result = await self._run_ok("cookies", response)
-        self.assertEqual(result["findings"], [])
-
-    async def test_cors_wildcard_with_credentials_flagged(self):
-        response = self._response(200, {
-            "access-control-allow-origin": "*",
-            "access-control-allow-credentials": "true"})
-        result = await self._run_ok("cors", response)
-        self.assertIn("CORS_WILDCARD_WITH_CREDENTIALS",
-                      [o["code"] for o in result["findings"]])
-
-    async def test_technology_check_is_passive_single_request(self):
-        pid = self._scoped_program(include="example.com")
-        patch, calls = self._fetcher([self._response(200, {"X-Powered-By": "PHP/8.1"})])
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="example.com",
-                check_type="technology", actor=555)
-        self.assertEqual(len(calls), 1, "technology check must not probe extra paths")
-        self.assertIn("x-powered-by", result["data"]["signals"])
-
-    async def test_tls_check_uses_the_validated_ip_not_a_fresh_lookup(self):
-        pid = self._scoped_program(include="example.com")
-        seen = {}
-
-        def fake_tls(host, ip, port):
-            seen.update({"host": host, "ip": ip, "port": port})
-            return {"tls_version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384",
-                    "subject": {}, "issuer": {}, "not_before": None,
-                    "not_after": None, "san_count": 1}
-
-        with self._ok_resolver(addresses=("93.184.216.34",)), \
-             mock.patch.object(st, "_tls_peek", fake_tls):
-            result = await st.run_security_check(
-                program_id=pid, target="example.com",
-                check_type="tls", actor=555)
-        self.assertTrue(result["ok"])
-        self.assertEqual(seen["ip"], "93.184.216.34")
-        self.assertEqual(seen["host"], "example.com")
-
-    async def test_tls_handshake_failure_is_structured(self):
-        pid = self._scoped_program(include="example.com")
-        with self._ok_resolver(), mock.patch.object(
-                st, "_tls_peek", mock.Mock(side_effect=ssl.SSLError("boom"))):
-            result = await st.run_security_check(
-                program_id=pid, target="example.com",
-                check_type="tls", actor=555)
-        self.assertEqual(result["reason"], "TLS_HANDSHAKE_FAILED")
-
-    # ================= Failure safety =================
-
-    async def test_unexpected_exception_does_not_bypass_authorization(self):
-        pid = self._scoped_program(include="example.com")
-        with self._ok_resolver(), mock.patch.object(
-                st, "_fetch_once", mock.AsyncMock(side_effect=RuntimeError("kaboom"))):
-            result = await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "INTERNAL_ERROR")
-
-    async def test_errors_never_leak_internals(self):
-        pid = self._scoped_program(include="example.com")
-        secret = "/home/secret/path/apikey-AKIAEXAMPLE"
-        with self._ok_resolver(), mock.patch.object(
-                st, "_fetch_once", mock.AsyncMock(side_effect=RuntimeError(secret))):
-            result = await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        blob = repr(result)
-        for leak in (secret, "Traceback", "File \"", "apikey", "/home/"):
-            with self.subTest(leak=leak):
-                self.assertNotIn(leak, blob)
-
-    async def test_concurrency_slot_is_released_after_a_failure(self):
-        pid = self._scoped_program(include="example.com")
-        before = st._concurrency._value
-        with self._ok_resolver(), mock.patch.object(
-                st, "_fetch_once", mock.AsyncMock(side_effect=RuntimeError("kaboom"))):
-            await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertEqual(st._concurrency._value, before)
-
-    async def test_concurrency_limit_is_bounded(self):
-        self.assertEqual(st._concurrency._value, st.MAX_CONCURRENT_CHECKS)
-        self.assertLessEqual(st.MAX_CONCURRENT_CHECKS, 4)
-
-    # ================= Audit logging =================
-
-    async def test_successful_check_writes_the_full_audit_trail(self):
-        pid = self._scoped_program(include="example.com")
-        patch, _calls = self._fetcher([self._response(200)])
-        with self._ok_resolver(), patch:
-            await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        actions = self._audit_actions()
-        for expected in ("SECURITY_CHECK_REQUESTED", "SECURITY_CHECK_STARTED",
-                         "SECURITY_CHECK_COMPLETED"):
-            with self.subTest(action=expected):
-                self.assertIn(expected, actions)
-
-    async def test_denial_is_audited(self):
-        pid = self._scoped_program(include="example.com")
-        await self._run_expecting_no_network(
-            program_id=pid, target="evil.test", check_type="headers", actor=555)
-        actions = self._audit_actions()
-        self.assertIn("SECURITY_CHECK_REQUESTED", actions)
-        self.assertIn("SECURITY_CHECK_DENIED", actions)
-        self.assertNotIn("SECURITY_CHECK_STARTED", actions)
-
-    async def test_failure_is_audited(self):
-        pid = self._scoped_program(include="example.com")
-        patch, _calls = self._fetcher(["REQUEST_TIMEOUT"])
-        with self._ok_resolver(), patch:
-            await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertIn("SECURITY_CHECK_FAILED", self._audit_actions())
-
-    async def test_audit_detail_carries_context_but_no_response_body(self):
-        pid = self._scoped_program(include="example.com")
-        patch, _calls = self._fetcher([
-            self._response(200, {"set-cookie": "sid=SUPERSECRETVALUE"})])
-        with self._ok_resolver(), patch:
-            await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        conn = sqlite3.connect(self._db_path)
-        details = " ".join(r[0] or "" for r in conn.execute(
-            "SELECT detail FROM audit_log WHERE action LIKE 'SECURITY_CHECK%'"))
-        conn.close()
-        self.assertIn(f"program_id={pid}", details)
-        self.assertIn("check_type=headers", details)
-        self.assertNotIn("SUPERSECRETVALUE", details)
-
-    def test_no_second_audit_system(self):
-        conn = sqlite3.connect(self._db_path)
-        names = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        conn.close()
-        self.assertEqual({n for n in names if "audit" in n.lower()}, {"audit_log"})
-
-    # ================= Finding integration boundary =================
-
-    async def test_a_check_never_creates_a_finding(self):
-        pid = self._scoped_program(include="example.com")
-        import findings as f
-        f.DB_PATH = self._db_path
-        f.findings_db_init()
-        patch, _calls = self._fetcher([self._response(200, {"Server": "nginx/1.0"})])
-        with self._ok_resolver(), patch:
-            result = await st.run_security_check(
-                program_id=pid, target="example.com", check_type="headers", actor=555)
-        self.assertTrue(result["findings"], "the check should have observations")
-        self.assertEqual(f.list_findings(pid), [],
-                         "observations must never auto-create a Finding")
-
-    def test_module_does_not_import_finding_creation(self):
-        import ast, inspect
-        names = set()
-        for node in ast.walk(ast.parse(inspect.getsource(st))):
-            if isinstance(node, ast.ImportFrom):
-                names.update(a.name for a in node.names)
-        self.assertNotIn("create_finding", names)
-
-    def test_result_shape_is_stable(self):
-        result = st._denied("NO_INCLUDE_MATCH", program_id=1, target="x",
-                            check_type="headers").as_dict()
-        self.assertEqual(
-            set(result),
-            {"ok", "status", "reason", "program_id", "target", "check_type",
-             "findings", "data"})
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "DENIED")
-
-    def test_formatter_renders_denials_and_results_without_internals(self):
-        denied = st.format_check_result(
-            st._denied("DESTINATION_LOOPBACK").as_dict())
-        self.assertTrue(denied.startswith("❌"))
-        ok = st.CheckResult(ok=True, status="COMPLETED", program_id=1,
-                            target="example.com", check_type="headers")
-        ok.observations = [st.Observation("LOW", "MISSING_SECURITY_HEADER", "x-frame-options")]
-        text = st.format_check_result(ok.as_dict())
-        self.assertIn("MISSING_SECURITY_HEADER", text)
-        self.assertIn("/bbfinding new", text)
 
 
-# ---------------- Minimal fake httpx for the streaming test ----------------
+# ---------------- Network destination guard ----------------
 
-class _FakeHeaders(dict):
-    def multi_items(self):
-        return list(self.items())
+def _forbidden_ip_reason(ip_text: str) -> Optional[str]:
+    """None if this address may be connected to, else the reason it may
+    not. Unconditional by design: this is not reachable from scope, and
+    no Program, Authorization, or scope rule can switch it off.
+
+    Anything unparseable is refused -- fail closed, never fail open.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return "DESTINATION_UNPARSEABLE"
+
+    if ip.is_unspecified:
+        return "DESTINATION_UNSPECIFIED"
+    if ip.is_loopback:
+        return "DESTINATION_LOOPBACK"
+    if ip.is_link_local:
+        # Covers 169.254.0.0/16, which is where the cloud metadata
+        # endpoints (169.254.169.254, and GCP's metadata.google.internal)
+        # live, and fe80::/10.
+        return "DESTINATION_LINK_LOCAL"
+    if ip.is_private:
+        return "DESTINATION_PRIVATE"
+    if ip.is_reserved:
+        return "DESTINATION_RESERVED"
+    if ip.is_multicast:
+        return "DESTINATION_MULTICAST"
+    if getattr(ip, "is_site_local", False):
+        return "DESTINATION_SITE_LOCAL"
+
+    # IPv4-mapped / 6to4 / Teredo let an attacker smuggle a v4 address
+    # inside a v6 literal; unwrap and re-check rather than trust it.
+    if ip.version == 6:
+        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
+        if mapped is not None:
+            return _forbidden_ip_reason(str(mapped))
+        teredo = getattr(ip, "teredo", None)
+        if teredo:
+            return _forbidden_ip_reason(str(teredo[1]))
+    return None
+    
+    
+def _resolve_host(host: str, port: int) -> List[str]:
+    """Blocking DNS resolution, kept separate so callers can push it onto
+    a thread. Returns every A/AAAA address the resolver offers."""
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    seen, addresses = set(), []
+    for info in infos:
+        addr = info[4][0]
+        if addr not in seen:
+            seen.add(addr)
+            addresses.append(addr)
+    return addresses
+    
+    
+async def resolve_and_validate(host: str, port: int) -> Tuple[List[str], Optional[str]]:
+    """Resolves `host` and refuses it unless EVERY address is allowed.
+
+    Rejecting on *any* forbidden address rather than requiring all of
+    them to be forbidden is deliberate: a host that answers with one
+    public and one private address is exactly the DNS-rebinding shape
+    this is meant to stop.
+    """
+    try:
+        addresses = await asyncio.wait_for(
+            asyncio.to_thread(_resolve_host, host, port),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return [], "DNS_TIMEOUT"
+    except (socket.gaierror, OSError, UnicodeError):
+        return [], "DNS_RESOLUTION_FAILED"
+        
+    if not addresses:
+        return [], "DNS_NO_ADDRESS"
+    for addr in addresses:
+        reason = _forbidden_ip_reason(addr)
+        if reason:
+            return [], reason
+    return addresses, None
+    
+
+# ---------------- Target derivation ----------------
+
+def _endpoint_from_target(normalized) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Turns an allowed NormalizedTarget into the concrete endpoint to
+    request, or an error reason. Refuses IP/CIDR targets and non-web
+    ports here so no later code has to remember to."""
+    if normalized.target_type not in SCANNABLE_TARGET_TYPES:
+        return None, "TARGET_TYPE_NOT_SCANNABLE"
+        
+    if normalized.target_type == TargetType.DOMAIN.value:
+        return {"scheme": "https", "host": normalized.domain,
+                "port": 443, "path": "/"}, None
+                
+    scheme = (normalized.scheme or "https").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return None, "SCHEME_NOT_ALLOWED"
+    port = normalized.port or (443 if scheme == "https" else 80)
+    if port not in ALLOWED_PORTS:
+        return None, "PORT_NOT_ALLOWED"
+    return {"scheme": scheme, "host": normalized.domain, "port": port,
+            "path": normalized.path or "/"}, None
+            
+
+def _endpoint_url(endpoint: Dict[str, Any]) -> str:
+    default = 443 if endpoint["scheme"] == "https" else 80
+    netloc = endpoint["host"] if endpoint["port"] == default \
+        else f"{endpoint['host']}:{endpoint['port']}"
+    return f"{endpoint['scheme']}://{netloc}{endpoint['path']}"
+    
+    
+async def _validate_destination(program_id: int, endpoint: Dict[str, Any],
+                                original_host: str,
+                                original_target_type: str) -> Optional[str]:
+    """Full destination check, applied to the first request and again to
+    every redirect hop. Three independent gates, all of which must pass:
+
+      1. the network guard (loopback/private/link-local/metadata),
+      2. the port allow-list,
+      3. scope_policy -- the hop's own host must itself be in scope.
+
+    Gate 3 is what keeps a redirect from walking off the authorized
+    target: example.com redirecting to evil.test stops here, because
+    evil.test was never authorized.
+
+    The hop is re-checked in the *same shape the operator authorized*.
+    scope_policy does not treat a DOMAIN rule as covering a URL target
+    (verified against the real API), so asking the wrong way round would
+    reject every hop of a perfectly in-scope domain program. A DOMAIN
+    target therefore re-checks the hop host as a domain; a URL target
+    re-checks the full hop URL, which keeps URL rules' path-prefix
+    matching meaningful.
+    """
+    if endpoint["port"] not in ALLOWED_PORTS:
+        return "PORT_NOT_ALLOWED"
+    if endpoint["scheme"] not in ALLOWED_SCHEMES:
+        return "SCHEME_NOT_ALLOWED"
+        
+    if endpoint["host"] != original_host:
+        probe = (endpoint["host"] if original_target_type == TargetType.DOMAIN.value
+                  else _endpoint_url(endpoint))
+        hop_decision = evaluate_target(program_id, probe)
+        if not hop_decision.allowed:
+            return f"REDIRECT_OUT_OF_SCOPE:{hop_decision.reason}"
+            
+    _addresses, reason = await resolve_and_validate(endpoint["host"], endpoint["port"])
+    return reason
 
 
-class _FakeStreamResponse:
-    def __init__(self, status_code, headers, body, chunk_size):
-        self.status_code = status_code
-        self.headers = _FakeHeaders(headers)
-        self._body = body
-        self._chunk_size = chunk_size
-        self.delivered = 0
+# ---------------- HTTP primitive ----------------
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def aiter_bytes(self):
-        for start in range(0, len(self._body), self._chunk_size):
-            chunk = self._body[start:start + self._chunk_size]
-            self.delivered += len(chunk)
-            yield chunk
+@dataclass
+class HttpResponse:
+    status_code: int
+    headers: Dict[str, str]
+    set_cookies: List[str]
+    body_preview: str
+    url: str
+    truncated: bool = False
 
 
-class _FakeHttpx:
-    """Just enough of httpx for _fetch_once's streaming path."""
+async def _fetch_once(endpoint: Dict[str, Any]) -> Tuple[Optional[HttpResponse], Optional[str]]:
+    """Exactly one HTTP request. Redirects are never auto-followed --
+    the caller re-validates each hop instead. The body is read as a
+    stream and abandoned at MAX_RESPONSE_BYTES so a hostile or merely
+    enormous response cannot exhaust memory."""
+    if not _HTTPX_AVAILABLE:
+        return None, "HTTP_CLIENT_UNAVAILABLE"
 
-    def __init__(self, status_code, headers, body, chunk_size=8192):
-        self.status_code = status_code
-        self._headers = headers
-        self._body = body
-        self.chunk_size = chunk_size
-        self.bytes_delivered = 0
-        self._response = None
-        outer = self
+    url = _endpoint_url(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
+            max_redirects=0,
+            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+        ) as client:
+            async with client.stream("GET", url) as response:
+                chunks, total, truncated = [], 0, False
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_RESPONSE_BYTES:
+                        chunks.append(chunk[: max(0, MAX_RESPONSE_BYTES - (total - len(chunk)))])
+                        truncated = True
+                        break
+                    chunks.append(chunk)
+                raw = b"".join(chunks)[:MAX_RESPONSE_BYTES]
 
-        class _Timeout:
-            def __init__(self, *a, **k):
-                pass
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                set_cookies = [
+                    v for k, v in response.headers.multi_items() if k.lower() == "set-cookie"
+                ]
+                return HttpResponse(
+                    status_code=response.status_code,
+                    headers=headers,
+                    set_cookies=set_cookies,
+                    body_preview=raw.decode("utf-8", errors="replace")[:4000],
+                    url=url,
+                    truncated=truncated,
+                ), None
+    except asyncio.TimeoutError:
+        return None, "REQUEST_TIMEOUT"
+    except Exception as exc:  # httpx.HTTPError and anything below it
+        # Never surface the exception text: it can carry the resolved
+        # host, local paths, or proxy details.
+        logger.info("SECURITY CHECK HTTP ERROR | %s", type(exc).__name__)
+        return None, "REQUEST_FAILED"
+        
+        
+async def _fetch_chain(program_id: int, endpoint: Dict[str, Any],
+                       original_host: str,
+                       original_target_type: str) -> Tuple[List[HttpResponse], Optional[str]]:
+    """Follows redirects manually, re-validating every hop, up to
+    MAX_REDIRECTS. Returns the chain of responses actually fetched."""
+    chain: List[HttpResponse] = []
+    current = dict(endpoint)
+    
+    for _hop in range(MAX_REDIRECTS +1):
+        response, error = await _fetch_once(current)
+        if error:
+            return chain, error
+        chain.append(response)
+        
+        location = response.headers.get("location")
+        if not (300 <= response.status_code < 400 and location):
+            return chain, None
+            
+        next_endpoint, parse_error = _next_endpoint(current, location)
+        if parse_error:
+            return chain, parse_error
+        reason = await _validate_destination(program_id, next_endpoint, original_host,
+                                               original_target_type)
+        if reason:
+            return chain, reason
+        current = next_endpoint
+        
+    return chain, "TOO_MANY_REDIRECTS"
+    
+    
+def _next_endpoint(current: Dict[str, Any], location: str):
+    """Resolves a Location header against the current endpoint."""
+    from urllib.parse import urljoin, urlsplit
+    try:
+        absolute = urljoin(_endpoint_url(current), location)
+        parts = urlsplit(absolute)
+    except ValueError:
+        return None, "REDIRECT_UNPARSEABLE"
+        
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return None, "SCHEME_NOT_ALLOWED"
+    try:
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None, "REDIRECT_UNPARSEABLE"
+    if not host:
+        return None, "REDIRECT_UNPARSEABLE"
 
-        class _AsyncClient:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
+    normalized = normalize_target(f"{scheme}://{host}")
+    if normalized is None or not normalized.domain:
+        return None, "REDIRECT_UNPARSEABLE"
 
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            def stream(self, method, url):
-                outer._response = _FakeStreamResponse(
-                    outer.status_code, outer._headers, outer._body, outer.chunk_size)
-                return outer._response
-
-        self.Timeout = _Timeout
-        self.AsyncClient = _AsyncClient
-        self.HTTPError = Exception
-
-    @property
-    def bytes_delivered(self):
-        return self._response.delivered if self._response else 0
-
-    @bytes_delivered.setter
-    def bytes_delivered(self, value):
-        pass
+    return {"scheme": scheme, "host": normalized.domain,
+            "port": port or (443 if scheme == "https" else 80),
+            "path": parts.path or "/"}, None
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ---------------- TLS primitive ----------------
+
+def _tls_peek(host: str, ip: str, port: int) -> Dict[str, Any]:
+    """Blocking TLS handshake against a pre-validated IP, with SNI set to
+    the hostname so the right certificate comes back and validation still
+    applies. Connecting to the IP we already checked -- rather than
+    re-resolving the name -- is what closes the rebinding window for this
+    check. Reads metadata only; sends no application data."""
+    context = ssl.create_default_context()
+    with socket.create_connection((ip, port), timeout=TLS_TIMEOUT_SECONDS) as raw_sock:
+        with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
+            cert = tls_sock.getpeercert() or {}
+            return {
+                "tls_version": tls_sock.version(),
+                "cipher": (tls_sock.cipher() or (None,))[0],
+                "subject": _flatten_name(cert.get("subject")),
+                "issuer": _flatten_name(cert.get("issuer")),
+                "not_before": cert.get("notBefore"),
+                "not_after": cert.get("notAfter"),
+                "san_count": len(cert.get("subjectAltName", ())),
+            }
+            
+            
+def _flatten_name(name) -> Dict[str, str]:
+    flat = {}
+    for rdn in (name or ()):
+        for key, value in rdn:
+            flat[key] = value
+    return flat
+    
+
+# ---------------- Checks (each reads one already-fetched response) ----------------
+
+async def _check_headers(ctx) -> CheckResult:
+    chain, error = await _fetch_chain(ctx["program_id"], ctx["endpoint"], ctx["host"],
+                                     ctx["target_type"])
+    if error and not chain:
+        return _failed(error, **ctx["ids"])
+    response = chain[-1]
+    
+    observations = []
+    # A security header that is absent is the observation; reading
+    # response.headers[header] inside this branch raised KeyError on every
+    # response that was missing one, which is nearly all of them.
+    for header in _SECURITY_HEADERS:
+        if header not in response.headers:
+            observations.append(
+                Observation("LOW", "MISSING_SECURITY_HEADER", header))
+    # Version disclosure is the separate concern this loop's body had been
+    # copied from. Read from the response already fetched; nothing is probed.
+    for header in _VERSION_DISCLOSING_HEADERS:
+        if header in response.headers:
+            observations.append(
+                Observation("INFO", "VERSION_DISCLOSURE",
+                            f"{header}: {response.headers[header][:100]}"))
+
+
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = {
+        "status_code": response.status_code,
+        "present_security_headers": [h for h in _SECURITY_HEADERS if h in response.headers],
+        "redirect_hops": len(chain) - 1,
+    }
+    return result
+    
+    
+async def _check_cookies(ctx) -> CheckResult:
+    chain, error = await _fetch_chain(ctx["program_id"], ctx["endpoint"], ctx["host"],
+                                     ctx["target_type"])
+    if error and not chain:
+        return _failed(error, **ctx["ids"])
+    response = chain[-1]
+    
+    observations = []
+    for raw_cookie in response.set_cookies:
+        name = raw_cookie.split("=", 1)[0].strip()
+        lowered = raw_cookie.lower()
+        if "secure" not in lowered:
+            observations.append(Observation("MEDIUM", "COOKIE_MISSING_SECURE", name))
+        if "httponly" not in lowered:
+            observations.append(Observation("MEDIUM", "COOKIE_MISSING_HTTPONLY", name))
+        if "samesite" not in lowered:
+            observations.append(Observation("LOW", "COOKIE_MISSING_SAMESITE", name))
+            
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = {"cookie_count": len(response.set_cookies),
+                   "status_code": response.status_code}
+    return result
+    
+    
+async def _check_cors(ctx) -> CheckResult:
+    chain, error = await _fetch_chain(ctx["program_id"], ctx["endpoint"], ctx["host"],
+                                     ctx["target_type"])
+    if error and not chain:
+        return _failed(error, **ctx["ids"])
+    response = chain[-1]
+
+    allow_origin = response.headers.get("access-control-allow-origin")
+    allow_credentials = (response.headers.get("access-control-allow-credentials", "")
+                         .strip().lower() == "true")
+
+    observations = []
+    if allow_origin == "*" and allow_credentials:
+        observations.append(Observation(
+            "MEDIUM", "CORS_WILDCARD_WITH_CREDENTIALS",
+            "Access-Control-Allow-Origin: * together with credentials"))
+    elif allow_origin == "*":
+        observations.append(Observation("INFO", "CORS_WILDCARD_ORIGIN", "*"))
+    if allow_origin and allow_origin.strip().lower() == "null":
+        observations.append(Observation("LOW", "CORS_NULL_ORIGIN", "null origin reflected"))
+
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = {"allow_origin": allow_origin,
+                   "allow_credentials": allow_credentials}
+    return result
+    
+    
+async def _check_redirects(ctx) -> CheckResult:
+    chain, error = await _fetch_chain(ctx["program_id"], ctx["endpoint"], ctx["host"],
+                                     ctx["target_type"])
+    if error and not chain:
+        return _failed(error, **ctx["ids"])
+
+    observations = []
+    if error:
+        observations.append(Observation("INFO", "REDIRECT_CHAIN_STOPPED", error))
+    if ctx["endpoint"]["scheme"] == "http":
+        final = chain[-1]
+        upgraded = final.url.startswith("https://")
+        if not upgraded:
+            observations.append(Observation("MEDIUM", "NO_HTTPS_REDIRECT",
+                                            "plain HTTP is served without upgrading"))
+
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = {
+        "hops": [{"url": r.url, "status_code": r.status_code,
+                  "location": r.headers.get("location")} for r in chain],
+        "hop_count": len(chain) - 1,
+    }
+    return result
+    
+    
+async def _check_technology(ctx) -> CheckResult:
+    """Passive only: reads software hints out of the response already
+    fetched. Never requests /wp-admin, /.git, or any other probe path --
+    that would be content discovery, which Phase 8 forbids."""
+    chain, error = await _fetch_chain(ctx["program_id"], ctx["endpoint"], ctx["host"],
+                                     ctx["target_type"])
+    if error and not chain:
+        return _failed(error, **ctx["ids"])
+    response = chain[-1]
+
+    signals, observations = {}, []
+    for header in _VERSION_DISCLOSING_HEADERS:
+        if header in response.headers:
+            signals[header] = response.headers[header][:100]
+            observations.append(Observation("INFO", "TECHNOLOGY_HEADER",
+                                            f"{header}: {signals[header]}"))
+    generator = response.headers.get("x-generator")
+    if generator:
+        signals["generator"] = generator[:100]
+
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = {"signals": signals, "status_code": response.status_code}
+    return result
+    
+    
+async def _check_tls(ctx) -> CheckResult:
+    endpoint = ctx["endpoint"]
+    if endpoint["scheme"] != "https":
+        return _failed("TLS_REQUIRES_HTTPS", **ctx["ids"])
+
+    addresses = ctx["addresses"]
+    if not addresses:
+        return _failed("DNS_NO_ADDRESS", **ctx["ids"])
+
+    try:
+        info = await asyncio.wait_for(
+            asyncio.to_thread(_tls_peek, endpoint["host"], addresses[0], endpoint["port"]),
+            timeout=TLS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return _failed("TLS_TIMEOUT", **ctx["ids"])
+    except ssl.SSLCertVerificationError:
+        return _failed("TLS_CERTIFICATE_INVALID", **ctx["ids"])
+    except (ssl.SSLError, OSError) as exc:
+        logger.info("SECURITY CHECK TLS ERROR | %s", type(exc).__name__)
+        return _failed("TLS_HANDSHAKE_FAILED", **ctx["ids"])
+
+    observations = []
+    not_after = info.get("not_after")
+    if not_after:
+        try:
+            expires_at = ssl.cert_time_to_seconds(not_after)
+            days_left = int((expires_at - time.time()) // 86400)
+            info["days_until_expiry"] = days_left
+            if days_left < 0:
+                observations.append(Observation("MEDIUM", "TLS_CERT_EXPIRED",
+                                                f"expired {abs(days_left)} days ago"))
+            elif days_left < 30:
+                observations.append(Observation("LOW", "TLS_CERT_EXPIRING_SOON",
+                                                f"{days_left} days remaining"))
+        except (ValueError, TypeError):
+            pass
+    version = info.get("tls_version") or ""
+    if version in ("TLSv1", "TLSv1.1", "SSLv3"):
+        observations.append(Observation("MEDIUM", "TLS_OBSOLETE_VERSION", version))
+
+    result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
+    result.observations = observations
+    result.data = info
+    return result
+    
+    
+# Fixed allow-list. check_type is looked up here and nowhere else; a
+# value that is not a key never reaches any code path, so an arbitrary
+# string, shell command, URL, or Python expression cannot be executed.
+CHECK_TYPES = {
+    "headers": _check_headers,
+    "tls": _check_tls,
+    "cookies": _check_cookies,
+    "redirects": _check_redirects,
+    "cors": _check_cors,
+    "technology": _check_technology,
+}
+VALID_CHECK_TYPES = frozenset(CHECK_TYPES)
+
+
+# ---------------- Orchestration ----------------
+
+async def run_security_check(program_id: int, target: str, check_type: str,
+                             actor: int) -> Dict[str, Any]:
+    """The single entry point. Fail-closed at every step.
+
+    Nothing active happens until evaluate_target() has explicitly
+    allowed the target: no DNS lookup, no TCP connection, no TLS
+    handshake, no HTTP request. There is no `is_admin` parameter, so
+    chat-admin status cannot influence the outcome.
+    """
+    ids = {"program_id": program_id if isinstance(program_id, int) else None,
+           "target": None, "check_type": None}
+
+    # --- input validation, before anything else ---
+    if not isinstance(program_id, int) or isinstance(program_id, bool) or program_id <= 0:
+        return _denied("INVALID_PROGRAM_ID", **ids).as_dict()
+    if not isinstance(actor, int) or isinstance(actor, bool) or actor <= 0:
+        return _denied("INVALID_ACTOR", **ids).as_dict()
+    if not isinstance(check_type, str) or check_type not in CHECK_TYPES:
+        return _denied("UNKNOWN_CHECK", **ids).as_dict()
+    ids["check_type"] = check_type
+    if not isinstance(target, str) or not target.strip():
+        return _denied("TARGET_INVALID", **ids).as_dict()
+
+    program = get_program(program_id)
+    chat_id = program["chat_id"] if program else 0
+    write_audit_log(chat_id, actor, actor="user", action="SECURITY_CHECK_REQUESTED",
+                    detail=f"program_id={program_id} check_type={check_type}")
+
+    def deny(reason: str) -> Dict[str, Any]:
+        write_audit_log(chat_id, actor, actor="system", action="SECURITY_CHECK_DENIED",
+                        detail=f"program_id={program_id} check_type={check_type} "
+                               f"target={ids['target']} reason={reason}")
+        return _denied(reason, **ids).as_dict()
+
+    try:
+        # --- THE GATE. Nothing above this line touched the network. ---
+        decision = evaluate_target(program_id, target)
+        if not decision.allowed:
+            return deny(decision.reason)
+
+        normalized = normalize_target(target)
+        if normalized is None:
+            return deny("TARGET_INVALID")
+        ids["target"] = normalized.raw if normalized.target_type == TargetType.URL.value \
+            else (normalized.domain or normalized.raw)
+
+        endpoint, endpoint_error = _endpoint_from_target(normalized)
+        if endpoint_error:
+            return deny(endpoint_error)
+
+        allowed, rate_reason = _check_and_use_scan_quota(program_id, ids["target"])
+        if not allowed:
+            return deny(rate_reason)
+
+        # --- first active operation: DNS, still gated ---
+        addresses, dns_reason = await resolve_and_validate(endpoint["host"], endpoint["port"])
+        if dns_reason:
+            return deny(dns_reason)
+
+        write_audit_log(chat_id, actor, actor="user", action="SECURITY_CHECK_STARTED",
+                        detail=f"program_id={program_id} check_type={check_type} "
+                               f"target={ids['target']}")
+
+        ctx = {"program_id": program_id, "endpoint": endpoint, "host": endpoint["host"],
+               "target_type": normalized.target_type, "addresses": addresses, "ids": ids}
+
+        async with _concurrency:
+            result = await CHECK_TYPES[check_type](ctx)
+
+        action = "SECURITY_CHECK_COMPLETED" if result.ok else "SECURITY_CHECK_FAILED"
+        write_audit_log(chat_id, actor, actor="system", action=action,
+                        detail=f"program_id={program_id} check_type={check_type} "
+                               f"target={ids['target']} status={result.status} "
+                               f"observations={len(result.observations)}")
+        return result.as_dict()
+
+    except Exception:
+        # Catch-all. Logged server-side with a traceback; the caller gets
+        # a bare reason code so no stack trace, path, or hostname leaks
+        # back into a Telegram message.
+        logger.exception("SECURITY CHECK INTERNAL ERROR | program_id=%s", program_id)
+        write_audit_log(chat_id, actor, actor="system", action="SECURITY_CHECK_FAILED",
+                        detail=f"program_id={program_id} check_type={check_type} "
+                               f"reason=INTERNAL_ERROR")
+        return _failed("INTERNAL_ERROR", **ids).as_dict()
+
+
+# ---------------- Presentation ----------------
+
+_REASON_TH = {
+    "UNKNOWN_CHECK": "ประเภทการตรวจไม่ถูกต้อง",
+    "INVALID_PROGRAM_ID": "program_id ไม่ถูกต้อง",
+    "INVALID_ACTOR": "ผู้ใช้ไม่ถูกต้อง",
+    "TARGET_INVALID": "รูปแบบ target ไม่ถูกต้อง",
+    "TARGET_TYPE_NOT_SCANNABLE": "สแกนได้เฉพาะ domain หรือ URL เท่านั้น (IP/CIDR ไม่อนุญาต)",
+    "PORT_NOT_ALLOWED": "อนุญาตเฉพาะพอร์ต 80/443",
+    "SCHEME_NOT_ALLOWED": "อนุญาตเฉพาะ http/https",
+    "RATE_LIMIT_PROGRAM": "Program นี้ใช้โควตาการตรวจครบแล้ว รอรอบถัดไป",
+    "RATE_LIMIT_TARGET": "target นี้ถูกตรวจบ่อยเกินไป รอรอบถัดไป",
+    "RATE_LIMIT_ERROR": "ตรวจสอบโควตาไม่สำเร็จ (fail-closed: DENY)",
+    "DESTINATION_LOOPBACK": "ปลายทางเป็น loopback — ไม่อนุญาตเด็ดขาด",
+    "DESTINATION_PRIVATE": "ปลายทางเป็นเครือข่ายภายใน — ไม่อนุญาตเด็ดขาด",
+    "DESTINATION_LINK_LOCAL": "ปลายทางเป็น link-local/metadata — ไม่อนุญาตเด็ดขาด",
+    "DESTINATION_RESERVED": "ปลายทางเป็น reserved address — ไม่อนุญาต",
+    "DESTINATION_MULTICAST": "ปลายทางเป็น multicast — ไม่อนุญาต",
+    "DESTINATION_UNSPECIFIED": "ปลายทางไม่ระบุ — ไม่อนุญาต",
+    "DESTINATION_UNPARSEABLE": "ที่อยู่ปลายทางอ่านไม่ออก (fail-closed: DENY)",
+    "DNS_RESOLUTION_FAILED": "resolve DNS ไม่สำเร็จ",
+    "DNS_TIMEOUT": "resolve DNS นานเกินไป",
+    "DNS_NO_ADDRESS": "ไม่พบ IP ของโดเมนนี้",
+    "REQUEST_TIMEOUT": "request หมดเวลา",
+    "REQUEST_FAILED": "เชื่อมต่อปลายทางไม่สำเร็จ",
+    "TOO_MANY_REDIRECTS": f"redirect เกิน {MAX_REDIRECTS} ครั้ง",
+    "REDIRECT_UNPARSEABLE": "Location header อ่านไม่ออก",
+    "TLS_REQUIRES_HTTPS": "การตรวจ TLS ต้องใช้ https",
+    "TLS_TIMEOUT": "TLS handshake หมดเวลา",
+    "TLS_HANDSHAKE_FAILED": "TLS handshake ไม่สำเร็จ",
+    "TLS_CERTIFICATE_INVALID": "ใบรับรอง TLS ไม่ผ่านการตรวจสอบ",
+    "HTTP_CLIENT_UNAVAILABLE": "ยังไม่ได้ติดตั้ง httpx บนเซิร์ฟเวอร์",
+    "INTERNAL_ERROR": "เกิดข้อผิดพลาดภายใน (fail-closed)",
+}
+
+
+def deny_text(reason: str) -> str:
+    if reason.startswith("REDIRECT_OUT_OF_SCOPE"):
+        return "❌ redirect ออกไปนอก scope ที่ได้รับอนุญาต — หยุดการตรวจแล้ว"
+    return "❌ " + _REASON_TH.get(reason, reason)
+    
+    
+def format_check_result(result: Dict[str, Any]) -> str:
+    """Renders a result dict for Telegram. Prints only fields this module
+    produced -- never raw response bodies, environment values, or paths."""
+    if not result.get("ok"):
+        return deny_text(result.get("reason", "UNKNOWN"))
+
+    lines = [
+        f"🔎 ผลตรวจ [{result['check_type']}] {result['target']}",
+        f"สถานะ: {result['status']}",
+    ]
+    data = result.get("data") or {}
+    if "status_code" in data:
+        lines.append(f"HTTP: {data['status_code']}")
+    if result["check_type"] == "tls":
+        for key in ("tls_version", "not_after", "days_until_expiry"):
+            if data.get(key) is not None:
+                lines.append(f"{key}: {data[key]}")
+
+    observations = result.get("findings") or []
+    if not observations:
+        lines.append("\nไม่พบข้อสังเกต")
+    else:
+        lines.append(f"\nข้อสังเกต {len(observations)} รายการ:")
+        for o in observations[:25]:
+            detail = f" — {o['detail']}" if o["detail"] else ""
+            lines.append(f"• [{o['severity_hint']}] {o['code']}{detail}")
+        if len(observations) > 25:
+            lines.append(f"… และอีก {len(observations) - 25} รายการ")
+
+    lines.append("\nℹ️ ผลนี้เป็นข้อสังเกตเท่านั้น ยังไม่ได้สร้าง Finding "
+                 "ถ้าจะรายงานจริงให้ใช้ /bbfinding new")
+    return "\n".join(lines)
