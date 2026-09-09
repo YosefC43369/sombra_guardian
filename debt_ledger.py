@@ -328,6 +328,57 @@ def get_entry(entry_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_entry_in_conn(conn: sqlite3.Connection, entry_id: int) -> Optional[dict]:
+    """get_entry(), but read through a caller-supplied connection so the
+    read joins the caller's open transaction instead of opening a second
+    one.
+
+    wallet.py's pay_debt_with_wallet() requires this: it runs inside a
+    single `with _tx() as conn:` block holding the BEGIN IMMEDIATE write
+    lock, and reading the entry on a separate connection would let the
+    row change between the status check and the UPDATE — exactly the
+    race that one transaction exists to close.
+
+    Never commits and never closes; the caller owns the transaction.
+    """
+    row = conn.execute(
+        "SELECT * FROM debt_entries WHERE entry_id=?", (entry_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _mark_entry_paid_in_conn(conn: sqlite3.Connection, entry: dict,
+                             actor_user_id: int) -> Optional[dict]:
+    """Mark `entry` paid through the caller's connection/transaction and
+    return the updated row, or None if it was no longer unpaid.
+
+    The UPDATE is guarded on `status='unpaid'` so it can only ever settle
+    an entry once, matching mark_entry_paid()'s ALREADY_PAID check. The
+    caller is responsible for the ownership check (wallet.py verifies
+    chat_id and status before debiting).
+
+    Deliberately writes no audit-log row: write_audit_log() opens its own
+    connection and would commit independently of this transaction, so a
+    payment that later rolled back would leave an audit entry claiming it
+    succeeded. The caller logs DEBT_PAID_VIA_WALLET after its commit.
+    """
+    now = _now_utc_epoch()
+    cur = conn.execute(
+        "UPDATE debt_entries SET status=?, paid_at=?, paid_by=? "
+        "WHERE entry_id=? AND status=?",
+        (EntryStatus.PAID.value, now, actor_user_id,
+         entry["entry_id"], EntryStatus.UNPAID.value),
+    )
+    if cur.rowcount != 1:
+        return None
+
+    paid_entry = dict(entry)
+    paid_entry["status"] = EntryStatus.PAID.value
+    paid_entry["paid_at"] = now
+    paid_entry["paid_by"] = actor_user_id
+    return paid_entry
+
+
 def list_entries(
     chat_id: int,
     status: Optional[str] = None,
