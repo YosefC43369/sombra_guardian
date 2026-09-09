@@ -44,14 +44,16 @@ from openai import (
     BadRequestError,
 )
 
+import config
+
 logger = logging.getLogger("modbot.gemini")
 
 # ---------------- Config (defaults; overridable via env) ----------------
 
-GEMINI_MODEL_DEFAULT = "gpt-5.6-luna"
+GEMINI_MODEL_DEFAULT = config.DEFAULT_MODEL      # alias; canonical value lives in config.py
 GEMINI_TIMEOUT_SECONDS = 30      # hard local cutoff for one Gemini call
 GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
-GPT_IMAGE_MODEL_DEFAULT = "gpt-image-2"
+GPT_IMAGE_MODEL_DEFAULT = config.DEFAULT_IMAGE_MODEL  # alias; see config.py
 GPT_IMAGE_TIMEOUT_SECONDS = 60   # image generation is slower than a text call
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
 CLASSIFIER_MIN_INPUT_CHARS = 5          # ข้อความสั้นกว่านี้ไม่ต้องส่งให้ AI จำแนก
@@ -239,9 +241,9 @@ _client: Optional[AsyncOpenAI] = None
 def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        api_key = os.getenv("GPT_API_KEY")
+        api_key = config.resolve_api_key()
         if not api_key:
-            raise RuntimeError("GPT_API_KEY is not set")
+            raise RuntimeError("no AI API key is set")
         _client = AsyncOpenAI(
             api_key=api_key,
             timeout=GEMINI_TIMEOUT_SECONDS,
@@ -339,10 +341,10 @@ async def ask_gemini(
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("GPT CALL BLOCKED: GPT_API_KEY is not set")
+        logger.error("GPT CALL BLOCKED: no AI API key configured (%s)", ", ".join(config.API_KEY_NAMES))
         return False, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
-    model = os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT)
+    model = config.resolve_model()
 
     try:
         user_content = _build_user_content(prompt, media)
@@ -410,10 +412,10 @@ async def generate_image(prompt: str) -> Tuple[bool, Optional[bytes], str]:
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("IMAGE CALL BLOCKED: GPT_API_KEY is not set")
+        logger.error("IMAGE CALL BLOCKED: no AI API key configured (%s)", ", ".join(config.API_KEY_NAMES))
         return False, None, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
 
-    model = os.getenv("GPT_IMAGE_MODEL", GPT_IMAGE_MODEL_DEFAULT)
+    model = config.resolve_image_model()
 
     try:
         result = await asyncio.wait_for(
@@ -473,10 +475,10 @@ async def edit_image(prompt: str, image_bytes: bytes, image_mime: str) -> Tuple[
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("IMAGE EDIT BLOCKED: GPT_API_KEY is not set")
+        logger.error("IMAGE EDIT BLOCKED: no AI API key configured (%s)", ", ".join(config.API_KEY_NAMES))
         return False, None, "ยังไม่ได้ตั้งค่า API Key บนเซิร์ฟเวอร์ กรุณาติดต่อผู้ดูแลระบบ"
         
-    model = os.getenv("GPT_IMAGE_MODEL", GPT_IMAGE_MODEL_DEFAULT)
+    model = config.resolve_image_model()
     ext = {"image/png": "png", "image/webp": "webp"}.get(image_mime, "jpg")
     
     try:
@@ -542,10 +544,10 @@ async def classify_spam(text: str) -> Tuple[bool, Optional[dict]]:
     try:
         client = _get_client()
     except RuntimeError:
-        logger.error("CLASSIFIER CALL BLOCKED: GPT_API_KEY is not set")
+        logger.error("CLASSIFIER CALL BLOCKED: no AI API key configured (%s)", ", ".join(config.API_KEY_NAMES))
         return False, None
 
-    model = os.getenv("GEMINI_CLASSIFIER_MODEL", os.getenv("GPT_MODEL", GEMINI_MODEL_DEFAULT))
+    model = config.resolve_classifier_model()
     snippet = text.strip()[:GEMINI_MAX_INPUT_CHARS]
 
     try:
