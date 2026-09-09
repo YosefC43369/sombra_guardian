@@ -55,7 +55,7 @@ import sqlite3
 import asyncio
 import logging
 import ipaddress
-from dataclass import dataclass, field
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 
 from security import DB_PATH, write_audit_log
@@ -305,7 +305,7 @@ async def resolve_and_validate(host: str, port: int) -> Tuple[List[str], Optiona
     this is meant to stop.
     """
     try:
-        address = await asyncio.wait_for(
+        addresses = await asyncio.wait_for(
             asyncio.to_thread(_resolve_host, host, port),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
@@ -314,7 +314,7 @@ async def resolve_and_validate(host: str, port: int) -> Tuple[List[str], Optiona
     except (socket.gaierror, OSError, UnicodeError):
         return [], "DNS_RESOLUTION_FAILED"
         
-    if not address:
+    if not addresses:
         return [], "DNS_NO_ADDRESS"
     for addr in addresses:
         reason = _forbidden_ip_reason(addr)
@@ -483,7 +483,7 @@ async def _fetch_chain(program_id: int, endpoint: Dict[str, Any],
     
 def _next_endpoint(current: Dict[str, Any], location: str):
     """Resolves a Location header against the current endpoint."""
-    from urllib.parse import urlsplit
+    from urllib.parse import urljoin, urlsplit
     try:
         absolute = urljoin(_endpoint_url(current), location)
         parts = urlsplit(absolute)
@@ -520,8 +520,8 @@ def _tls_peek(host: str, ip: str, port: int) -> Dict[str, Any]:
     context = ssl.create_default_context()
     with socket.create_connection((ip, port), timeout=TLS_TIMEOUT_SECONDS) as raw_sock:
         with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
-        cert = tls_sock.getpeercert() or {}
-        return {
+            cert = tls_sock.getpeercert() or {}
+            return {
                 "tls_version": tls_sock.version(),
                 "cipher": (tls_sock.cipher() or (None,))[0],
                 "subject": _flatten_name(cert.get("subject")),
@@ -550,12 +550,22 @@ async def _check_headers(ctx) -> CheckResult:
     response = chain[-1]
     
     observations = []
+    # A security header that is absent is the observation; reading
+    # response.headers[header] inside this branch raised KeyError on every
+    # response that was missing one, which is nearly all of them.
     for header in _SECURITY_HEADERS:
         if header not in response.headers:
             observations.append(
+                Observation("LOW", "MISSING_SECURITY_HEADER", header))
+    # Version disclosure is the separate concern this loop's body had been
+    # copied from. Read from the response already fetched; nothing is probed.
+    for header in _VERSION_DISCLOSING_HEADERS:
+        if header in response.headers:
+            observations.append(
                 Observation("INFO", "VERSION_DISCLOSURE",
                             f"{header}: {response.headers[header][:100]}"))
-                            
+
+
     result = CheckResult(ok=True, status="COMPLETED", **ctx["ids"])
     result.observations = observations
     result.data = {
