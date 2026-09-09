@@ -33,7 +33,7 @@ from scope_policy import (
     create_program, get_program, list_programs, set_program_status,
     import_authorization, list_authorizations, review_authorization, revoke_authorization,
     add_scope_rule, remove_scope_rule, list_scope_rules,
-    evaluate_target,
+    evaluate_target, effective_authorization_status,
 )
 from bb_report import get_bb_report_data, format_bb_report_message
 from findings import (
@@ -71,6 +71,9 @@ import debt_report as dr
 
 import wallet as wt
 import wallet_report as wr
+
+import expense as ex
+import config
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
@@ -849,7 +852,7 @@ async def cmd_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 _CASE_DENY_TH = {
     "FINDING_NOT_FOUND": "ไม่พบ Finding นี้",
-    "INVALID_FINDING_ID": "finding_id ไม่ถูกต้อง"
+    "INVALID_FINDING_ID": "finding_id ไม่ถูกต้อง",
     "INVALID_ASSIGNEE": "ผู้รับผิดชอบไม่ถูกต้อง (ต้องเปลี่ยน user id หรือ reply ข้อความของคนนั้นนะ ไอ้โง่)",
     "INVALID_PRIORITY": "ระดับความเร่งด่วนไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_PRIORITIES)) + ")",
     "INVALID_STATUS": "สถานะ Case ไม่ถูกต้อง (ใช้ได้: " + ", ".join(sorted(VALID_CASE_STATUSES)) + ")",
@@ -937,8 +940,6 @@ async def _reply_chunked(update: Update, text: str) -> None:
     no new chunking logic is introduced."""
     for chunk in split_telegram_message(text):
         await update.message.reply_text(chunk)
-    else:
-         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (add/list/verify/remove)")
 
 
 async def _download_evidence_file(message, context: ContextTypes.DEFAULT_TYPE):
@@ -1607,8 +1608,7 @@ async def cmd_bbscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 3:
         return await update.message.reply_text(
            "ใช้งาน: /bbscan <program_id> <check_type> <target>\n"
-           "check_type: " + ", ".join(sorted(VALID_CHECK_TYPES))
-"\n"
+           "check_type: " + ", ".join(sorted(VALID_CHECK_TYPES)) + "\n"
            "ตัวอย่าง: /bbscan 1 headers https://example.com\n\n"
            "ตรวจได้เฉพาะ target ที่ Program/Authorization/Scope อนุญาตไว้แล้วเท่านั้น"
         )
@@ -1723,10 +1723,10 @@ async def _build_debtor_detail_view(chat_id: int, debtor_name: str, page: int = 
     )
     total_satang = sum(e["amount_satang"] for e in entries)
     text = dr.format_debtor_detail(
-        debtor_name, total_satang, entries, page=page, page_size=_DEBT_DETAIL_PAGE_SIZE,
+        debtor_name, total_satang, entries, page=page, page_size=DEBT_DETAIL_PAGE_SIZE,
     )
     ref = dl.debtor_ref(chat_id, debtor_name)
-    total_pages = max(1, -(-len(entries) // _DEBT_DETAIL_PAGE_SIZE))
+    total_pages = max(1, -(-len(entries) // DEBT_DETAIL_PAGE_SIZE))
 
     nav_row = []
     if page > 1:
@@ -2139,7 +2139,7 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # here, so there is exactly one place this policy can diverge from.
         result = await clone_repository(url, chat_id, user.id)
         if not result.ok:
-            return await update.message.reply_text(_deny_text_github(result.reason))
+            return await update.message.reply_text(_deny_github(result.reason))
         info = get_repository_info(result.repository_id)
         await update.message.reply_text(
             "✅ Clone สำเร็จ\n\n"
@@ -2238,7 +2238,7 @@ async def github_sweep_loop():
                 logger.info(f"GITHUB TTL SWEEP: expired {swept} repositories")
         except Exception:
             logger.exception("GITHUB SWEEP LOOP ERROR")
-        await asyncio.sleep(GITHUB_SWEEP_INTERVAL_SECONDS)
+        await asyncio.sleep(GITHUB_INTERVAL_SECONDS)
 
 
 # ---------------- Wallet / Payment / Transaction Ledger Commands ----------------
@@ -2801,17 +2801,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update, context):
     logger.error("UNHANDLED ERROR", exc_info=context.error)
     
+BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS = 10
+
+
+def _on_background_task_done(name: str):
+    """Both loops wrap their bodies in try/except, but an error raised
+    outside that guard -- or a bug in the guard itself -- would otherwise
+    end the task silently: asyncio only surfaces the exception when the
+    task is garbage-collected, long after the feature stopped working.
+    This logs it at the moment it happens. CancelledError is the normal
+    shutdown path and is not an error."""
+    def _callback(task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("BACKGROUND TASK DIED: %s", name, exc_info=exc)
+    return _callback
+
+
+def _start_background_task(app, key: str, coro_factory):
+    """Creates the task only if one is not already running under `key`.
+    post_init runs once per Application, but a restart-in-process or a
+    second call would otherwise leak an orphaned loop that keeps polling
+    and posting alongside its replacement."""
+    existing = app.bot_data.get(key)
+    if existing is not None and not existing.done():
+        logger.warning("BACKGROUND TASK ALREADY RUNNING: %s (not starting a second)", key)
+        return existing
+    task = asyncio.create_task(coro_factory(), name=key)
+    task.add_done_callback(_on_background_task_done(key))
+    app.bot_data[key] = task
+    return task
+
+
 async def post_init(app):
-    app.bot_data["news_task"] = asyncio.create_task(news_background_loop(app.bot))
+    _start_background_task(app, "news_task", lambda: news_background_loop(app.bot))
+    # github_sweep_loop() existed but was never scheduled, so
+    # github_repo.py's DEFAULT_REPOSITORY_TTL_SECONDS never took effect and
+    # expired clone workspaces were never removed from disk or flipped to
+    # EXPIRED. Started here on the same create_task/cancel lifecycle as the
+    # news loop, which is the pattern its own docstring says it mirrors.
+    _start_background_task(app, "github_sweep_task", github_sweep_loop)
     
 async def post_shutdown(app):
-    task = app.bot_data.get("news_task")
-    if task:
+    for key in ("news_task", "github_sweep_task"):
+        task = app.bot_data.get(key)
+        if not task:
+            continue
         task.cancel()
         try:
-            await task
+            # Bounded: a loop that swallows CancelledError, or that is
+            # blocked in a non-cancellable call, must not hang shutdown
+            # forever. Await so cancellation actually lands, but give up
+            # and log rather than block the process from exiting.
+            await asyncio.wait_for(task, timeout=BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            logger.error("BACKGROUND TASK DID NOT STOP within %ss: %s",
+                         BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS, key)
+        except Exception:
+            logger.exception("BACKGROUND TASK ERROR during shutdown: %s", key)
     
 # ---------------- Main ----------------
 
@@ -2820,6 +2871,8 @@ def main():
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
+    # Names and model ids only -- never a key or any fragment of one.
+    config.log_startup_summary()
     db_info()
     quota_db_init()
     security_db_init()
