@@ -64,7 +64,7 @@ from security import write_audit_log
 logger = logging.getLogger(__name__)
 
 try:
-    import reaource
+    import resource
     _HAVE_RESOURCE = True
 except ImportError: # pragma: no cover - resource is POSIX-only
     _HAVE_RESOURCE = False
@@ -109,7 +109,7 @@ def _try_acquire_test_slot() -> bool:
 def _release_test_slot() -> None:
     global _active_test_runs
     with _test_slot_lock:
-        _active_test_runs = max(0), _active_test_runs - 1)
+        _active_test_runs = max(0, _active_test_runs - 1)
         
 # ---------------- Result type ----------------
 
@@ -142,6 +142,11 @@ def _pytest_configured(workspace_path: str) -> bool:
             return True
     pyproject = os.path.join(workspace_path, "pyproject.toml")
     if os.path.isfile(pyproject):
+        text = _peak_text(pyproject)
+        if text and "[tool.pytest" in text:
+            return True
+    setup_cfg = os.path.join(workspace_path, "setup.cfg")
+    if os.path.isfile(setup_cfg):
         text = _peak_text(setup_cfg)
         if text and "[tool:pytest]" in text:
             return True
@@ -208,7 +213,7 @@ def detect_test_runner(workspace_path: str):
     files/configuration, or (None, None) if nothing supported is found.
     Precedence: Python test files (pytest if importable+configured,
     else unittest), then a Node package.json with a real test script."""
-    if _hash_python_test_files(workspace_path):
+    if _has_python_test_files(workspace_path):
         if _pytest_available() and _pytest_configured(workspace_path):
             return "pytest", [sys.executable, "-m", "pytest", "-q"]
         return "unittest", [sys.executable, "-m", "unittest", "discover", "-s", ".", "-t", "."]
