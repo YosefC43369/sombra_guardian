@@ -89,6 +89,16 @@ _NAME_TITLES_EN = ("Mr.", "Mrs.", "Ms.", "Miss", "Dr.", "Prof.", "Assoc.", "Asst
 _NOT_NAMES_TH = frozenset((
     "ข้อมูล ส่วนตัว", "บริษัท จำกัด", "ประเทศ ไทย", "กรุงเทพ มหานคร",
 ))
+# คำ "ป้ายกำกับ" ที่ผู้ใช้พิมพ์นำหน้าค่า เช่น "วิชชา กลิ่นหอม เบอร์: 092-..."
+# คำว่า "เบอร์" เป็นป้าย ไม่ใช่ส่วนของชื่อ ต้องตัดออกไม่ให้ปนเข้าไปในชื่อ
+# ไม่งั้นจะยิง query ผิด (`"วิชชา กลิ่นหอม เบอร์"`) และชี้ตัวบุคคลเพี้ยน
+# เทียบแบบตรงทั้งคำเท่านั้น (case-insensitive) จึงไม่ตัดชื่อจริงที่บังเอิญคล้าย
+_NAME_LABELS = frozenset((
+    "เบอร์", "โทร", "โทรศัพท์", "มือถือ", "โทรฯ", "เบอร์โทร", "tel", "phone", "mobile",
+    "อีเมล", "อีเมล์", "email", "mail", "ไลน์", "line", "ไอดี", "id",
+    "เลขบัตร", "เลขบัตรประชาชน", "บัตรประชาชน", "ที่อยู่", "address",
+    "ชื่อ", "นามสกุล", "name",
+))
 
 # ตัวควบคุม / zero-width / bidi-override ที่ใช้ซ่อนคำสั่งในเนื้อหาที่ scrape มา
 # สร้างจาก code point เพื่อไม่ให้มีอักขระมองไม่เห็นปนอยู่ในซอร์สไฟล์เอง
@@ -387,7 +397,10 @@ def _name_segments(candidate: str) -> List[str]:
     """
     segments, current = [], []
     for token in candidate.split():
-        if token in _STOPWORDS_TH or token.lower() in _STOPWORDS_EN:
+        # ตัดที่ stopword และที่ "ป้ายกำกับ" (เบอร์/โทร/อีเมล/ไอดี…) — ป้ายเหล่านี้
+        # ไม่ใช่ส่วนของชื่อ พบบ่อยเมื่อผู้ใช้พิมพ์ "ชื่อ นามสกุล เบอร์: ..."
+        if (token in _STOPWORDS_TH or token.lower() in _STOPWORDS_EN
+                or token in _NAME_LABELS or token.lower() in _NAME_LABELS):
             if current:
                 segments.append(current)
             current = []
@@ -569,12 +582,17 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
         snip_hits = sum(1 for value in sel_values if value and value in snip_low)
         # (4) เจอครบทั้งวลี (ชื่อ-นามสกุล) ในชื่อเรื่อง/คำโปรย = ตรงตัวที่สุด
         phrase_bonus = 4 * sum(1 for p in sel_phrases if p in title_snip)
-        # แหล่งที่ถูกชี้ซ้ำจากหลาย query/engine = สัญญาณว่าเกี่ยวข้องจริง
-        record["relevance"] = (
-            value_hits * 3 + token_hits + snip_hits + phrase_bonus + (record["engines"] - 1)
-        )
+        real_signal = value_hits * 3 + token_hits + snip_hits + phrase_bonus
+        # โบนัส "พบซ้ำหลาย query/engine" ให้ต่อเมื่อมีสัญญาณตรงเป้าจริงก่อน
+        # ไม่งั้นผลขยะที่เอนจินคืนมาซ้ำๆ (เช่น lite.ip2location.com ที่ Marginalia
+        # แถมมาทุก query) จะได้คะแนนจากการนับซ้ำล้วนๆ ทั้งที่ไม่เกี่ยวกับเป้าหมายเลย
+        repeat_bonus = (record["engines"] - 1) if real_signal > 0 else 0
+        record["relevance"] = real_signal + repeat_bonus
 
-    # เรียงตามคะแนน; เท่ากันให้ตัวที่ถูกยืนยันจากหลายเอนจินมาก่อน แล้วค่อย URL
+    # ไม่ตัดผล relevance 0 ที่นี่ — เก็บ recall ไว้ให้เส้นทาง scrape ของ /identity
+    # (บางแหล่งคำค้นอยู่ในเนื้อหาที่ยังไม่ได้ดึง จึงยัง relevance 0 ก่อน scrape)
+    # ผลขยะจะจมอยู่ล่างสุดจากคะแนน แล้ว verify_sources กรองด้วยเนื้อหาอีกชั้น
+    # ส่วนการ"ซ่อนผลไม่ตรงเป้า" ทำที่ชั้นแสดงผลของ /search แทน (คนละงานกับ recall)
     ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], -r["engines"], r["link"]))
     return ranked[: max(1, int(limit))]
 
@@ -1094,6 +1112,13 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
                      "หรือ selector แคบเกินไป ลองใช้คำค้นที่กว้างขึ้น")
         return "\n".join(lines)
 
+    # ชั้นแสดงผล: ถ้ามีผลตรงเป้า (relevance>0) ให้แสดงเฉพาะพวกนั้น ซ่อนผลขยะ
+    # (เช่น lite.ip2location.com ที่เอนจินแถมมา) ถ้าทั้งหมด relevance 0 ค่อยแสดง
+    # พร้อมเตือนว่าอาจไม่ตรงเป้า — ดีกว่าโชว์ขยะเป็นผลอันดับ 1 เฉยๆ
+    strong = [r for r in ranked if r.get("relevance", 0) > 0]
+    low_relevance_only = not strong
+    ranked = strong if strong else ranked
+
     clearnet = sum(1 for r in ranked if r.get("origin") == "clearnet")
     darkweb = sum(1 for r in ranked if r.get("origin") == "darkweb")
     username = sum(1 for r in ranked if r.get("origin") == "username")
@@ -1104,6 +1129,9 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
         f"พบ {len(ranked)} แหล่ง ({' | '.join(parts)}) "
         f"— แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง"
     )
+    if low_relevance_only:
+        lines.append("⚠️ ผลด้านล่างความเกี่ยวข้องต่ำ (ไม่พบคำค้นในชื่อ/คำโปรย) "
+                     "อาจไม่ตรงเป้า — ลองใส่ชื่อ-นามสกุลให้ครบ หรือรอ engine อื่นกลับมา")
     lines.append("")
     for position, record in enumerate(ranked[:limit], start=1):
         marker = " *" if record.get("relevance", 0) > 0 else ""
