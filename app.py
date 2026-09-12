@@ -22,6 +22,8 @@ from telegram.ext import (
 from telegram.error import TelegramError
 
 import detection
+import search
+import osint
 from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
@@ -85,6 +87,8 @@ DEFAULT_MUTE_SECONDS = 600
 TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_photo
 GITHUB_FILES_DISPLAY_CAP = 200  # /github files: max rows shown even after _reply_chunked splitting
 GITHUB_INTERVAL_SECONDS = 3600  # how often the TTL sweep background task runs
+SEARCH_RESULTS_DISPLAY_CAP = 20  # /search: max sources listed in the reply
+SEARCH_COMMAND_BUDGET_SECONDS = float(os.getenv("SEARCH_COMMAND_BUDGET_SECONDS", "40"))
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -365,7 +369,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI\n"
         f"ส่งรูปภาพ/ไฟล์ PDF/TXT พร้อม caption แท็ก @{context.bot.username} "
         f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์\n"
-        "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท"
+        "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท\n"
+        "/search <คำค้น|อีเมล|โดเมน|@user|BTC> - ค้นหา OSINT บน dark web (Admin)\n"
+        "/identity <เป้าหมาย> - วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล (Admin)\n"
+        "/corporate <เป้าหมาย> - วิเคราะห์ข้อมูลองค์กรรั่วไหล (Admin)\n"
         "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
         "/debt [ชื่อ|unpaid|paid|all] - ดูรายการค้างชำระ\n"
         "/debt_summary [YYYY-MM] [ai] - สรุปยอดค้างชำระรายเดือน\n"
@@ -658,6 +665,71 @@ async def dashboard_command(update, context):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     write_audit_log(chat.id, user.id, actor="admin", action="DASHBOARD_VIEW")
     
+async def _run_osint_investigation(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   question: str, preset: str, audit_action: str) -> None:
+    """เส้นทางร่วมของ /identity และ /corporate — โควตา, audit log, แผนการค้นหา,
+    ข้อความสถานะ แล้วส่งต่อให้ coordinator เก็บหลักฐานและวิเคราะห์
+
+    รวมไว้ที่เดียวเพราะสองคำสั่งนี้เคยก๊อปโค้ดกันคนละชุด ทำให้ทั้งคู่มีบั๊กเดียวกัน
+    คือ `if not ok: return` เฉยๆ ผู้ใช้จึงไม่ได้รับอะไรเลยเวลา AI ล้มเหลว"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)"
+        )
+        return
+
+    write_audit_log(
+        chat_id, user_id, actor="admin", action=audit_action, detail=question[:500]
+    )
+
+    # คำนวณแผนการค้นหาไว้โชว์ให้ผู้ใช้เห็นว่าระบบจะไปค้นอะไรจริงๆ
+    # (เป็นฟังก์ชันบริสุทธิ์ราคาถูก coordinator คำนวณซ้ำเองอีกรอบตอนเก็บข้อมูล)
+    selectors = osint.extract_selectors(question)
+    queries = osint.plan_queries(
+        question, selectors, max_queries=coordinator.OSINT_MAX_QUERIES
+    )
+    logger.info(
+        f"OSINT INVESTIGATION | Chat ID: {chat_id} | User ID: {user_id} | "
+        f"Preset: {preset} | Selectors: {selectors.summary()} | Plan: {queries}"
+    )
+
+    status_msg = None
+    try:
+        status_msg = await update.message.reply_text(
+            f"🛰 เริ่มเก็บหลักฐาน\n"
+            f"Selector: {selectors.summary()}\n"
+            f"Query: {' | '.join(queries)}\n"
+            f"ขั้นตอน: ค้นหา → จัดอันดับ → ดึงเนื้อหา → สกัด IOC → วิเคราะห์\n"
+            f"อาจใช้เวลาถึง {int(coordinator.OSINT_TOTAL_BUDGET_SECONDS)} วินาที"
+        )
+    except TelegramError as e:
+        logger.info(f"OSINT STATUS MESSAGE FAILED: {e}")
+
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    ok, result = await coordinator.handle_request(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_admin=True,
+        question=question,
+        preset=preset,
+    )
+
+    if status_msg is not None:
+        await safe_delete(status_msg, chat_id, context)
+
+    if not ok:
+        # ของเดิม return เงียบๆ ผู้ใช้รอจนจบแล้วไม่ได้อะไรกลับไปเลย
+        await update.message.reply_text(result)
+        return
+
+    await _reply_chunked(update, result)
+
+
 async def cmd_personal_identity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Authorized Personal Identity / PII exposure analysis."""
     if not await is_admin(update, context):
@@ -668,42 +740,17 @@ async def cmd_personal_identity(update: Update, context: ContextTypes.DEFAULT_TY
     question = " ".join(context.args).strip()
     if not question:
         return await update.message.reply_text(
-            "ใช้งาน: /identity <authorized OSINT/security investigation>"
+            "ใช้งาน: /identity <authorized OSINT/security investigation>\n"
+            "ตัวอย่าง: /identity john.doe@acme.co.th\n"
+            "เคล็ดลับ: ใส่อีเมล/โดเมน/@username/เบอร์โทรตรงๆ จะได้ผลแม่นกว่าพิมพ์เป็นประโยค\n"
+            "ใช้ /search ก่อนได้ถ้าอยากดูว่าค้นเจออะไรบ้างโดยไม่เปลืองการวิเคราะห์"
         )
 
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
-    if not allowed:
-        return await update.message.reply_text(
-            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)"
-        )
-
-    write_audit_log(
-        chat_id,
-        user_id,
-        actor="admin",
-        action="PERSONAL_IDENTITY_ANALYSIS",
-        detail=question[:500],
+    await _run_osint_investigation(
+        update, context, question, "personal_identity", "PERSONAL_IDENTITY_ANALYSIS"
     )
 
-    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
-    ok, result = await coordinator.handle_request(
-        chat_id=chat_id,
-        user_id=user_id,
-        is_admin=True,
-        question=question,
-        preset="personal_identity",
-    )
-
-    if not ok:
-        return
-
-    for chunk in split_telegram_message(result):
-        await update.message.reply_text(chunk)
-        
 async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Authorized defensive Corporate Intelligence / leak analysis."""
     if not await is_admin(update, context):
@@ -714,12 +761,40 @@ async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_
     question = " ".join(context.args).strip()
     if not question:
         return await update.message.reply_text(
-            "ใช้งาน: /corporate <authorized defensive corporate investigation>"
+            "ใช้งาน: /corporate <authorized defensive corporate investigation>\n"
+            "ตัวอย่าง: /corporate acme.co.th\n"
+            "เคล็ดลับ: ใส่โดเมนองค์กร/อีเมลองค์กรตรงๆ จะได้ผลแม่นกว่าพิมพ์เป็นประโยค\n"
+            "ใช้ /search ก่อนได้ถ้าอยากดูว่าค้นเจออะไรบ้างโดยไม่เปลืองการวิเคราะห์"
+        )
+
+    await _run_osint_investigation(
+        update, context, question, "corporate_espionage", "CORPORATE_ESPIONAGE_ANALYSIS"
+    )
+
+
+# ---------------- OSINT Search ----------------
+
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ค้นหา dark web แบบดิบ: วางแผน query จาก selector แล้วคืนรายการแหล่ง
+    ที่จัดอันดับตามความเกี่ยวข้อง — ไม่ดึงเนื้อหา ไม่เรียก AI จึงเร็วและไม่เปลือง
+    โควตา AI ใช้สำรวจก่อนตัดสินใจสั่ง /identity หรือ /corporate ต่อ"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ OSINT Search ใช้ได้เฉพาะ Admin")
+
+    query = " ".join(context.args).strip()
+    if not query:
+        return await update.message.reply_text(
+            "ใช้งาน: /search <คำค้น | อีเมล | โดเมน | @username | BTC address | CVE>\n"
+            "ตัวอย่าง:\n"
+            "  /search john.doe@acme.co.th\n"
+            "  /search acme.co.th\n"
+            "  /search \"ชื่อบริษัท จำกัด\"\n\n"
+            "ระบบจะสกัด selector ออกมาเองแล้วยิงหลาย query ให้อัตโนมัติ"
         )
 
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    
+
     allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
     if not allowed:
         return await update.message.reply_text(
@@ -727,29 +802,60 @@ async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_
         )
 
     write_audit_log(
-        chat_id,
-        user_id,
-        actor="admin",
-        action="CORPORATE_ESPIONAGE_ANALYSIS",
-        detail=question[:500],
+        chat_id, user_id, actor="admin", action="OSINT_SEARCH", detail=query[:500]
     )
+
+    selectors = osint.extract_selectors(query)
+    queries = osint.plan_queries(
+        query, selectors, max_queries=coordinator.OSINT_MAX_QUERIES
+    )
+    logger.info(
+        f"OSINT SEARCH | Chat ID: {chat_id} | User ID: {user_id} | "
+        f"Query: {query!r} | Plan: {queries}"
+    )
+
+    status_msg = None
+    try:
+        status_msg = await update.message.reply_text(
+            f"🔎 กำลังค้นหา {len(queries)} query: {' | '.join(queries)}\n"
+            f"รออย่างมาก {int(SEARCH_COMMAND_BUDGET_SECONDS)} วินาที"
+        )
+    except TelegramError as e:
+        logger.info(f"OSINT SEARCH STATUS MESSAGE FAILED: {e}")
 
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
-    
-    ok, result = await coordinator.handle_request(
-        chat_id=chat_id,
-        user_id=user_id,
-        is_admin=True,
-        question=question,
-        preset="corporate_espionage",
+
+    groups = await asyncio.gather(
+        *[
+            search.get_search_results_async(
+                q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
+            )
+            for q in queries
+        ],
+        return_exceptions=True,
     )
 
-    if not ok:
-        return
-        
-    for chunk in split_telegram_message(result):
-        await update.message.reply_text(chunk)
-    
+    clean_groups = []
+    for q, group in zip(queries, groups):
+        if isinstance(group, BaseException):
+            logger.warning(f"OSINT SEARCH FAILED | query={q!r}: {group}")
+            continue
+        clean_groups.append(group)
+
+    ranked = osint.merge_and_rank(
+        clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP
+    )
+
+    if status_msg is not None:
+        await safe_delete(status_msg, chat_id, context)
+
+    await _reply_chunked(
+        update,
+        osint.format_search_report(
+            query, selectors, queries, ranked, limit=SEARCH_RESULTS_DISPLAY_CAP
+        ),
+    )
+
 async def chat_id_command(update, context):
     thread_id = update.effective_message.message_thread_id
     text = f"Chat ID: `{update.effective_chat.id}`"
@@ -2916,6 +3022,7 @@ def main():
     app.add_handler(CommandHandler("id", chat_id_command))
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
+    app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
     app.add_handler(CommandHandler("bbscope", cmd_bbscope))
