@@ -121,7 +121,9 @@ check("/search planned pivot queries",
 check("/search shows the selectors it extracted", "email=john.doe@acme.co.th" in report, report[:200])
 check("/search shows the query plan", "Query ที่ยิง" in report)
 check("/search dedupes the source seen by two queries", report.count("aaaaaaaaaaaaaaaa.onion") == 1, report)
-check("/search ranks selector matches first", report.index("aaaaaaaaaaaaaaaa") < report.index("dddddddddddddddd"), report)
+check("/search shows the selector match", "aaaaaaaaaaaaaaaa" in report, report)
+check("/search hides the irrelevant result when a relevant one exists",
+      "dddddddddddddddd" not in report, report)
 check("/search never calls the AI", "preset" not in CAPTURED, CAPTURED.get("preset"))
 
 sink = []
