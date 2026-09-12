@@ -88,6 +88,14 @@ def resolve_model() -> str:
     return _resolve(MODEL_NAMES, DEFAULT_MODEL)
     
     
+def resolve_image_model() -> str:
+    """โมเดลสร้าง/แก้รูป — คู่กับ resolve_model() ของฝั่งข้อความ
+    IMAGE_MODEL_NAMES ถูกประกาศไว้ตั้งแต่แรกแต่ไม่เคยมีตัว resolve คู่กัน
+    ทั้งที่ config.log_startup_summary(), gemini.generate_image() และ
+    gemini.edit_image() เรียกใช้ชื่อนี้ ผลคือบอทตายตั้งแต่บรรทัด log แรก"""
+    return _resolve(IMAGE_MODEL_NAMES, DEFAULT_IMAGE_MODEL)
+    
+    
 def resolve_classifier_model() -> str:
     """The classifier falls back to the general chat model, matching the
     behaviour gemini.classify_spam() already had."""
@@ -107,7 +115,9 @@ def api_key_source() -> Optional[str]:
         value = os.getenv(name)
         if value and value.strip():
             return name
-        return None
+    # return ต้องอยู่นอกลูป ไม่งั้นจะตรวจแค่ชื่อแรกแล้วเลิก — คีย์ที่มาจาก
+    # OPENAI_API_KEY / GEMINI_API_KEY จึงถูกรายงานเป็น None ทั้งที่ใช้งานได้
+    return None
         
         
 def log_startup_summary() -> None:
