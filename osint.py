@@ -492,6 +492,28 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
 
 # ---------------- 2. Processing ----------------
 
+_TRACKING_PARAMS = frozenset((
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "ref", "ref_src", "source", "spm", "cmpid", "yclid",
+))
+
+
+def _dedup_key(link: str) -> str:
+    """คีย์สำหรับรวมผลซ้ำ — ตัดพารามิเตอร์ติดตาม (utm_*, fbclid, ref) และ
+    เครื่องหมาย / ท้าย ออกก่อน หน้าเดียวกันที่มาคนละลิงก์ติดตามจะได้ยุบเป็นอันเดียว
+    ไม่นับเป็นคนละแหล่งจนดันคะแนน 'พบซ้ำ' ผิด"""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    try:
+        parts = urlsplit(link.strip())
+    except ValueError:
+        return link.rstrip("/").lower()
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_PARAMS]
+    query = urlencode(kept)
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, query, "")) or link.lower()
+
+
 def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
                    limit: int = DEFAULT_MAX_SOURCES) -> List[dict]:
     """รวมผลจากหลาย query, dedupe, แล้วจัดอันดับตามความเกี่ยวข้อง
@@ -500,6 +522,15 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
     ผลที่ตรงเป้าที่สุดจึงมีสิทธิ์ถูกตัดทิ้งก่อนจะได้ scrape ด้วยซ้ำ
     """
     sel_values = [v.lower() for v in (selectors.all_values() if selectors else [])]
+    # โทเคนระดับคำ: ทำให้จัดอันดับละเอียดขึ้น — ผลที่ครอบคลุมคำในคำค้นได้มากกว่า
+    # ควรมาก่อน ไม่ใช่แค่ "เจอ substring เต็มหรือไม่เจอ" อย่างเดียว
+    sel_tokens = set()
+    for value in sel_values:
+        for tok in re.split(r"[\s@._/\-]+", value):
+            if len(tok) >= 3 and tok not in _STOPWORDS_EN:
+                sel_tokens.add(tok)
+    # วลีหลายคำ (ชื่อ-นามสกุล / วลีในเครื่องหมายคำพูด) — เจอครบวลีคือสัญญาณแรงสุด
+    sel_phrases = [v for v in sel_values if " " in v]
     merged: Dict[str, dict] = {}
 
     for group in result_groups or []:
@@ -509,7 +540,7 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
             link = str(item.get("link") or "").strip()
             if not link:
                 continue
-            key = link.rstrip("/").lower()
+            key = _dedup_key(link)
             if key in merged:
                 merged[key]["engines"] += 1      # หลาย query/engine ชี้มาที่เดียวกัน
                 # แถวเดียวกันจากหลาย query — เก็บ snippet ที่ยาว/มีข้อมูลกว่าไว้
@@ -527,17 +558,24 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
             }
 
     for record in merged.values():
-        # รวม snippet (คำโปรยของเอนจิน) เข้าไปในการให้คะแนนด้วย — เป็นสัญญาณ
-        # ความเกี่ยวข้องก่อน scrape ที่ชื่อเรื่อง+URL อย่างเดียวไม่มี
-        haystack = f"{record['title']} {record['link']} {record.get('snippet', '')}".lower()
-        hits = sum(1 for value in sel_values if value and value in haystack)
-        # snippet ที่ตรง selector ให้คะแนนเพิ่มอีกชั้น (เจอในคำโปรย = สัญญาณจริง)
+        title_snip = f"{record['title']} {record.get('snippet', '')}".lower()
+        haystack = f"{title_snip} {record['link']}".lower()
+        # (1) เจอ selector value เต็มๆ = สัญญาณแรง
+        value_hits = sum(1 for value in sel_values if value and value in haystack)
+        # (2) ครอบคลุมโทเคนของคำค้นกี่คำ = จัดอันดับละเอียดขึ้นสำหรับคำค้นหลายคำ
+        token_hits = sum(1 for tok in sel_tokens if tok in haystack)
+        # (3) เจอในคำโปรยของเอนจิน = สัญญาณจริงก่อน scrape
         snip_low = record.get("snippet", "").lower()
         snip_hits = sum(1 for value in sel_values if value and value in snip_low)
-        # แหล่งที่ถูกชี้ซ้ำจากหลาย query = สัญญาณว่าเกี่ยวข้องจริง
-        record["relevance"] = hits * 3 + snip_hits + (record["engines"] - 1)
+        # (4) เจอครบทั้งวลี (ชื่อ-นามสกุล) ในชื่อเรื่อง/คำโปรย = ตรงตัวที่สุด
+        phrase_bonus = 4 * sum(1 for p in sel_phrases if p in title_snip)
+        # แหล่งที่ถูกชี้ซ้ำจากหลาย query/engine = สัญญาณว่าเกี่ยวข้องจริง
+        record["relevance"] = (
+            value_hits * 3 + token_hits + snip_hits + phrase_bonus + (record["engines"] - 1)
+        )
 
-    ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], r["link"]))
+    # เรียงตามคะแนน; เท่ากันให้ตัวที่ถูกยืนยันจากหลายเอนจินมาก่อน แล้วค่อย URL
+    ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], -r["engines"], r["link"]))
     return ranked[: max(1, int(limit))]
 
 
@@ -1058,8 +1096,12 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
 
     clearnet = sum(1 for r in ranked if r.get("origin") == "clearnet")
     darkweb = sum(1 for r in ranked if r.get("origin") == "darkweb")
+    username = sum(1 for r in ranked if r.get("origin") == "username")
+    parts = [f"เว็บเปิด {clearnet}", f"dark web {darkweb}"]
+    if username:
+        parts.append(f"บัญชีข้ามเว็บ {username}")
     lines.append(
-        f"พบ {len(ranked)} แหล่ง (เว็บเปิด {clearnet} | dark web {darkweb}) "
+        f"พบ {len(ranked)} แหล่ง ({' | '.join(parts)}) "
         f"— แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง"
     )
     lines.append("")
@@ -1069,6 +1111,10 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
         engine = record.get("engine") or "-"
         lines.append(f"[S{position}]{marker} {str(record.get('title', 'Untitled'))[:120]}")
         lines.append(f"      {record.get('link', '')}")
+        # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
+        snippet = str(record.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"      คำโปรย: {snippet[:200]}")
         lines.append(
             f"      ฝั่ง={origin} | engine={engine} | "
             f"relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง"
