@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 
+import nethealth
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -28,28 +30,14 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.3179.54"
 ]
 
-TOR_GATEWAY_SUFFIXES = [
-    s.strip() for s in os.getenv("TOR_GATEWAY_SUFFIXES", ".ly,.ps").split(",") if s.strip()
-]
-
 _logger = logging.getLogger("modbot.scrape")
 
-
-def _env_int(name, default):
-    """.env ที่พิมพ์ค่าผิดต้องไม่ทำให้ app.py import ไม่ผ่านทั้งบอท"""
-    try:
-        return int(str(os.getenv(name, default)).strip())
-    except (TypeError, ValueError):
-        _logger.warning("SCRAPE CONFIG | %s is not an int, using default %s", name, default)
-        return int(default)
-
-
-def _env_float(name, default):
-    try:
-        return float(str(os.getenv(name, default)).strip())
-    except (TypeError, ValueError):
-        _logger.warning("SCRAPE CONFIG | %s is not a float, using default %s", name, default)
-        return float(default)
+# config ของ Tor/gateway และตัวอ่าน env อยู่ที่ nethealth.py ที่เดียว
+# (.env ที่ commit ไว้ตั้ง TOR_GATEWAY_SUFFIXES= ว่าง ซึ่งเดิมแปลว่า "ไม่มี
+#  gateway สำรองเลย" — nethealth ถือว่าค่าว่าง = ใช้ default)
+TOR_GATEWAY_SUFFIXES = nethealth.TOR_GATEWAY_SUFFIXES
+_env_int = nethealth.env_int
+_env_float = nethealth.env_float
 
 
 def _onion_to_gateway(url, suffix):
@@ -66,8 +54,8 @@ def _onion_to_gateway(url, suffix):
 MAX_DOWNLOAD_BYTES = _env_int("SCRAPE_MAX_DOWNLOAD_BYTES", 1_000_000)
 MAX_EXTRACTED_TEXT_CHARS = _env_int("SCRAPE_MAX_EXTRACTED_TEXT_CHARS", 50_000)
 MAX_RETURN_CHARS = _env_int("SCRAPE_MAX_RETURN_CHARS", 2_000)
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+TOR_SOCKS_HOST = nethealth.TOR_SOCKS_HOST
+TOR_SOCKS_PORT = nethealth.TOR_SOCKS_PORT
 ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
 # ---------------- Limits (เรียกผ่าน coordinator จาก handler ของ app.py: ต้องมีเพดานเวลาเสมอ) ----------------
@@ -77,32 +65,18 @@ SCRAPE_TOTAL_BUDGET_SECONDS = _env_float("SCRAPE_TOTAL_BUDGET_SECONDS", 60)
 SCRAPE_MAX_URLS = _env_int("SCRAPE_MAX_URLS", 20)
 # "auto" = ใช้ Tor ถ้า SOCKS port เปิดอยู่, "true"/"false" = บังคับ
 SCRAPE_USE_TOR = os.getenv("SCRAPE_USE_TOR", "auto").strip().lower()
-TOR_PROBE_TTL_SECONDS = _env_float("TOR_PROBE_TTL_SECONDS", 60)
+TOR_PROBE_TTL_SECONDS = nethealth.TOR_PROBE_TTL_SECONDS
 # บอกโมเดลให้ชัดว่าแหล่งนี้ดึงเนื้อหาไม่ได้ ไม่งั้น coordinator จะส่งแค่ "ชื่อเรื่อง"
 # เข้าไปใน [SCRAPED EVIDENCE] แล้วโมเดลเข้าใจผิดว่านั่นคือเนื้อหาที่ยืนยันได้
 CONTENT_UNAVAILABLE_MARKER = "[content unavailable]"
 
 _thread_local = threading.local()
-_tor_probe_lock = threading.Lock()
-_tor_probe_state = {"checked_at": 0.0, "reachable": False}
 
 
 def _tor_reachable(timeout=2.0, force=False) -> bool:
-    """cache ผล probe ไว้ TOR_PROBE_TTL_SECONDS วินาที — scrape_multiple() ยิงพร้อมกัน
+    """ใช้ probe ร่วมกับ search.py ผ่าน nethealth — scrape_multiple() ยิงพร้อมกัน
     หลาย thread ถ้าเปิด socket ทดสอบใหม่ทุก URL คือเสียเวลาเปล่าล้วนๆ"""
-    now = time.monotonic()
-    with _tor_probe_lock:
-        if not force and (now - _tor_probe_state["checked_at"]) < TOR_PROBE_TTL_SECONDS:
-            return _tor_probe_state["reachable"]
-    try:
-        with socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout):
-            reachable = True
-    except OSError:
-        reachable = False
-    with _tor_probe_lock:
-        _tor_probe_state["checked_at"] = time.monotonic()
-        _tor_probe_state["reachable"] = reachable
-    return reachable
+    return nethealth.tor_reachable(timeout=timeout, force=force)
 
 
 def _tor_enabled() -> bool:
@@ -234,17 +208,26 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
     if is_onion:
         candidate_urls = []
         if _tor_enabled():
-            candidate_urls.append((url, True))
-        candidate_urls.extend((_onion_to_gateway(url, s), False) for s in TOR_GATEWAY_SUFFIXES)
+            candidate_urls.append((url, True, "tor"))
+        candidate_urls.extend(
+            (_onion_to_gateway(url, suffix), False, suffix) for suffix in TOR_GATEWAY_SUFFIXES
+        )
+        # ข้าม gateway ที่ circuit breaker พักอยู่ — ใช้ประวัติร่วมกับ search.py
+        # จึงรู้ตั้งแต่ตอนค้นแล้วว่า gateway ตัวไหนตาย ไม่ต้องมาเรียนรู้ใหม่ตอน scrape
+        candidate_urls = [c for c in candidate_urls if not nethealth.blocked(f"route:{c[2]}")]
+        if not candidate_urls:
+            _logger.debug("SCRAPE NO LIVE ROUTE | url=%s", url)
+            return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
     else:
-        candidate_urls = [(url, False)]
+        candidate_urls = [(url, False, "direct")]
 
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
     }
 
-    for candidate, use_tor in candidate_urls:
+    for candidate, use_tor, route in candidate_urls:
+        route_key = f"route:{route}"
         timeout = _timeout_for(deadline, is_onion)
         if timeout is None:
             _logger.debug("SCRAPE BUDGET EXHAUSTED | url=%s", url)
@@ -257,9 +240,15 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
             )
             if response.status_code != 200:
                 _logger.debug(
-                    "SCRAPE NON-200 | url=%s via=%s status=%s", url, candidate, response.status_code
+                    "SCRAPE NON-200 | url=%s route=%s status=%s", url, route, response.status_code
                 )
+                # เช่นเดียวกับ search.py: 404 ไม่ใช่ความผิดของ gateway
+                if is_onion and (response.status_code >= 500 or response.status_code == 429):
+                    nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
                 continue
+
+            if is_onion:
+                nethealth.record(route_key, True, nethealth.ROUTE_FAILURE_THRESHOLD)
 
             content_type = (response.headers.get("Content-Type") or "").lower()
             if content_type and not any(t in content_type for t in ALLOWED_CONTENT_TYPES):
@@ -271,9 +260,13 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
         except requests.exceptions.InvalidSchema as exc:
             # socks5h ต้องมี PySocks (มีอยู่ใน requirements.txt) — ถ้าหายให้ตกไป gateway
             _logger.warning("SCRAPE TOR UNAVAILABLE | url=%s: %s", url, exc)
+            if is_onion:
+                nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
             continue
         except Exception as exc:
-            _logger.debug("Gateway attempt failed url=%s via=%s: %s", url, candidate, exc)
+            _logger.debug("Gateway attempt failed url=%s route=%s: %s", url, route, exc)
+            if is_onion:
+                nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
             continue
         finally:
             if response is not None:

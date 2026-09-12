@@ -135,6 +135,10 @@ R4. CORROBORATION DRIVES CONFIDENCE. Use the INDICATOR INDEX corroboration
       - ดึงเนื้อหาไม่ได้ (x6)                              -> ห้ามใช้เป็นหลักฐาน
 R5. COLLECTION GAPS. Sources listed under COLLECTION GAPS were never read.
     Never summarise or characterise their content. List them as gaps.
+R5b. OFF-TARGET SOURCES. Sources listed under OFF-TARGET were retrieved, but
+    their content never mentions the target selectors. Do not present them as
+    evidence about the subject unless their own content ties them to the target
+    — and say so explicitly when you do.
 R6. DEFANGED IOCs STAY DEFANGED. Reproduce indicators exactly as given
     (hxxp, [.], [at]). Never restore them to clickable form.
 R7. PII HANDLING. Report the TYPE and EXPOSURE of personal data and mask values
@@ -210,6 +214,9 @@ R4. CORROBORATION DRIVES CONFIDENCE. Use the INDICATOR INDEX counts and the
       - แหล่งเดียว (x3) -> ต่ำ | ดึงเนื้อหาไม่ได้ (x6) -> ห้ามใช้เป็นหลักฐาน
 R5. COLLECTION GAPS. Never characterise the content of sources listed under
     COLLECTION GAPS — they were never read. List them as gaps.
+R5b. OFF-TARGET SOURCES. Sources under OFF-TARGET were retrieved but never
+    mention the target selectors. Do not present them as evidence about the
+    organisation unless their content ties them to it — and say so when you do.
 R6. DEFANGED IOCs STAY DEFANGED (hxxp, [.], [at]). Never refang.
 R7. CREDENTIAL HANDLING. Report that credentials are exposed, their type, and
     the affected account domain — never reproduce full plaintext passwords,

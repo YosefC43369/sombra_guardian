@@ -83,6 +83,11 @@ OSINT_SCRAPE_WORKERS = _env_int("OSINT_SCRAPE_WORKERS", 5)
 OSINT_SEARCH_BUDGET_SECONDS = _env_float("OSINT_SEARCH_BUDGET_SECONDS", 35)
 OSINT_SCRAPE_BUDGET_SECONDS = _env_float("OSINT_SCRAPE_BUDGET_SECONDS", 45)
 OSINT_TOTAL_BUDGET_SECONDS = _env_float("OSINT_TOTAL_BUDGET_SECONDS", 100)
+# หยุดค้นเมื่อได้ผลไม่ซ้ำครบเท่านี้ — ไม่ต้องรอ engine ที่เหลือจนหมด budget
+OSINT_SEARCH_RESULT_CAP = _env_int("OSINT_SEARCH_RESULT_CAP", 24)
+# scrape เป็นสองจังหวะ: ยิงชุดแรกที่ตรงเป้าที่สุดก่อน ถ้าได้หลักฐานพอก็จบ
+OSINT_SCRAPE_FIRST_BATCH = _env_int("OSINT_SCRAPE_FIRST_BATCH", 6)
+OSINT_MIN_VERIFIED_SOURCES = _env_int("OSINT_MIN_VERIFIED_SOURCES", 3)
 # เว้นที่ให้คำสั่งงาน + ข้อความกรอบ ก่อนถึงเพดาน prompt ของ gemini
 _DOSSIER_RESERVED_CHARS = 1500
 COORDINATOR_VERIFICATION_ENABLED = _env_bool("COORDINATOR_VERIFICATION_ENABLED", "true")
@@ -291,21 +296,33 @@ async def _collect_darkweb_evidence(question: str):
     """เก็บหลักฐานตามวงจรข่าวกรอง แล้วคืน (dossier, stats)
 
     ของเดิมทำแค่: ยิงคำถามดิบ 1 ครั้ง -> ตัด 20 อันแรกตามลำดับที่ thread คืนมา
-    -> scrape -> ต่อสตริงดิบเข้า prompt ซึ่งข้ามขั้นตอนสำคัญไปหมด และยาวเกิน
-    เพดาน prompt จนถูกตีกลับทุกครั้งที่ค้นเจอของจริง
+    -> scrape ทั้งหมด -> ต่อสตริงดิบเข้า prompt
 
-    ตอนนี้: วางแผนการค้นหาจาก selector -> ยิงหลาย query พร้อมกัน -> จัดอันดับ
-    ตามความเกี่ยวข้องก่อน scrape -> สกัด IOC -> นับการยืนยันข้ามแหล่ง ->
-    ประกอบ dossier ที่มีเลขอ้างอิงและอยู่ในงบตัวอักษร
+    ตอนนี้:
+      1. วางแผนการค้นหาจาก selector แล้วยิงหลาย query พร้อมกัน
+      2. จัดอันดับตามความเกี่ยวข้องก่อน scrape
+      3. scrape เป็นสองจังหวะ — ชุดแรกคือตัวที่ตรงเป้าที่สุด ถ้าได้หลักฐาน
+         ยืนยันพอแล้วก็ไม่ต้องยิงชุดที่สอง (ปกติจึง scrape ครึ่งเดียว)
+      4. ยืนยันด้วยเนื้อหาว่าหน้านั้นพูดถึงเป้าหมายจริง ไม่ใช่แค่ชื่อเรื่องตรง
+      5. สกัด IOC + นับการยืนยันข้ามแหล่ง แล้วประกอบ dossier ในงบตัวอักษร
+
+    งบเวลาใช้ deadline ร่วมอันเดียว: ถ้าขั้นค้นหาเสร็จเร็ว เวลาที่เหลือตกไป
+    เป็นของขั้น scrape แทนที่จะถูกทิ้ง
     """
+    deadline = time.monotonic() + OSINT_TOTAL_BUDGET_SECONDS
+
+    def _left(floor=0.0):
+        return max(floor, deadline - time.monotonic())
+
     selectors = osint.extract_selectors(question)
     queries = osint.plan_queries(question, selectors, max_queries=OSINT_MAX_QUERIES)
     logger.info("OSINT PLAN | selectors=%s | queries=%s", selectors.summary(), queries)
 
+    search_budget = min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
     groups = await asyncio.gather(
         *[
             asyncio.to_thread(
-                search.get_search_results, q, None, OSINT_SEARCH_BUDGET_SECONDS, None
+                search.get_search_results, q, None, search_budget, OSINT_SEARCH_RESULT_CAP
             )
             for q in queries
         ],
@@ -323,29 +340,56 @@ async def _collect_darkweb_evidence(question: str):
     ranked = osint.merge_and_rank(clean_groups, selectors, limit=OSINT_MAX_SOURCES)
     if not ranked:
         logger.info("OSINT COLLECTION EMPTY | queries=%s raw=%d", queries, raw_total)
-        return None, {"sources": 0, "retrieved": 0, "gaps": 0, "iocs": 0,
-                      "corroborated_iocs": 0, "queries": queries}
+        return None, {"sources": 0, "retrieved": 0, "on_target": 0, "gaps": 0,
+                      "iocs": 0, "corroborated_iocs": 0, "queries": queries}
 
+    # ---- จังหวะที่ 1: ยิงเฉพาะหัวตารางที่ตรงเป้าที่สุด ----
+    batch = ranked[: max(1, OSINT_SCRAPE_FIRST_BATCH)]
     scraped = await asyncio.to_thread(
-        scrape.scrape_multiple, ranked, OSINT_SCRAPE_WORKERS,
-        OSINT_SCRAPE_BUDGET_SECONDS, OSINT_MAX_SOURCES,
+        scrape.scrape_multiple, batch, OSINT_SCRAPE_WORKERS,
+        min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(batch),
     )
+    covered = batch
+    sources = osint.verify_sources(
+        osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
+    )
+    verified = sum(1 for s in sources if s.on_target)
 
-    sources = osint.build_sources(ranked, scraped, scrape.CONTENT_UNAVAILABLE_MARKER)
+    # ---- จังหวะที่ 2: ต่อเมื่อหลักฐานยังไม่พอ และยังมีเวลาเหลือจริง ----
+    remaining_sources = ranked[len(batch):]
+    if verified < OSINT_MIN_VERIFIED_SOURCES and remaining_sources and _left() > 8.0:
+        logger.info("OSINT SECOND PASS | verified=%d/%d ยิงต่ออีก %d แหล่ง",
+                    verified, OSINT_MIN_VERIFIED_SOURCES, len(remaining_sources))
+        more = await asyncio.to_thread(
+            scrape.scrape_multiple, remaining_sources, OSINT_SCRAPE_WORKERS,
+            min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(remaining_sources),
+        )
+        scraped.update(more)
+        covered = ranked
+        sources = osint.verify_sources(
+            osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
+        )
+        verified = sum(1 for s in sources if s.on_target)
+    else:
+        logger.info("OSINT SINGLE PASS | verified=%d แหล่ง ไม่ต้องยิงชุดที่สอง", verified)
+
     ioc_index = osint.build_ioc_index(sources)
     osint.apply_corroboration(sources, ioc_index)
 
     stats = osint.collect_stats(sources, ioc_index)
     stats["queries"] = queries
+    stats["scraped_batches"] = 1 if covered is batch else 2
     dossier = osint.build_dossier(
         question, selectors, queries, sources, ioc_index,
         max_chars=max(2000, gemini.RESEARCH_MAX_INPUT_CHARS - _DOSSIER_RESERVED_CHARS),
         engines_total=raw_total,
     )
     logger.info(
-        "OSINT COLLECTED | sources=%d retrieved=%d gaps=%d iocs=%d corroborated=%d dossier_chars=%d",
-        stats["sources"], stats["retrieved"], stats["gaps"],
-        stats["iocs"], stats["corroborated_iocs"], len(dossier),
+        "OSINT COLLECTED | sources=%d retrieved=%d on_target=%d gaps=%d iocs=%d "
+        "corroborated=%d batches=%d dossier_chars=%d elapsed=%.1fs",
+        stats["sources"], stats["retrieved"], stats["on_target"], stats["gaps"],
+        stats["iocs"], stats["corroborated_iocs"], stats["scraped_batches"],
+        len(dossier), OSINT_TOTAL_BUDGET_SECONDS - _left(),
     )
     return dossier, stats
 

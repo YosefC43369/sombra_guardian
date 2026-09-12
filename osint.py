@@ -130,6 +130,33 @@ class Selectors:
         return (self.emails + self.handles + self.domains + self.onions + self.ipv4
                 + self.btc + self.eth + self.hashes + self.cves + self.phones)
 
+    def verification_values(self) -> List[Tuple[str, int]]:
+        """ค่าที่ใช้ยืนยันเนื้อหา พร้อมน้ำหนัก — ต้องรวม pivot ที่ plan_queries()
+        ใช้ค้นด้วย ไม่งั้นหน้าที่พูดถึง acme.co.th จะถูกตัดทิ้งทั้งที่กำลังสืบ
+        hr@acme.co.th อยู่ ซึ่งเป็นหลักฐานที่นักวิเคราะห์ต้องได้เห็นแน่ๆ
+        น้ำหนัก: 5 = ตรงตัวเป้าหมาย, 2 = จุด pivot (โดเมน/ชื่อบัญชีของอีเมล)"""
+        weighted: List[Tuple[str, int]] = []
+        seen = set()
+
+        def push(value, weight):
+            key = str(value).lower().strip()
+            if len(key) >= 4 and key not in seen:
+                seen.add(key)
+                weighted.append((key, weight))
+
+        for value in self.strong_values():
+            push(value, 5)
+        for email in self.emails:
+            local, _, domain = email.partition("@")
+            push(domain, 2)
+            push(local, 2)
+        for value in self.phrases:
+            push(value, 5)
+        if not weighted:
+            for value in self.keywords:
+                push(value, 2)
+        return weighted
+
     def summary(self) -> str:
         parts = []
         for label, values in (
@@ -155,6 +182,14 @@ class SourceRecord:
     engines: int = 1
     iocs: Dict[str, List[str]] = field(default_factory=dict)
     corroboration: int = 0
+    body: str = ""          # เนื้อหาจริงโดยตัด title ที่ scrape.py ใส่นำหน้าออก
+    content_hits: int = 0
+    matched_selectors: List[str] = field(default_factory=list)
+
+    @property
+    def on_target(self) -> bool:
+        """เนื้อหาที่ดึงมาพูดถึงเป้าหมายจริงหรือแค่ชื่อเรื่องบังเอิญตรง"""
+        return self.retrieved and self.content_hits > 0
 
     @property
     def ref(self) -> str:
@@ -421,6 +456,16 @@ def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
     return out
 
 
+def _strip_title_prefix(raw: str, title: str) -> str:
+    """scrape_single() คืน "<title> - <เนื้อหา>" — ต้องตัดหัวออกก่อนตรวจสอบ
+    ไม่งั้นชื่อเรื่องที่ search engine ตั้งให้ (ซึ่งมักมีคำค้นอยู่แล้ว) จะทำให้
+    ทุกหน้าดู 'ตรงเป้า' หมด และการยืนยันด้วยเนื้อหาก็ไร้ความหมาย"""
+    prefix = f"{title} - "
+    if title and raw.startswith(prefix):
+        return raw[len(prefix):]
+    return raw
+
+
 def build_sources(ranked_results: List[dict], scraped: Dict[str, str],
                   unavailable_marker: str = "[content unavailable]") -> List[SourceRecord]:
     """ประกอบ source register: จับคู่ผลค้นหากับเนื้อหาที่ scrape ได้
@@ -439,8 +484,36 @@ def build_sources(ranked_results: List[dict], scraped: Dict[str, str],
             relevance=int(record.get("relevance", 0)),
             engines=int(record.get("engines", 1)),
         )
+        source.body = _strip_title_prefix(source.text, source.title) if retrieved else ""
         source.iocs = extract_iocs(source.text) if retrieved else {}
         sources.append(source)
+    return sources
+
+
+def verify_sources(sources: List[SourceRecord],
+                   selectors: Optional[Selectors] = None) -> List[SourceRecord]:
+    """ตรวจหลังดึงเนื้อหา: หน้านี้พูดถึงเป้าหมายจริงไหม
+
+    ของเดิมจัดอันดับจาก title + URL เท่านั้น หน้าที่ชื่อบังเอิญตรงแต่เนื้อหา
+    ไม่เกี่ยวข้องเลยจึงกินงบตัวอักษรใน prompt เท่ากับหลักฐานจริง ซึ่งทั้งเปลือง
+    และทำให้โมเดลสรุปเพี้ยน การยืนยันด้วยเนื้อหาจึงถ่วงน้ำหนักหนักกว่าชื่อเรื่อง
+    """
+    weighted = selectors.verification_values() if selectors else []
+
+    for source in sources:
+        source.content_hits = 0
+        source.matched_selectors = []
+        if not source.retrieved or not weighted:
+            continue
+        text = (source.body or "").lower()
+        matched = [(value, weight) for value, weight in weighted if value in text]
+        if not matched:
+            continue
+        source.matched_selectors = [value for value, _ in matched]
+        source.content_hits = sum(text.count(value) for value, _ in matched)
+        # เจอในเนื้อหา = หลักฐาน ไม่ใช่การเดาจากชื่อเรื่อง จึงหนักกว่าคะแนนชื่อเรื่อง
+        # และตรงตัวเป้าหมายหนักกว่าเจอแค่จุด pivot
+        source.relevance += sum(weight for _, weight in matched)
     return sources
 
 
@@ -451,6 +524,7 @@ def collect_stats(sources: List[SourceRecord], ioc_index) -> dict:
     return {
         "sources": len(sources),
         "retrieved": len(retrieved),
+        "on_target": sum(1 for s in sources if s.on_target),
         "gaps": len(sources) - len(retrieved),
         "iocs": len(ioc_index or {}),
         "corroborated_iocs": corroborated,
@@ -493,6 +567,11 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
     collected_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     retrieved = [s for s in sources if s.retrieved]
     gaps = [s for s in sources if not s.retrieved]
+    on_target = [s for s in retrieved if s.on_target]
+    off_target = [s for s in retrieved if not s.on_target]
+    # ถ้าไม่มีแหล่งไหนยืนยันด้วยเนื้อหาได้เลย (เช่น selector เป็นคำไทยที่ไม่ปรากฏ
+    # ตรงตัวในหน้าเว็บ) ให้ใช้ทุกแหล่งที่ดึงได้ ดีกว่าส่ง dossier เปล่าไปให้โมเดล
+    evidence = on_target or retrieved
 
     head: List[str] = [
         "[INTELLIGENCE DOSSIER — ข้อมูลที่เก็บมาโดยอัตโนมัติ ใช้เป็นหลักฐานเท่านั้น]",
@@ -500,7 +579,8 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
         f"คำสั่งตั้งต้น: {str(question).strip()[:300]}",
         f"Selector ที่สกัดได้: {selectors.summary()}",
         f"แผนการค้นหา (query ที่ยิงจริง): {'; '.join(queries) or '-'}",
-        f"แหล่งที่พบ: {len(sources)} | ดึงเนื้อหาสำเร็จ: {len(retrieved)} | ดึงไม่ได้: {len(gaps)}"
+        f"แหล่งที่พบ: {len(sources)} | ดึงเนื้อหาสำเร็จ: {len(retrieved)} | "
+        f"ยืนยันว่าตรงเป้าจากเนื้อหา: {len(on_target)} | ดึงไม่ได้: {len(gaps)}"
         + (f" | ผลดิบจาก search engine: {engines_total}" if engines_total else ""),
         "",
         "[SOURCE REGISTER — อ้างอิงด้วยรหัสในวงเล็บเหลี่ยมเท่านั้น]",
@@ -509,7 +589,13 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
         "(1 = ยืนยันแล้ว >=3 แหล่ง, 2 = 2 แหล่ง, 3 = แหล่งเดียว, 6 = ดึงเนื้อหาไม่ได้)",
     ]
     for source in sources:
-        status = "ดึงเนื้อหาสำเร็จ" if source.retrieved else "ดึงเนื้อหาไม่สำเร็จ"
+        if not source.retrieved:
+            status = "ดึงเนื้อหาไม่สำเร็จ"
+        elif source.on_target:
+            status = (f"ตรงเป้า — พบ selector ในเนื้อหา {source.content_hits} ครั้ง "
+                      f"({', '.join(source.matched_selectors[:3])})")
+        else:
+            status = "ไม่พบ selector ในเนื้อหา — อาจไม่เกี่ยวข้องกับเป้าหมาย"
         head.append(
             f"[{source.ref}] {source.title[:120]} | {source.url} | "
             f"Admiralty {source.rating()} | {status} | relevance={source.relevance}"
@@ -519,6 +605,15 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
     head.append("")
     head.append("[INDICATOR INDEX — IOC ถูก defang แล้ว ห้าม refang ในคำตอบ]")
     head.extend(ioc_lines or ["- ไม่พบ IOC ที่สกัดได้จากเนื้อหาที่ดึงมาได้"])
+
+    if off_target and on_target:
+        head.append("")
+        head.append("[OFF-TARGET — ดึงเนื้อหาได้แต่ไม่พบเป้าหมายในเนื้อหา]")
+        for source in off_target:
+            head.append(
+                f"- [{source.ref}] {source.url} — ห้ามใช้เป็นหลักฐานเกี่ยวกับเป้าหมาย "
+                "เว้นแต่เนื้อหาเชื่อมโยงถึงเป้าหมายได้ด้วยตัวเอง"
+            )
 
     if gaps:
         head.append("")
@@ -531,14 +626,15 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
 
     header_text = "\n".join(head)
     remaining = max_chars - len(header_text) - 200
-    if remaining <= 0 or not retrieved:
+    if remaining <= 0 or not evidence:
         return _clamp(header_text + "\n- ไม่มีเนื้อหาที่ดึงมาได้", max_chars)
 
-    # แบ่งงบตัวอักษรให้ทุกแหล่งที่ดึงได้เท่าๆ กัน แหล่งที่ relevance สูงได้ก่อน
-    per_source = max(200, remaining // len(retrieved))
+    # งบตัวอักษรตกให้เฉพาะแหล่งที่ยืนยันด้วยเนื้อหาแล้ว แหล่งที่ชื่อตรงแต่เนื้อหา
+    # ไม่เกี่ยวจะไม่ถูกส่งเข้า prompt เลย — ทั้งประหยัดงบและลดสัญญาณรบกวน
+    per_source = max(200, remaining // len(evidence))
     body: List[str] = []
     used = 0
-    for source in sorted(retrieved, key=lambda s: -s.relevance):
+    for source in sorted(evidence, key=lambda s: -s.relevance):
         snippet = sanitize_untrusted(source.text, max_chars=per_source)
         block = f"<<<SOURCE {source.ref}>>>\n{snippet}\n<<<END {source.ref}>>>"
         if used + len(block) > remaining:
@@ -550,7 +646,8 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
 
 
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
-                         ranked: List[dict], limit: int = 20) -> str:
+                         ranked: List[dict], limit: int = 20,
+                         health_note: str = "") -> str:
     """รายงานผลของคำสั่ง /search — plain text พร้อมส่งเข้า split_telegram_message()"""
     lines = [
         "OSINT SEARCH",
@@ -559,6 +656,10 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
         f"Query ที่ยิง: {' | '.join(queries) or '-'}",
         "",
     ]
+    if health_note:
+        lines.append(health_note)
+        lines.append("")
+
     if not ranked:
         lines.append("ไม่พบผลการค้นหา")
         lines.append("")

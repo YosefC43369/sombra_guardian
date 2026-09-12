@@ -12,35 +12,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote_plus, urlparse, parse_qs, unquote
+from collections import OrderedDict
+
+import nethealth
 
 logger = logging.getLogger("modbot.search")
 
-# Same env vars and defaults scrape.py already uses (scrape.py lines 46-47);
-# this module referenced them without ever defining them.
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+# config ของ Tor/gateway และตัวอ่าน env อยู่ที่ nethealth.py ที่เดียว —
+# เดิมไฟล์นี้กับ scrape.py มีคนละก๊อป ทำให้ .env ค่าว่างให้ผลต่างกันสองที่
+_env_int = nethealth.env_int
+_env_float = nethealth.env_float
 
-TOR_GATEWAY_SUFFIXES = [
-    s.strip() for s in os.getenv("TOR_GATEWAY_SUFFIXES", ".ly,.ps").split(",") if s.strip()
-]
-
-
-def _env_int(name, default):
-    """อ่าน env แบบไม่ระเบิดถ้าค่าพัง — app.py โหลด .env ก่อน import โมดูลนี้
-    ค่าที่พิมพ์ผิดใน .env ต้องไม่ทำให้บอททั้งตัว import ไม่ผ่าน"""
-    try:
-        return int(str(os.getenv(name, default)).strip())
-    except (TypeError, ValueError):
-        logger.warning("SEARCH CONFIG | %s is not an int, using default %s", name, default)
-        return int(default)
-
-
-def _env_float(name, default):
-    try:
-        return float(str(os.getenv(name, default)).strip())
-    except (TypeError, ValueError):
-        logger.warning("SEARCH CONFIG | %s is not a float, using default %s", name, default)
-        return float(default)
+TOR_SOCKS_HOST = nethealth.TOR_SOCKS_HOST
+TOR_SOCKS_PORT = nethealth.TOR_SOCKS_PORT
+TOR_GATEWAY_SUFFIXES = nethealth.TOR_GATEWAY_SUFFIXES
+TOR_PROBE_TTL_SECONDS = nethealth.TOR_PROBE_TTL_SECONDS
 
 
 # ---------------- Limits (app.py runs inside a Telegram handler: ทุกอย่างต้องมีเพดานเวลา) ----------------
@@ -57,11 +43,48 @@ SEARCH_MAX_TITLE_CHARS = _env_int("SEARCH_MAX_TITLE_CHARS", 200)
 SEARCH_MAX_QUERY_CHARS = _env_int("SEARCH_MAX_QUERY_CHARS", 500)
 # "auto" = ใช้ Tor ถ้า SOCKS port เปิดอยู่, "true"/"false" = บังคับ
 SEARCH_USE_TOR = os.getenv("SEARCH_USE_TOR", "auto").strip().lower()
-TOR_PROBE_TTL_SECONDS = _env_float("TOR_PROBE_TTL_SECONDS", 60)
+# หยุดค้นทันทีที่ได้ผลไม่ซ้ำครบเป้า แทนที่จะรอ engine ที่เหลือจนหมด budget
+SEARCH_EARLY_STOP = nethealth.env_bool("SEARCH_EARLY_STOP", "true")
+# ผลค้นหาเดิมใช้ซ้ำได้ภายใน TTL — ผู้ใช้มักสั่ง /search แล้วตามด้วย /identity
+# ด้วยเป้าหมายเดียวกัน ของเดิมยิงซ้ำทั้งชุดและได้หลักฐานคนละชุดกัน
+SEARCH_CACHE_TTL_SECONDS = _env_float("SEARCH_CACHE_TTL_SECONDS", 600)
+SEARCH_CACHE_MAX_ENTRIES = _env_int("SEARCH_CACHE_MAX_ENTRIES", 64)
+
+_cache_lock = threading.Lock()
+_cache = OrderedDict()
+
+
+def _cache_get(key):
+    if SEARCH_CACHE_TTL_SECONDS <= 0:
+        return None
+    with _cache_lock:
+        entry = _cache.get(key)
+        if not entry:
+            return None
+        expires_at, results = entry
+        if expires_at < time.monotonic():
+            _cache.pop(key, None)
+            return None
+        _cache.move_to_end(key)
+        return list(results)
+
+
+def _cache_put(key, results):
+    if SEARCH_CACHE_TTL_SECONDS <= 0:
+        return
+    with _cache_lock:
+        _cache[key] = (time.monotonic() + SEARCH_CACHE_TTL_SECONDS, list(results))
+        _cache.move_to_end(key)
+        while len(_cache) > SEARCH_CACHE_MAX_ENTRIES:
+            _cache.popitem(last=False)
+
+
+def clear_search_cache():
+    with _cache_lock:
+        _cache.clear()
+
 
 _thread_local = threading.local()
-_tor_probe_lock = threading.Lock()
-_tor_probe_state = {"checked_at": 0.0, "reachable": False}
 
 
 def _onion_to_gateway(url, suffix):
@@ -95,21 +118,8 @@ def _gateway_to_onion(url):
 def is_tor_reachable(timeout=2.0, force=False) -> bool:
     """เช็คไวๆ ว่ามีอะไรฟังอยู่ที่ SOCKS port ไหม จะได้ fail เร็ว
     แทนที่จะ retry ครบทุก engine ทั้ง 16 ตัวโดยเปล่าประโยชน์เมื่อ Tor ไม่รัน
-    ผล probe ถูก cache ไว้ TOR_PROBE_TTL_SECONDS วินาที เพราะ get_search_results()
-    เรียกจากหลาย worker thread พร้อมกัน ไม่ควรเปิด socket ใหม่ทุกครั้ง"""
-    now = time.monotonic()
-    with _tor_probe_lock:
-        if not force and (now - _tor_probe_state["checked_at"]) < TOR_PROBE_TTL_SECONDS:
-            return _tor_probe_state["reachable"]
-    try:
-        with socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout):
-            reachable = True
-    except OSError:
-        reachable = False
-    with _tor_probe_lock:
-        _tor_probe_state["checked_at"] = time.monotonic()
-        _tor_probe_state["reachable"] = reachable
-    return reachable
+    ใช้ probe ร่วมกับ scrape.py ผ่าน nethealth เพื่อไม่ให้เปิด socket ซ้ำซ้อน"""
+    return nethealth.tor_reachable(timeout=timeout, force=force)
 
 
 def _tor_enabled() -> bool:
@@ -323,17 +333,32 @@ def fetch_search_results(endpoint, query, deadline=None, max_results=None):
     """ยิง 1 engine แล้วคืน [{"title", "link"}]
     ลำดับการลอง: Tor SOCKS ตรงๆ (ถ้า Tor รันอยู่) -> tor2web gateway ทีละ suffix
     ของเดิมข้าม Tor ไปเลยทั้งที่นิยาม get_tor_session()/is_tor_reachable() ไว้
-    แปลว่าเครื่องที่รัน Tor อยู่ก็ยังถูกบังคับให้ผ่าน gateway ที่ล่มเป็นส่วนใหญ่"""
+    แปลว่าเครื่องที่รัน Tor อยู่ก็ยังถูกบังคับให้ผ่าน gateway ที่ล่มเป็นส่วนใหญ่
+
+    ทุกความพยายามถูกบันทึกเข้า circuit breaker: engine หรือ gateway ที่ล้มซ้ำๆ
+    จะถูกข้ามชั่วคราว งบเวลาจะได้ตกไปอยู่กับเส้นทางที่ยังมีชีวิตจริง
+    """
     encoded_query = quote_plus(query)
     onion_url = endpoint.format(query=encoded_query)
     engine_name = _ENGINE_NAME_BY_URL.get(endpoint, urlparse(onion_url).hostname or endpoint)
     limit = SEARCH_MAX_RESULTS_PER_ENGINE if max_results is None else max_results
 
+    engine_key = f"engine:{engine_name}"
+    if nethealth.blocked(engine_key):
+        logger.debug("SEARCH ENGINE SKIPPED (cooldown) | engine=%s", engine_name)
+        return []
+
     attempts = []
     if _tor_enabled():
-        attempts.append((onion_url, True))
+        attempts.append((onion_url, True, "tor"))
     for suffix in TOR_GATEWAY_SUFFIXES:
-        attempts.append((_onion_to_gateway(onion_url, suffix), False))
+        attempts.append((_onion_to_gateway(onion_url, suffix), False, suffix))
+
+    # ข้ามเส้นทางที่กำลังถูกพัก — ถ้าโดนพักหมดก็ไม่ต้องเสียเวลายิงเลย
+    attempts = [a for a in attempts if not nethealth.blocked(f"route:{a[2]}")]
+    if not attempts:
+        logger.debug("SEARCH NO LIVE ROUTE | engine=%s", engine_name)
+        return []
 
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
@@ -341,7 +366,9 @@ def fetch_search_results(endpoint, query, deadline=None, max_results=None):
         "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
     }
 
-    for attempt_url, use_tor in attempts:
+    reached = False          # มี attempt ไหนได้ HTTP 200 กลับมาบ้างไหม
+    for attempt_url, use_tor, route in attempts:
+        route_key = f"route:{route}"
         timeout = _timeout_for(deadline)
         if timeout is None:
             logger.debug("SEARCH BUDGET EXHAUSTED | engine=%s", engine_name)
@@ -352,37 +379,54 @@ def fetch_search_results(endpoint, query, deadline=None, max_results=None):
             )
             if response.status_code != 200:
                 logger.debug(
-                    "SEARCH NON-200 | engine=%s tor=%s status=%s",
-                    engine_name, use_tor, response.status_code,
+                    "SEARCH NON-200 | engine=%s route=%s status=%s",
+                    engine_name, route, response.status_code,
                 )
+                # 404 = gateway ตอบได้แต่ปลายทางไม่มี ไม่ใช่ความผิดของเส้นทาง
+                # ถ้านับรวมด้วย onion site ที่ตายไปแล้วเพียงตัวเดียวจะลาก
+                # gateway ทั้งตัวเข้า cooldown ไปด้วย ซึ่งผิดและทำให้ค้นไม่ได้
+                if response.status_code >= 500 or response.status_code == 429:
+                    nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
                 continue
+
+            # ได้ 200 = เส้นทางใช้ได้ ต่อให้ query นี้ไม่มีผลลัพธ์ก็ตาม
+            reached = True
+            nethealth.record(route_key, True, nethealth.ROUTE_FAILURE_THRESHOLD)
             links = _extract_links(response.text, attempt_url, limit)
             if links:
                 logger.debug(
-                    "SEARCH OK | engine=%s tor=%s results=%d", engine_name, use_tor, len(links)
+                    "SEARCH OK | engine=%s route=%s results=%d", engine_name, route, len(links)
                 )
+                nethealth.record(engine_key, True, nethealth.ENGINE_FAILURE_THRESHOLD)
                 return links
         except requests.exceptions.InvalidSchema as exc:
             # socks5h ต้องมี PySocks (มีใน requirements.txt) — ถ้าหาย ให้ตกไป gateway
             logger.warning("SEARCH TOR UNAVAILABLE | engine=%s: %s", engine_name, exc)
+            nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
             continue
         except requests.RequestException as exc:
-            logger.debug("SEARCH ATTEMPT FAILED | engine=%s tor=%s: %s", engine_name, use_tor, exc)
+            logger.debug("SEARCH ATTEMPT FAILED | engine=%s route=%s: %s", engine_name, route, exc)
+            nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
             continue
         except Exception as exc:
             logger.debug("SEARCH PARSE FAILED | engine=%s: %s", engine_name, exc)
             continue
 
+    # engine ถือว่าล้มเฉพาะตอนที่ "ติดต่อไม่ได้เลย" ไม่ใช่ตอนที่แค่ไม่มีผลลัพธ์
+    nethealth.record(engine_key, reached, nethealth.ENGINE_FAILURE_THRESHOLD)
     return []
 
 
-def get_search_results(refined_query, max_workers=None, budget_seconds=None, max_results=None):
+def get_search_results(refined_query, max_workers=None, budget_seconds=None,
+                       max_results=None, use_cache=True):
     """ค้นหลาย engine พร้อมกันแล้ว dedupe — เรียกจาก coordinator._collect_darkweb_evidence()
     ซึ่งถูกเรียกต่อจาก /identity และ /corporate ใน app.py
 
-    ของเดิมไม่มีเพดานเวลารวม: ทุก engine ที่ค้าง = handler ของ app.py ค้างตาม
-    ตอนนี้มี budget รวม (SEARCH_TOTAL_BUDGET_SECONDS) และไม่ยอม raise ออกไปหา
-    caller เด็ดขาด — ค้นไม่ได้ก็คืน [] ให้ coordinator fallback ไปตอบแบบไม่มี evidence"""
+    ของเดิมไม่มีเพดานเวลารวม: ทุก engine ที่ค้างคือ handler ของ app.py ค้างตาม
+    ตอนนี้มี budget รวม (SEARCH_TOTAL_BUDGET_SECONDS), หยุดทันทีที่ได้ผลครบเป้า,
+    ใช้ผลเดิมซ้ำภายใน TTL, และไม่ยอม raise ออกไปหา caller เด็ดขาด — ค้นไม่ได้
+    ก็คืน [] ให้ coordinator รายงานว่าเป็นช่องว่างข่าวกรอง
+    """
     query = " ".join(str(refined_query or "").split())[:SEARCH_MAX_QUERY_CHARS]
     if not query:
         logger.info("SEARCH SKIPPED | empty query")
@@ -392,12 +436,25 @@ def get_search_results(refined_query, max_workers=None, budget_seconds=None, max
     workers = max(1, min(int(workers), len(DEFAULT_SEARCH_ENGINES)))
     budget = float(budget_seconds) if budget_seconds else SEARCH_TOTAL_BUDGET_SECONDS
     cap = int(max_results) if max_results else SEARCH_MAX_RESULTS
+
+    cache_key = f"{query}|{cap}"
+    if use_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("SEARCH CACHE HIT | query=%r results=%d", query, len(cached))
+            return cached
+
     started = time.monotonic()
     deadline = started + budget
     tor = _tor_enabled()
 
-    results = []
+    # dedupe ระหว่างทาง ไม่ใช่ตอนจบ จะได้รู้ว่าครบเป้าเมื่อไหร่แล้วหยุดได้ทันที
+    seen_links = set()
+    unique_results = []
     engines_ok = 0
+    raw_count = 0
+    early_stop = False
+
     executor = ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {
@@ -411,9 +468,23 @@ def get_search_results(refined_query, max_workers=None, budget_seconds=None, max
                 except Exception as exc:
                     logger.debug("SEARCH WORKER CRASHED | %s", exc)
                     continue
-                if result_urls:
-                    engines_ok += 1
-                    results.extend(result_urls)
+                if not result_urls:
+                    continue
+                engines_ok += 1
+                raw_count += len(result_urls)
+                for res in result_urls:
+                    link = (res.get("link") or "").strip()
+                    if not link:
+                        continue
+                    # Remove trailing slashes for better deduplication
+                    clean_link = link.rstrip("/").lower()
+                    if clean_link in seen_links:
+                        continue
+                    seen_links.add(clean_link)
+                    unique_results.append(res)
+                if SEARCH_EARLY_STOP and len(unique_results) >= cap:
+                    early_stop = True
+                    break
         except FuturesTimeout:
             logger.warning(
                 "SEARCH BUDGET TIMEOUT | query=%r budget=%.1fs engines_done=%d",
@@ -424,25 +495,16 @@ def get_search_results(refined_query, max_workers=None, budget_seconds=None, max
         # app.py ต้องรอ thread ที่ยังค้างอยู่จนครบ (ทุก request มี timeout ของตัวเองอยู่แล้ว)
         executor.shutdown(wait=False, cancel_futures=True)
 
-    # Deduplicate results
-    seen_links = set()
-    unique_results = []
-    for res in results:
-        link = (res.get("link") or "").strip()
-        if not link:
-            continue
-        # Remove trailing slashes for better deduplication
-        clean_link = link.rstrip('/').lower()
-        if clean_link not in seen_links:
-            seen_links.add(clean_link)
-            unique_results.append(res)
-            if len(unique_results) >= cap:
-                break
+    unique_results = unique_results[:cap]
+    if use_cache and unique_results:
+        _cache_put(cache_key, unique_results)
 
     logger.info(
-        "SEARCH DONE | query=%r tor=%s engines_ok=%d/%d raw=%d unique=%d elapsed=%.1fs",
-        query, tor, engines_ok, len(DEFAULT_SEARCH_ENGINES),
-        len(results), len(unique_results), time.monotonic() - started,
+        "SEARCH DONE | query=%r tor=%s engines_ok=%d/%d raw=%d unique=%d "
+        "elapsed=%.1fs early_stop=%s cooldown_routes=%s",
+        query, tor, engines_ok, len(DEFAULT_SEARCH_ENGINES), raw_count,
+        len(unique_results), time.monotonic() - started, early_stop,
+        nethealth.open_routes() or "-",
     )
     return unique_results
 
@@ -450,12 +512,12 @@ def get_search_results(refined_query, max_workers=None, budget_seconds=None, max
 # ---------------- async / Telegram helpers (สำหรับ app.py) ----------------
 
 async def get_search_results_async(refined_query, max_workers=None, budget_seconds=None,
-                                   max_results=None):
+                                   max_results=None, use_cache=True):
     """เวอร์ชัน async ของ get_search_results() สำหรับเรียกตรงจาก handler ของ app.py
     (ทุกอย่างข้างในเป็น requests แบบ blocking จึงต้องออกไปอยู่บน thread
     ไม่งั้น event loop ของ python-telegram-bot จะถูกบล็อกทั้งบอท)"""
     return await asyncio.to_thread(
-        get_search_results, refined_query, max_workers, budget_seconds, max_results
+        get_search_results, refined_query, max_workers, budget_seconds, max_results, use_cache
     )
 
 

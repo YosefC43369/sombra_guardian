@@ -24,6 +24,7 @@ from telegram.error import TelegramError
 import detection
 import search
 import osint
+import nethealth
 from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
@@ -849,10 +850,19 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status_msg is not None:
         await safe_delete(status_msg, chat_id, context)
 
+    # บอกให้ชัดว่าผลบางตา "เพราะเส้นทางตาย" หรือ "เพราะไม่มีข้อมูลจริงๆ"
+    # ซึ่งเป็นคนละข้อสรุปกันโดยสิ้นเชิงในเชิงข่าวกรอง
+    cooling = nethealth.open_routes()
+    health_bits = [f"Tor: {'ใช้งานได้' if nethealth.tor_reachable() else 'ไม่พร้อมใช้งาน'}"]
+    if cooling:
+        health_bits.append(f"เส้นทางที่พักอยู่: {', '.join(cooling)}")
+    health_note = "สถานะการเก็บข้อมูล — " + " | ".join(health_bits)
+
     await _reply_chunked(
         update,
         osint.format_search_report(
-            query, selectors, queries, ranked, limit=SEARCH_RESULTS_DISPLAY_CAP
+            query, selectors, queries, ranked,
+            limit=SEARCH_RESULTS_DISPLAY_CAP, health_note=health_note,
         ),
     )
 
