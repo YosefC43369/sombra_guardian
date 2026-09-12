@@ -56,7 +56,7 @@ GEMINI_MAX_INPUT_CHARS = 4000    # reject messages longer than this
 # เพดานแยกสำหรับ prompt ที่แนบ intelligence dossier มาด้วย (/identity, /corporate)
 # เพดาน 4000 ข้างบนมีไว้กันข้อความแชทยาวผิดปกติ ไม่ได้ออกแบบมารองรับหลักฐานที่แนบมา
 # ผลคือเส้นทาง evidence ถูก _validate_input() ตีกลับทุกครั้งที่ค้นเจอของจริง
-RESEARCH_MAX_INPUT_CHARS = 24000
+RESEARCH_MAX_INPUT_CHARS = int(os.getenv("RESEARCH_MAX_INPUT_CHARS") or 24000)
 GPT_IMAGE_MODEL_DEFAULT = config.DEFAULT_IMAGE_MODEL  # alias; see config.py
 GPT_IMAGE_TIMEOUT_SECONDS = 60   # image generation is slower than a text call
 TELEGRAM_MESSAGE_LIMIT = 4096    # Telegram's hard per-message character cap
@@ -139,6 +139,12 @@ R5b. OFF-TARGET SOURCES. Sources listed under OFF-TARGET were retrieved, but
     their content never mentions the target selectors. Do not present them as
     evidence about the subject unless their own content ties them to the target
     — and say so explicitly when you do.
+R5c. IDENTITY ATTRIBUTION. The IDENTITY GRAPH separates ยืนยันแล้ว (the
+    identifier appears in two or more independent sources) from เบาะแส (one
+    source only). Only ยืนยันแล้ว identifiers may be stated as belonging to
+    the subject. Report a เบาะแส as an unverified lead, never as fact, and say
+    what would confirm it. Two people can share a name — never merge separate
+    identities on a name match alone.
 R6. DEFANGED IOCs STAY DEFANGED. Reproduce indicators exactly as given
     (hxxp, [.], [at]). Never restore them to clickable form.
 R7. PII HANDLING. Report the TYPE and EXPOSURE of personal data and mask values
@@ -166,6 +172,11 @@ R9. EMPTY IS A VALID ANSWER. If the dossier retrieved no usable content, say so
 ## ข้อมูลส่วนบุคคลที่พบการเปิดเผย
 - แต่ละรายการ: ประเภทข้อมูล | ค่าที่ปกปิดบางส่วน | บริบท | [S#] | ความมั่นใจ
 - ถ้าไม่พบ ให้ระบุว่า "ไม่พบหลักฐานในข้อมูลที่เก็บมาได้"
+
+## ตัวตนที่เชื่อมโยงได้
+- ตัวระบุที่ยืนยันแล้ว (>=2 แหล่งอิสระ) ว่าเป็นของเป้าหมาย พร้อม [S#] ทุกตัว
+- แยกหัวข้อย่อย "เบาะแสที่ยังยืนยันไม่ได้" สำหรับตัวระบุที่พบแหล่งเดียว
+  พร้อมระบุว่าต้องได้หลักฐานแบบไหนถึงจะยืนยันได้
 
 ## แหล่งรั่วไหล / ตลาดซื้อขายที่ระบุได้
 - เฉพาะที่ปรากฏจริงในหลักฐาน พร้อม [S#] และ Admiralty rating
@@ -217,6 +228,12 @@ R5. COLLECTION GAPS. Never characterise the content of sources listed under
 R5b. OFF-TARGET SOURCES. Sources under OFF-TARGET were retrieved but never
     mention the target selectors. Do not present them as evidence about the
     organisation unless their content ties them to it — and say so when you do.
+R5c. IDENTITY ATTRIBUTION. The IDENTITY GRAPH separates ยืนยันแล้ว (the
+    identifier appears in two or more independent sources) from เบาะแส (one
+    source only). Only ยืนยันแล้ว identifiers may be stated as belonging to
+    the subject. Report a เบาะแส as an unverified lead, never as fact, and say
+    what would confirm it. Two people can share a name — never merge separate
+    identities on a name match alone.
 R6. DEFANGED IOCs STAY DEFANGED (hxxp, [.], [at]). Never refang.
 R7. CREDENTIAL HANDLING. Report that credentials are exposed, their type, and
     the affected account domain — never reproduce full plaintext passwords,

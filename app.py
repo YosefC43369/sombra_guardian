@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import sqlite3
 import logging
@@ -25,6 +26,7 @@ import detection
 import search
 import osint
 import nethealth
+import username_osint
 from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
@@ -826,13 +828,18 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
+    # ถ้าไฟล์บนเครื่องอัปเดตไม่ครบ (app.py ใหม่ + search.py เก่า) ให้ถอยไปใช้
+    # ฟังก์ชันเดิมแทนที่จะโยน AttributeError ใส่ผู้ใช้กลางคำสั่ง
+    search_one = getattr(search, "get_combined_results_async", None)
+    if search_one is None:
+        logger.error(
+            "OSINT SEARCH DEGRADED | search.py ไม่มี get_combined_results_async "
+            "(ไฟล์บนเครื่องอัปเดตไม่ครบ) — ค้นเฉพาะ dark web ไปก่อน"
+        )
+        search_one = search.get_search_results_async
+
     groups = await asyncio.gather(
-        *[
-            search.get_search_results_async(
-                q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
-            )
-            for q in queries
-        ],
+        *[search_one(q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS) for q in queries],
         return_exceptions=True,
     )
 
@@ -842,6 +849,20 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"OSINT SEARCH FAILED | query={q!r}: {group}")
             continue
         clean_groups.append(group)
+
+    # คำค้นที่เป็นชื่อบัญชี (เช่น /search thana_p) ให้ค้นข้ามเว็บจากฐานข้อมูล
+    # เว็บไซต์ใน resource/data.json ด้วย — ชื่อคนไทยจะไม่เข้าเงื่อนไขนี้
+    username_hits = []
+    handle = query.strip()
+    if username_osint.is_plausible_username(handle):
+        try:
+            username_hits = await username_osint.check_username_as_results_async(
+                handle, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
+            )
+        except Exception as e:
+            logger.warning(f"OSINT USERNAME FAILED | handle={handle!r}: {e}")
+        if username_hits:
+            clean_groups.append(username_hits)
 
     ranked = osint.merge_and_rank(
         clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP
@@ -854,6 +875,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ซึ่งเป็นคนละข้อสรุปกันโดยสิ้นเชิงในเชิงข่าวกรอง
     cooling = nethealth.open_routes()
     health_bits = [f"Tor: {'ใช้งานได้' if nethealth.tor_reachable() else 'ไม่พร้อมใช้งาน'}"]
+    if username_hits:
+        health_bits.append(f"พบบัญชีชื่อเดียวกัน {len(username_hits)} เว็บ")
     if cooling:
         health_bits.append(f"เส้นทางที่พักอยู่: {', '.join(cooling)}")
     health_note = "สถานะการเก็บข้อมูล — " + " | ".join(health_bits)
@@ -2982,11 +3005,82 @@ async def post_shutdown(app):
     
 # ---------------- Main ----------------
 
+# ฟังก์ชันที่ app.py เรียกข้ามโมดูล — ตรวจตั้งแต่บูตว่ามีครบไหม
+# เคยเจอกรณีไฟล์บนเซิร์ฟเวอร์อัปเดตไม่ครบ (app.py ใหม่ แต่ search.py เก่า)
+# แล้วไปพังเป็น AttributeError กลางคำสั่งของผู้ใช้ ซึ่งหาสาเหตุยากกว่ามาก
+_REQUIRED_MODULE_API = {
+    "search": ("get_search_results", "get_search_results_async",
+               "get_combined_results", "get_combined_results_async",
+               "get_clearnet_results"),
+    "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
+    "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
+              "build_sources", "verify_sources", "build_identity",
+              "pivot_queries", "build_dossier", "format_search_report"),
+    "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
+    "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
+    "username_osint": ("load_sites", "check_username", "check_username_as_results",
+                       "check_username_as_results_async", "is_plausible_username"),
+    "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
+}
+
+
+def check_module_integrity() -> bool:
+    """เช็กว่าโมดูลที่ app.py พึ่งพา มีฟังก์ชันที่เรียกจริงครบไหม
+    คืน True เมื่อครบ; ถ้าไม่ครบจะ log ชื่อไฟล์ที่ต้องอัปเดตให้ชัด"""
+    missing = {}
+    for module_name, names in _REQUIRED_MODULE_API.items():
+        module = sys.modules.get(module_name)
+        if module is None:
+            missing[module_name] = ["<โมดูลไม่ถูกโหลด>"]
+            continue
+        absent = [n for n in names if not hasattr(module, n)]
+        if absent:
+            missing[module_name] = absent
+
+    if not missing:
+        logger.info("MODULE CHECK: OK")
+        try:
+            logger.info("USERNAME DB: %s", username_osint.stats())
+        except Exception as e:
+            logger.warning("USERNAME DB: อ่านฐานข้อมูลเว็บไม่ได้ (%s)", e)
+        return True
+
+    for module_name, names in missing.items():
+        logger.error(
+            "MODULE CHECK FAILED | %s.py ไม่มี: %s "
+            "-- ไฟล์บนเซิร์ฟเวอร์น่าจะอัปเดตไม่ครบ ให้ดึงโค้ดใหม่ทั้งชุด",
+            module_name, ", ".join(names),
+        )
+    logger.error(
+        "MODULE CHECK | บอทจะยังทำงานต่อ แต่คำสั่งที่ใช้ของที่ขาดจะทำงานไม่ครบ"
+    )
+    return False
+
+
+def log_tor_status() -> bool:
+    """บอกตั้งแต่บูตว่า dark web ค้นได้ไหม — ผู้ใช้เคยเห็น 'Tor: ไม่พร้อมใช้งาน'
+    กลางผลลัพธ์แล้วไม่รู้ว่าต้องทำอะไร บรรทัดนี้บอกสถานะและวิธีแก้ให้ชัดตั้งแต่แรก"""
+    host = nethealth.TOR_SOCKS_HOST
+    port = nethealth.TOR_SOCKS_PORT
+    if nethealth.tor_reachable(force=True):
+        logger.info("TOR: เชื่อมต่อได้ที่ %s:%s — ค้น dark web (.onion) ได้", host, port)
+        return True
+    logger.warning(
+        "TOR: เชื่อมต่อ %s:%s ไม่ได้ — /identity, /corporate, /search จะค้นได้เฉพาะ "
+        "เว็บเปิดไปก่อน วิธีเปิด dark web: รัน Tor ในคอนเทนเนอร์ (Dockerfile ติดตั้งไว้แล้ว "
+        "ผ่าน docker-entrypoint.sh) หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
+        host, port,
+    )
+    return False
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
+    check_module_integrity()
+    log_tor_status()
     # Names and model ids only -- never a key or any fragment of one.
     config.log_startup_summary()
     db_info()

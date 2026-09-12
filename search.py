@@ -1,10 +1,8 @@
 import os
-import socket
 import time
 import asyncio
 import requests
 import random, re
-import json
 import logging
 import threading
 from bs4 import BeautifulSoup
@@ -534,3 +532,393 @@ def format_search_results(results, limit=None, header="🔎 ผลการค�
         title = _clean_title(item.get("title")) or "Untitled"
         lines.append(f"{index}. {title}\n{item.get('link', '')}")
     return "\n".join(lines)
+
+
+# ---------------- Clearnet search ----------------
+# ของเดิมค้นเฉพาะ onion search engine ซึ่งไม่มีทางเจอชื่อคน เบอร์โทร หรือโปรไฟล์
+# โซเชียลของใครเลย งาน OSINT ตัวตนบุคคลส่วนใหญ่อยู่บนเว็บเปิด จึงต้องมีชั้นนี้
+# engine ทุกตัวที่เลือกมาเรียกได้โดยไม่ต้องใช้ API key
+
+# แต่ละ engine พก:
+#   result_selectors : CSS ที่ชี้ "โซนผลลัพธ์" เท่านั้น — ดึงลิงก์เฉพาะในโซนนี้
+#                      ไม่งั้นจะได้ลิงก์ footer/nav/โซเชียลของตัว engine เองปนมา
+#                      (นั่นคือบั๊กที่ทำให้ /search คืน app.startpage.com, git.marginalia.nu)
+#   own_domains      : โดเมนของ engine เอง (จับรวม subdomain) ที่ต้องตัดทิ้งเสมอ
+CLEARNET_ENGINES = [
+    {"name": "DuckDuckGo", "url": "https://html.duckduckgo.com/html/?q={query}",
+     "result_selectors": ["a.result__a", "a.result__url"],
+     "own_domains": ["duckduckgo.com", "duck.com"]},
+    {"name": "Mojeek", "url": "https://www.mojeek.com/search?q={query}",
+     "result_selectors": ["ul.results-standard li h2 a", "a.ob", "ul.results-standard li a"],
+     "own_domains": ["mojeek.com"]},
+    {"name": "Brave", "url": "https://search.brave.com/search?q={query}",
+     "result_selectors": ["a.result-header", "#results a[href^='http']", "a.h"],
+     "own_domains": ["brave.com"]},
+    {"name": "Startpage", "url": "https://www.startpage.com/sp/search?query={query}",
+     "result_selectors": ["a.result-link", "a.w-gl__result-title",
+                          "a.result-title", "div.w-gl__result a[href^='http']"],
+     "own_domains": ["startpage.com"]},
+    {"name": "Bing", "url": "https://www.bing.com/search?q={query}&setlang=th",
+     "result_selectors": ["li.b_algo h2 a", "ol#b_results li.b_algo a[href^='http']"],
+     "own_domains": ["bing.com", "microsoft.com", "microsofttranslator.com", "msn.com"]},
+    {"name": "Marginalia", "url": "https://search.marginalia.nu/search?query={query}",
+     "result_selectors": ["section.card.search-result h2 a", "div.result h2 a",
+                          "a.result-title", "main a[href^='http']"],
+     "own_domains": ["marginalia.nu", "marginalia-search.com"]},
+    {"name": "Ecosia", "url": "https://www.ecosia.org/search?q={query}",
+     "result_selectors": ["a.result__title-link", "a.result-title",
+                          "div.mainline a.result__link"],
+     "own_domains": ["ecosia.org"]},
+]
+
+CLEARNET_ENABLED = nethealth.env_bool("SEARCH_CLEARNET_ENABLED", "true")
+CLEARNET_MAX_WORKERS = _env_int("SEARCH_CLEARNET_MAX_WORKERS", 6)
+CLEARNET_MAX_RESULTS_PER_ENGINE = _env_int("SEARCH_CLEARNET_MAX_RESULTS_PER_ENGINE", 12)
+# engine ที่ปิดได้เป็นรายตัวผ่าน .env เช่น SEARCH_CLEARNET_DISABLED=Bing,Brave
+CLEARNET_DISABLED = {
+    name.strip().lower()
+    for name in nethealth.env_list("SEARCH_CLEARNET_DISABLED", "") or []
+}
+
+# โดเมนที่เป็นโครงสร้างของ engine / CDN / โซเชียลของตัว engine เอง / นโยบาย
+# เทียบแบบ suffix จึงจับ subdomain ทั้งหมดด้วย (เดิมเทียบตรงตัว app.startpage.com
+# กับ git.marginalia.nu จึงหลุดผ่านมาเป็น "ผลลัพธ์")
+_CLEARNET_SKIP_DOMAINS = frozenset((
+    "duckduckgo.com", "duck.com", "spreadprivacy.com",
+    "mojeek.com", "brave.com", "startpage.com", "startpage.eu",
+    "bing.com", "microsoft.com", "microsofttranslator.com", "msn.com",
+    "marginalia.nu", "marginalia-search.com", "ecosia.org",
+    "google.com", "gstatic.com", "googleapis.com", "gravatar.com",
+    "w3.org", "schema.org", "creativecommons.org", "wikimedia.org",
+    # โซเชียลของตัว engine (footer) — จับที่ path แทน ดูใน _is_engine_social()
+))
+# บัญชีโซเชียลของตัว engine เองที่โผล่ใน footer — ตัด path พวกนี้ทิ้ง
+_ENGINE_SOCIAL_HANDLES = frozenset((
+    "startpage", "startpagesearch", "duckduckgo", "mojeek", "brave",
+    "bravesoftware", "bing", "ecosia", "marginaliasearch", "marginalia_nu",
+))
+# พารามิเตอร์ที่ engine ใช้ห่อ URL ปลายทางไว้ (DuckDuckGo=uddg, Bing=u, ทั่วไป=url)
+_CLEARNET_REDIRECT_KEYS = ("uddg", "url", "u", "q", "r", "redirect", "target", "to")
+_RE_THAI = re.compile(r"[฀-๿]")
+
+_CLEARNET_ENGINE_NAME_BY_URL = {e["url"]: e["name"] for e in CLEARNET_ENGINES}
+_CLEARNET_ENGINE_BY_URL = {e["url"]: e for e in CLEARNET_ENGINES}
+DEFAULT_CLEARNET_ENGINES = [e["url"] for e in CLEARNET_ENGINES]
+
+
+def _active_clearnet_engines():
+    return [
+        e["url"] for e in CLEARNET_ENGINES
+        if e["name"].lower() not in CLEARNET_DISABLED
+    ]
+
+
+def _host_matches(host: str, domains) -> bool:
+    """host ตรงกับโดเมนใน set ไหม โดยจับ subdomain ด้วย (suffix match)
+    เช่น app.startpage.com ตรงกับ startpage.com"""
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for domain in domains:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
+def _is_engine_social(url: str) -> bool:
+    """ลิงก์โซเชียลของตัว engine เองใน footer (เช่น twitter.com/startpage)
+    บัญชีโซเชียลจริงของเป้าหมายจะไม่ตรงกับรายชื่อแบรนด์ engine พวกนี้"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    social_hosts = ("twitter.com", "x.com", "facebook.com", "instagram.com",
+                    "mastodon.social", "reddit.com", "youtube.com", "linkedin.com",
+                    "github.com", "t.me", "tiktok.com")
+    if not any(host == h or host.endswith("." + h) for h in social_hosts):
+        return False
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    if not segments:
+        return False
+    # reddit ใช้ /r/<name> หรือ /user/<name>, ที่อื่นใช้ /<name>
+    if segments[0].lower() in ("r", "user", "u") and len(segments) > 1:
+        handle = segments[1]
+    else:
+        handle = segments[0]
+    return handle.lstrip("@").lower() in _ENGINE_SOCIAL_HANDLES
+
+
+def _accept_language_for(query: str) -> str:
+    """คำค้นภาษาไทยต้องขอผลภาษาไทย ไม่งั้น engine หลายตัวคืนผลอังกฤษล้วน
+    แล้วชื่อคนไทยก็จะหาไม่เจอทั้งที่มีข้อมูลอยู่"""
+    if _RE_THAI.search(query or ""):
+        return "th-TH,th;q=0.9,en-US;q=0.6,en;q=0.5"
+    return "en-US,en;q=0.9,th;q=0.6"
+
+
+def _href_to_clearnet(href, base_host, own_domains=()):
+    """ดึง URL ผลลัพธ์จริงจาก href หนึ่งอัน — engine ส่วนใหญ่ห่อปลายทางไว้ใน
+    พารามิเตอร์ redirect (DuckDuckGo ใช้ uddg=, Bing ใช้ u=) ถ้าไม่แกะออก
+    เราจะได้แต่ลิงก์ของ engine เองซึ่งไม่มีค่าเชิงข่าวกรองเลย"""
+    if not href:
+        return None
+
+    candidates = []
+    if "?" in href:
+        try:
+            params = parse_qs(urlparse(href).query)
+        except ValueError:
+            params = {}
+        for key in _CLEARNET_REDIRECT_KEYS:
+            for value in params.get(key, []):
+                value = unquote(value)
+                if value.startswith("//"):
+                    value = "https:" + value
+                if value.startswith("http://") or value.startswith("https://"):
+                    candidates.append(value)
+    candidates.append(href)
+
+    for candidate in candidates:
+        if candidate.startswith("//"):
+            candidate = "https:" + candidate
+        if not (candidate.startswith("http://") or candidate.startswith("https://")):
+            continue
+        try:
+            parsed = urlparse(candidate)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        if not host or host == base_host:
+            continue
+        # ตัดโดเมนของ engine เอง (รวม subdomain) + engine โครงสร้าง/CDN/นโยบาย
+        if _host_matches(host, own_domains) or _host_matches(host, _CLEARNET_SKIP_DOMAINS):
+            continue
+        # ตัดลิงก์โซเชียลของตัว engine เองใน footer
+        if _is_engine_social(candidate):
+            continue
+        # ตัด fragment ทิ้ง คนละ fragment ไม่ใช่คนละหน้า
+        return parsed._replace(fragment="").geturl()
+    return None
+
+
+def _anchors_in_results(soup, selectors):
+    """คืน anchor เฉพาะในโซนผลลัพธ์ตาม CSS selector ของ engine นั้น
+    ถ้า selector ไม่แมตช์เลย (engine เปลี่ยน markup) ค่อยถอยไปทั้งหน้า
+    ซึ่งตัวกรองโดเมน/โซเชียลจะช่วยกันขยะไว้อีกชั้น"""
+    for selector in selectors or []:
+        try:
+            found = soup.select(selector)
+        except Exception:
+            found = []
+        anchors = [a for a in found if a.name == "a" and a.get("href")]
+        if anchors:
+            return anchors, True
+    return [a for a in soup.find_all("a", href=True)], False
+
+
+def _extract_clearnet_links(html, base_url, limit, selectors=None, own_domains=()):
+    soup = BeautifulSoup(html, "html.parser")
+    base_host = (urlparse(base_url).hostname or "").lower()
+
+    anchors, from_results = _anchors_in_results(soup, selectors)
+    links = []
+    seen = set()
+    for anchor in anchors:
+        url = _href_to_clearnet(anchor.get("href"), base_host, own_domains)
+        if not url:
+            continue
+        key = url.rstrip("/").lower()
+        if key in seen:
+            continue
+
+        title = _clean_title(anchor.get_text(strip=True))
+        if len(title) < SEARCH_MIN_TITLE_CHARS:
+            title = _clean_title(anchor.get("title") or anchor.get("aria-label") or "")
+        if len(title) < SEARCH_MIN_TITLE_CHARS:
+            continue
+
+        seen.add(key)
+        links.append({"title": title, "link": url})
+        if limit and len(links) >= limit:
+            break
+    if not from_results:
+        logger.debug("CLEARNET FALLBACK | ใช้ทั้งหน้า (selector ไม่แมตช์) base=%s", base_host)
+    return links
+
+
+def fetch_clearnet_results(endpoint, query, deadline=None, max_results=None):
+    """ยิง clearnet engine 1 ตัว ใช้ circuit breaker ตัวเดียวกับฝั่ง dark web
+    จึงจำได้ว่า engine ไหนบล็อกเราอยู่และข้ามไปชั่วคราว"""
+    engine = _CLEARNET_ENGINE_BY_URL.get(endpoint, {})
+    engine_name = engine.get("name", _CLEARNET_ENGINE_NAME_BY_URL.get(endpoint, endpoint))
+    engine_key = f"engine:{engine_name}"
+    if nethealth.blocked(engine_key):
+        logger.debug("CLEARNET ENGINE SKIPPED (cooldown) | engine=%s", engine_name)
+        return []
+
+    limit = CLEARNET_MAX_RESULTS_PER_ENGINE if max_results is None else max_results
+    url = endpoint.format(query=quote_plus(query))
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": _accept_language_for(query),
+    }
+
+    timeout = _timeout_for(deadline)
+    if timeout is None:
+        return []
+
+    try:
+        response = _get_session(use_tor=False).get(
+            url, headers=headers, timeout=timeout, allow_redirects=True
+        )
+        if response.status_code != 200:
+            logger.debug("CLEARNET NON-200 | engine=%s status=%s",
+                         engine_name, response.status_code)
+            nethealth.record(engine_key, False, nethealth.ENGINE_FAILURE_THRESHOLD)
+            return []
+        links = _extract_clearnet_links(
+            response.text, url, limit,
+            selectors=engine.get("result_selectors"),
+            own_domains=engine.get("own_domains", ()),
+        )
+        # ตอบ 200 = engine ยังใช้งานได้ ถึงจะไม่มีผลลัพธ์ก็ตาม
+        # การนับ "ผลว่าง" เป็นความล้มเหลวจะพัก engine ที่ทำงานดีทิ้งไป 5 นาที
+        # เพราะชื่อคนที่หายากจริงๆ ย่อมไม่มีผลในบาง engine เป็นเรื่องปกติ
+        # ส่วนการโดนบล็อกจริงมักมาเป็น 403/429/5xx ซึ่งดักไว้ข้างบนแล้ว
+        nethealth.record(engine_key, True, nethealth.ENGINE_FAILURE_THRESHOLD)
+        logger.debug("CLEARNET OK | engine=%s results=%d", engine_name, len(links))
+        for item in links:
+            item["engine"] = engine_name
+            item["origin"] = "clearnet"
+        return links
+    except requests.RequestException as exc:
+        logger.debug("CLEARNET FAILED | engine=%s: %s", engine_name, exc)
+        nethealth.record(engine_key, False, nethealth.ENGINE_FAILURE_THRESHOLD)
+        return []
+    except Exception as exc:
+        logger.debug("CLEARNET PARSE FAILED | engine=%s: %s", engine_name, exc)
+        return []
+
+
+def get_clearnet_results(query, max_workers=None, budget_seconds=None,
+                         max_results=None, use_cache=True):
+    """ค้น clearnet หลาย engine พร้อมกัน แล้ว dedupe — สัญญาเดียวกับ
+    get_search_results() ทุกประการ (คืน [] เสมอเมื่อล้มเหลว ไม่ raise)"""
+    query = " ".join(str(query or "").split())[:SEARCH_MAX_QUERY_CHARS]
+    if not query or not CLEARNET_ENABLED:
+        return []
+
+    engines = _active_clearnet_engines()
+    if not engines:
+        return []
+
+    workers = max(1, min(int(max_workers or CLEARNET_MAX_WORKERS), len(engines)))
+    budget = float(budget_seconds) if budget_seconds else SEARCH_TOTAL_BUDGET_SECONDS
+    cap = int(max_results) if max_results else SEARCH_MAX_RESULTS
+
+    cache_key = f"clearnet|{query}|{cap}"
+    if use_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("CLEARNET CACHE HIT | query=%r results=%d", query, len(cached))
+            return cached
+
+    started = time.monotonic()
+    deadline = started + budget
+    seen_links = set()
+    unique_results = []
+    engines_ok = 0
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {
+            executor.submit(fetch_clearnet_results, endpoint, query, deadline): endpoint
+            for endpoint in engines
+        }
+        try:
+            for future in as_completed(futures, timeout=budget):
+                try:
+                    results = future.result()
+                except Exception as exc:
+                    logger.debug("CLEARNET WORKER CRASHED | %s", exc)
+                    continue
+                if not results:
+                    continue
+                engines_ok += 1
+                for res in results:
+                    key = (res.get("link") or "").rstrip("/").lower()
+                    if not key or key in seen_links:
+                        continue
+                    seen_links.add(key)
+                    unique_results.append(res)
+                if SEARCH_EARLY_STOP and len(unique_results) >= cap:
+                    break
+        except FuturesTimeout:
+            logger.warning("CLEARNET BUDGET TIMEOUT | query=%r budget=%.1fs", query, budget)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    unique_results = unique_results[:cap]
+    if use_cache and unique_results:
+        _cache_put(cache_key, unique_results)
+
+    logger.info(
+        "CLEARNET DONE | query=%r engines_ok=%d/%d unique=%d elapsed=%.1fs",
+        query, engines_ok, len(engines), len(unique_results), time.monotonic() - started,
+    )
+    return unique_results
+
+
+def get_combined_results(query, budget_seconds=None, max_results=None,
+                         include_clearnet=True, include_darkweb=True, use_cache=True):
+    """ค้น clearnet และ dark web พร้อมกัน แล้วรวมผลโดยติดป้ายว่ามาจากฝั่งไหน
+
+    ยิงสองฝั่งขนานกัน ไม่ใช่ต่อคิวกัน เวลารวมจึงเท่ากับฝั่งที่ช้ากว่า
+    ไม่ใช่ผลบวกของทั้งสองฝั่ง
+    """
+    tasks = []
+    if include_clearnet and CLEARNET_ENABLED:
+        tasks.append(("clearnet", get_clearnet_results))
+    if include_darkweb:
+        tasks.append(("darkweb", get_search_results))
+    if not tasks:
+        return []
+
+    merged = []
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        # ทั้งสองฟังก์ชันมีลำดับพารามิเตอร์เหมือนกัน
+        # (query, max_workers, budget_seconds, max_results, use_cache)
+        futures = {
+            executor.submit(fn, query, None, budget_seconds, max_results, use_cache): origin
+            for origin, fn in tasks
+        }
+        for future in as_completed(futures):
+            origin = futures[future]
+            try:
+                results = future.result() or []
+            except Exception as exc:
+                logger.warning("COMBINED SEARCH FAILED | origin=%s: %s", origin, exc)
+                continue
+            for item in results:
+                item.setdefault("origin", origin)
+                merged.append(item)
+
+    seen, unique = set(), []
+    for item in merged:
+        key = (item.get("link") or "").rstrip("/").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique[: (max_results or SEARCH_MAX_RESULTS)]
+
+
+async def get_combined_results_async(query, budget_seconds=None, max_results=None,
+                                     include_clearnet=True, include_darkweb=True,
+                                     use_cache=True):
+    return await asyncio.to_thread(
+        get_combined_results, query, budget_seconds, max_results,
+        include_clearnet, include_darkweb, use_cache,
+    )
