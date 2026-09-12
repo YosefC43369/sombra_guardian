@@ -51,6 +51,45 @@ _RE_PHONE = re.compile(r"(?:\+\d{1,3}[\s\-]?\d{6,14}|\b0\d{1,2}[\s\-]?\d{3}[\s\-
 _RE_QUOTED = re.compile(r"[\"“”']([^\"“”']{3,80})[\"“”']")
 _RE_LATIN_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9_\-]{2,}\b")
 
+# โปรไฟล์โซเชียล — ตัวเชื่อมตัวตนที่แข็งแรงที่สุดในงาน OSINT บุคคล
+# เพราะบัญชีเดียวกันปรากฏข้ามเว็บได้ และผูกกับคนคนเดียวจริงๆ
+_SOCIAL_PATTERNS = (
+    ("facebook", re.compile(r"facebook\.com/(?:profile\.php\?id=)?([A-Za-z0-9._\-]{4,60})", re.I)),
+    ("x", re.compile(r"(?:twitter|x)\.com/([A-Za-z0-9_]{3,15})", re.I)),
+    ("instagram", re.compile(r"instagram\.com/([A-Za-z0-9._]{3,30})", re.I)),
+    ("linkedin", re.compile(r"linkedin\.com/in/([A-Za-z0-9\-_%]{3,100})", re.I)),
+    ("tiktok", re.compile(r"tiktok\.com/@([A-Za-z0-9._]{2,24})", re.I)),
+    ("github", re.compile(r"github\.com/([A-Za-z0-9\-]{1,39})", re.I)),
+    ("youtube", re.compile(r"youtube\.com/(?:@|c/|channel/|user/)([A-Za-z0-9._\-]{3,60})", re.I)),
+    ("line", re.compile(r"line\.me/ti/p/([A-Za-z0-9~_\-]{3,40})", re.I)),
+    ("pantip", re.compile(r"pantip\.com/profile/(\d{3,12})", re.I)),
+    ("telegram", re.compile(r"t\.me/([A-Za-z0-9_]{4,32})", re.I)),
+)
+# path ที่ไม่ใช่บัญชีผู้ใช้ — กันไม่ให้ facebook.com/sharer กลายเป็น "ตัวตน"
+_SOCIAL_NOT_HANDLES = frozenset((
+    "sharer", "share", "intent", "login", "signup", "home", "help", "about",
+    "privacy", "terms", "policy", "explore", "search", "watch", "pages",
+    "groups", "events", "marketplace", "story.php", "dialog", "plugins",
+    "hashtag", "settings", "tr", "profile.php", "permalink.php",
+))
+
+# ---- ชื่อบุคคล ----
+# งาน OSINT ตัวตนส่วนใหญ่เริ่มจาก "ชื่อ-นามสกุล" ไม่ใช่อีเมลหรือโดเมน
+# ของเดิมไม่รู้จักชื่อคนเลย ชื่อไทยจึงตกไปเป็น keyword ธรรมดาและค้นไม่เจออะไร
+_RE_THAI_NAME = re.compile(r"[\u0E00-\u0E7F]{2,}(?:\s+[\u0E00-\u0E7F]{2,}){1,3}")
+_RE_LATIN_NAME = re.compile(r"\b[A-Z][a-zA-Z'\-]{1,}(?:\s+[A-Z][a-zA-Z'\-]{1,}){1,2}\b")
+# คำนำหน้า/ยศ ต้องตัดออกก่อน ไม่งั้น "นายธนาธรณ์" จะกลายเป็นคนละคนกับ "ธนาธรณ์"
+_NAME_TITLES_TH = (
+    "นางสาว", "นาย", "นาง", "น.ส.", "ด.ช.", "ด.ญ.", "คุณ", "ดร.", "ศ.ดร.", "รศ.ดร.",
+    "ผศ.ดร.", "ศ.", "รศ.", "ผศ.", "พล.ต.ท.", "พล.ต.ต.", "พ.ต.อ.", "พ.ต.ท.", "พ.ต.ต.",
+    "ร.ต.อ.", "ร.ท.", "ร.อ.", "จ.ส.อ.", "ส.ต.ท.", "พระ", "หลวงพ่อ",
+)
+_NAME_TITLES_EN = ("Mr.", "Mrs.", "Ms.", "Miss", "Dr.", "Prof.", "Assoc.", "Asst.")
+# คำไทยที่หน้าตาเหมือนชื่อแต่ไม่ใช่ — กันไม่ให้กลายเป็นเป้าหมายค้นหา
+_NOT_NAMES_TH = frozenset((
+    "ข้อมูล ส่วนตัว", "บริษัท จำกัด", "ประเทศ ไทย", "กรุงเทพ มหานคร",
+))
+
 # ตัวควบคุม / zero-width / bidi-override ที่ใช้ซ่อนคำสั่งในเนื้อหาที่ scrape มา
 # สร้างจาก code point เพื่อไม่ให้มีอักขระมองไม่เห็นปนอยู่ในซอร์สไฟล์เอง
 _INVISIBLE_RANGES = (
@@ -80,6 +119,12 @@ _NOISE_DOMAINS = frozenset((
     "example.com", "w3.org", "schema.org", "google.com", "gstatic.com",
     "googleapis.com", "cloudflare.com", "jquery.com", "bootstrapcdn.com",
     "gravatar.com", "wordpress.org", "github.io",
+    # โดเมนแพลตฟอร์มเอง — ตัวบัญชีถูกเก็บเป็น profile: อยู่แล้ว
+    "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com",
+    "twitter.com", "www.twitter.com", "x.com", "www.x.com", "t.co",
+    "instagram.com", "www.instagram.com", "linkedin.com", "www.linkedin.com",
+    "tiktok.com", "www.tiktok.com", "youtube.com", "www.youtube.com", "youtu.be",
+    "github.com", "www.github.com", "t.me", "line.me", "pantip.com", "www.pantip.com",
 ))
 
 MAX_QUERY_CHARS = 120
@@ -97,9 +142,14 @@ _CREDIBILITY_CONFIRMED = "1"   # ยืนยันแล้ว — ตรงก
 IOC_LABELS = {
     "email": "อีเมล", "domain": "โดเมน", "onion": "Onion", "ipv4": "IP",
     "btc": "Bitcoin", "eth": "Ethereum", "hash": "ค่าแฮช", "cve": "CVE",
-    "handle": "บัญชี/Username", "phone": "เบอร์โทร",
+    "handle": "บัญชี/Username", "phone": "เบอร์โทร", "profile": "โปรไฟล์โซเชียล",
 }
-IOC_ORDER = ("email", "handle", "domain", "onion", "ipv4", "btc", "eth", "hash", "cve", "phone")
+IOC_ORDER = ("email", "profile", "phone", "handle", "domain",
+             "onion", "ipv4", "btc", "eth", "hash", "cve")
+
+# ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง ใช้เชื่อมโยงตัวตนข้ามเว็บ
+# เจตนาไม่ใส่ "ชื่อบุคคล": ชื่อซ้ำกันได้ทั่วไป ใช้เชื่อมตัวตนจะได้คนผิด
+IDENTITY_TYPES = ("email", "profile", "phone", "handle")
 
 
 # ---------------- Data models ----------------
@@ -117,18 +167,20 @@ class Selectors:
     hashes: List[str] = field(default_factory=list)
     cves: List[str] = field(default_factory=list)
     phones: List[str] = field(default_factory=list)
+    names: List[str] = field(default_factory=list)
     phrases: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
 
     def all_values(self) -> List[str]:
         return (self.emails + self.domains + self.onions + self.handles + self.ipv4
                 + self.btc + self.eth + self.hashes + self.cves + self.phones
-                + self.phrases + self.keywords)
+                + self.names + self.phrases + self.keywords)
 
     def strong_values(self) -> List[str]:
         """selector ที่ระบุตัวตนได้จริง (ไม่ใช่คำค้นทั่วไป)"""
         return (self.emails + self.handles + self.domains + self.onions + self.ipv4
-                + self.btc + self.eth + self.hashes + self.cves + self.phones)
+                + self.btc + self.eth + self.hashes + self.cves + self.phones
+                + self.names)
 
     def verification_values(self) -> List[Tuple[str, int]]:
         """ค่าที่ใช้ยืนยันเนื้อหา พร้อมน้ำหนัก — ต้องรวม pivot ที่ plan_queries()
@@ -146,6 +198,10 @@ class Selectors:
 
         for value in self.strong_values():
             push(value, 5)
+        for name in self.names:
+            # นามสกุลอย่างเดียวก็เป็นสัญญาณ แต่เบากว่าชื่อเต็ม
+            for part in name.split():
+                push(part, 2)
         for email in self.emails:
             local, _, domain = email.partition("@")
             push(domain, 2)
@@ -163,7 +219,8 @@ class Selectors:
             ("email", self.emails), ("domain", self.domains), ("onion", self.onions),
             ("username", self.handles), ("ip", self.ipv4), ("btc", self.btc),
             ("eth", self.eth), ("hash", self.hashes), ("cve", self.cves),
-            ("phone", self.phones), ("phrase", self.phrases), ("keyword", self.keywords),
+            ("phone", self.phones), ("name", self.names),
+            ("phrase", self.phrases), ("keyword", self.keywords),
         ):
             if values:
                 parts.append(f"{label}={', '.join(values[:3])}")
@@ -182,6 +239,8 @@ class SourceRecord:
     engines: int = 1
     iocs: Dict[str, List[str]] = field(default_factory=dict)
     corroboration: int = 0
+    origin: str = ""        # clearnet / darkweb
+    engine: str = ""        # engine ที่ค้นเจอแหล่งนี้
     body: str = ""          # เนื้อหาจริงโดยตัด title ที่ scrape.py ใส่นำหน้าออก
     content_hits: int = 0
     matched_selectors: List[str] = field(default_factory=list)
@@ -256,16 +315,120 @@ def extract_selectors(text: str) -> Selectors:
     )
     sel.handles = _dedupe(_RE_HANDLE.findall(working))
     sel.phones = _dedupe(_RE_PHONE.findall(working))
+    for value in sel.phones:
+        working = working.replace(value, " ")
+
     sel.phrases = _dedupe(_RE_QUOTED.findall(text))
+    sel.names = extract_person_names(working, max_tokens=4)
+    for phrase in sel.phrases:
+        # ผู้ใช้ครอบชื่อด้วยเครื่องหมายคำพูดได้ เพื่อบังคับให้ระบบถือว่าเป็นชื่อ
+        # แม้ชื่อนั้นจะขึ้นต้นด้วยคำที่หน้าตาเหมือนคำสั่ง
+        # ผู้ใช้ขีดขอบเขตมาเองแล้ว จึงไม่ต้องเดาว่าส่วนไหนเป็นคำสั่ง
+        for name in extract_person_names(phrase, max_tokens=5, trim_commands=False):
+            if name.lower() not in {n.lower() for n in sel.names}:
+                sel.names.append(name)
 
     # คำค้นสำรอง: ใช้เมื่อไม่มี selector แข็งๆ เลย
-    consumed = " ".join(sel.strong_values() + sel.phrases).lower()
+    consumed = " ".join(sel.strong_values() + sel.phrases + sel.names).lower()
     tokens = [
         t for t in _RE_LATIN_TOKEN.findall(working)
         if t.lower() not in _STOPWORDS_EN and t.lower() not in consumed and len(t) > 2
     ]
     sel.keywords = _dedupe(tokens)[:6]
     return sel
+
+
+def _strip_name_titles(value: str) -> str:
+    out = " ".join(str(value).split())
+    changed = True
+    while changed:
+        changed = False
+        for title in _NAME_TITLES_TH + _NAME_TITLES_EN:
+            if out.startswith(title):
+                out = out[len(title):].strip()
+                changed = True
+    return out
+
+
+def _trim_command_fragments(tokens: List[str]) -> List[str]:
+    """ตัดคำสั่งที่ติดมาหัว-ท้ายของวลีชื่อ
+
+    ภาษาไทยไม่เว้นวรรคในวลี "ช่วยหาข้อมูลของ" จึงเป็น token เดียวที่ตรวจด้วย
+    การเทียบทั้งคำไม่เจอ ต้องดูว่า token ขึ้นต้น/ลงท้ายด้วยคำสั่งหรือไม่
+    ทำเฉพาะหัวกับท้ายเท่านั้น ไม่แตะ token กลางวลี เพราะนั่นคือตัวชื่อจริง
+    และการตัดพลาดตรงกลางจะทำให้ได้ชื่อที่ไม่มีอยู่จริง
+    """
+    out = list(tokens)
+    changed = True
+    while changed and len(out) > 1:
+        changed = False
+        for word in _STOPWORDS_TH:
+            if out and out[0].startswith(word) and len(out[0]) > len(word):
+                out.pop(0)
+                changed = True
+                break
+        if changed or len(out) <= 1:
+            continue
+        for word in _STOPWORDS_TH:
+            if out and out[-1].endswith(word) and len(out[-1]) > len(word):
+                out.pop()
+                changed = True
+                break
+    return out
+
+
+def _name_segments(candidate: str) -> List[str]:
+    """ตัดวลีที่จับได้ออกเป็นช่วงๆ ตรงตำแหน่งของ stopword
+
+    ต้อง "แบ่ง" ไม่ใช่ "ทิ้ง" เพราะการทิ้ง stopword กลางวลีจะเอาคนสองคนมา
+    ต่อกันเป็นชื่อเดียว เช่น "สมชาย และ สมหญิง" จะกลายเป็น "สมชาย สมหญิง"
+    ซึ่งเป็นชื่อที่ไม่มีอยู่จริง
+    """
+    segments, current = [], []
+    for token in candidate.split():
+        if token in _STOPWORDS_TH or token.lower() in _STOPWORDS_EN:
+            if current:
+                segments.append(current)
+            current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return [" ".join(seg) for seg in segments]
+
+
+def extract_person_names(text: str, min_tokens: int = 2, max_tokens: int = 4,
+                         trim_commands: bool = True) -> List[str]:
+    """จับ 'ชื่อ-นามสกุล' ทั้งไทยและอังกฤษ
+
+    ชื่อไทยเขียนติดกันไม่มีตัวคั่นในคำ แต่เว้นวรรคระหว่างชื่อกับนามสกุล
+    จึงจับด้วยรูปแบบ 'คำไทย เว้นวรรค คำไทย' ได้ ส่วนคำนำหน้า/ยศต้องตัดออก
+    ไม่งั้น 'นายธนาธรณ์ ปัญญาสาร' จะถูกมองเป็นคนละคนกับ 'ธนาธรณ์ ปัญญาสาร'
+
+    max_tokens เข้มขึ้นเวลาสกัดจากเนื้อหาหน้าเว็บ (ประโยคยาวๆ จะถูกจับมาทั้งท่อน
+    ถ้าไม่จำกัด) ส่วนเวลาสกัดจากคำสั่งผู้ใช้ปล่อยกว้างกว่าได้
+    """
+    if not text:
+        return []
+
+    found = []
+    working = _strip_name_titles(str(text))
+
+    for regex, is_latin in ((_RE_THAI_NAME, False), (_RE_LATIN_NAME, True)):
+        for match in regex.findall(working):
+            for segment in _name_segments(_strip_name_titles(match)):
+                tokens = segment.split()
+                if trim_commands:
+                    tokens = _trim_command_fragments(tokens)
+                    segment = " ".join(tokens)
+                if not (min_tokens <= len(tokens) <= max_tokens):
+                    continue
+                if segment in _NOT_NAMES_TH:
+                    continue
+                if is_latin and any(t.lower() in _STOPWORDS_EN for t in tokens):
+                    continue
+                found.append(segment)
+    return _dedupe(found)
 
 
 def _strip_thai_stopwords(text: str) -> str:
@@ -306,6 +469,11 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
         push(value)
     for value in sel.ipv4 + sel.cves + sel.phones:
         push(value)
+    for name in sel.names:
+        # ใส่เครื่องหมายคำพูดให้ search engine จับคู่ทั้งวลี ลดผลที่เจอแค่
+        # ชื่อหรือนามสกุลอย่างเดียวซึ่งเป็นคนละคนได้ง่ายมาก
+        push(f'"{name}"')
+        push(name)
     for phrase in sel.phrases:
         push(phrase)
 
@@ -348,6 +516,8 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
                 "link": link,
                 "title": str(item.get("title") or "Untitled").strip() or "Untitled",
                 "engines": 1,
+                "origin": item.get("origin", ""),
+                "engine": item.get("engine", ""),
             }
 
     for record in merged.values():
@@ -402,7 +572,36 @@ def extract_iocs(text: str) -> Dict[str, List[str]]:
     if domains:
         found["domain"] = domains[:20]
 
+    # ทำบนข้อความต้นฉบับ ไม่ใช่ working เพราะ URL โปรไฟล์ถูกตัดไปตอนจับ domain
+    profiles = extract_profiles(text)
+    if profiles:
+        found["profile"] = profiles[:20]
+
+    # ไม่สกัด "ชื่อบุคคล" จากเนื้อหาหน้าเว็บโดยเจตนา: ภาษาไทยไม่มีตัวตัดคำ
+    # การเดาชื่อจากข้อความอิสระให้ผลผิดบ่อยมาก และถ้าเอาไปใช้เชื่อมโยงตัวตน
+    # จะกลายเป็นการชี้ว่าคนที่ไม่เกี่ยวข้องเป็นคนเดียวกับเป้าหมาย
+    # การยืนยันว่าหน้านี้พูดถึงเป้าหมายทำโดย verify_sources() ซึ่งเทียบกับ
+    # ชื่อที่ผู้ใช้ระบุมาตรงๆ ไม่ใช่ชื่อที่ระบบเดาเอง
+
     return found
+
+
+def extract_profiles(text: str) -> List[str]:
+    """ดึงบัญชีโซเชียลออกมาเป็น 'platform:handle'
+
+    เก็บเป็นรูปแบบเดียวกันทุกแพลตฟอร์ม เพื่อให้เทียบข้ามแหล่งได้ว่าเป็น
+    บัญชีเดียวกันหรือไม่ แม้จะพบมาจากคนละเว็บคนละรูปแบบ URL
+    """
+    if not text:
+        return []
+    found = []
+    for platform, regex in _SOCIAL_PATTERNS:
+        for handle in regex.findall(str(text)):
+            handle = handle.strip("/.").strip()
+            if not handle or handle.lower() in _SOCIAL_NOT_HANDLES:
+                continue
+            found.append(f"{platform}:{handle}")
+    return _dedupe(found)
 
 
 def build_ioc_index(sources: List[SourceRecord]) -> Dict[Tuple[str, str], List[str]]:
@@ -431,6 +630,124 @@ def apply_corroboration(sources: List[SourceRecord],
         source.corroboration = best
 
 
+IDENTITY_MIN_SOURCES = 2
+
+
+@dataclass
+class IdentityLink:
+    """ตัวระบุหนึ่งตัวที่ถูกเชื่อมเข้ากับเป้าหมาย พร้อมแหล่งที่รองรับ"""
+    kind: str
+    value: str
+    sources: List[str] = field(default_factory=list)
+    seed: bool = False          # ผู้ใช้ให้มาตั้งแต่ต้น ไม่ใช่สิ่งที่ระบบค้นเจอ
+
+    @property
+    def confirmed(self) -> bool:
+        return self.seed or len(self.sources) >= IDENTITY_MIN_SOURCES
+
+    @property
+    def label(self) -> str:
+        return IOC_LABELS.get(self.kind, self.kind)
+
+
+@dataclass
+class IdentityProfile:
+    """ผลการเชื่อมโยงตัวตน: อะไรบ้างที่เชื่อว่าเป็นของคนคนเดียวกัน"""
+    target: str
+    links: List[IdentityLink] = field(default_factory=list)
+    linked_sources: List[str] = field(default_factory=list)
+
+    def confirmed(self) -> List[IdentityLink]:
+        return [l for l in self.links if l.confirmed]
+
+    def leads(self) -> List[IdentityLink]:
+        return [l for l in self.links if not l.confirmed]
+
+
+def build_identity(sources: List[SourceRecord], selectors: Optional[Selectors] = None,
+                   min_sources: int = IDENTITY_MIN_SOURCES) -> IdentityProfile:
+    """เชื่อมโยงว่าข้อมูลจากคนละเว็บชิ้นไหนบ้างเป็นของคนคนเดียวกัน
+
+    ใช้รูปแบบ "ดาว" ไม่ใช่ "กลุ่มก้อน": ตัวระบุทุกตัวที่พบในแหล่งซึ่งยืนยันแล้ว
+    ว่าพูดถึงเป้าหมาย จะถูกเชื่อมเข้ากับ *เป้าหมาย* โดยตรง ไม่เชื่อมหากันเอง
+
+    เหตุผล: หน้าเว็บหนึ่งหน้าพูดถึงคนหลายคนได้ ถ้าเชื่อมทุกตัวระบุในหน้านั้น
+    เข้าหากันหมด อีเมลของคนอื่นที่บังเอิญอยู่หน้าเดียวกันจะถูกนับเป็นของ
+    เป้าหมายทันที ซึ่งคือการกล่าวหาผิดตัว
+
+    ยิ่งไปกว่านั้น การเชื่อมใช้เฉพาะ IDENTITY_TYPES (อีเมล/โปรไฟล์/เบอร์/บัญชี)
+    ไม่ใช้ "ชื่อ" เพราะชื่อซ้ำกันได้ทั่วไป
+    """
+    sel = selectors or Selectors()
+    target = (sel.names or sel.emails or sel.handles or sel.strong_values() or ["เป้าหมาย"])[0]
+
+    on_target = [s for s in sources if s.on_target]
+    profile = IdentityProfile(target=target, linked_sources=[s.ref for s in on_target])
+
+    registry: Dict[Tuple[str, str], IdentityLink] = {}
+
+    # ตัวระบุที่ผู้ใช้ให้มาเอง ถือว่ายืนยันแล้วตั้งแต่ต้น
+    for kind, values in (("email", sel.emails), ("handle", sel.handles),
+                         ("phone", sel.phones)):
+        for value in values:
+            registry[(kind, value.lower())] = IdentityLink(
+                kind=kind, value=value, sources=[], seed=True
+            )
+
+    for source in on_target:
+        for kind in IDENTITY_TYPES:
+            for value in (source.iocs or {}).get(kind, []):
+                key = (kind, value.lower())
+                link = registry.get(key)
+                if link is None:
+                    link = IdentityLink(kind=kind, value=value)
+                    registry[key] = link
+                if source.ref not in link.sources:
+                    link.sources.append(source.ref)
+
+    order = {kind: i for i, kind in enumerate(IDENTITY_TYPES)}
+    profile.links = sorted(
+        registry.values(),
+        key=lambda l: (not l.seed, -len(l.sources), order.get(l.kind, 99), l.value.lower()),
+    )
+    return profile
+
+
+def pivot_queries(identity: IdentityProfile, selectors: Optional[Selectors] = None,
+                  already_used: Optional[List[str]] = None,
+                  max_queries: int = 3) -> List[str]:
+    """สร้าง query รอบสองจากตัวระบุที่เพิ่งค้นเจอ
+
+    นี่คือหัวใจของ "ค้นต่อจากสิ่งที่เพิ่งรู้" ในงานข่าวกรอง: รอบแรกค้นด้วยชื่อ
+    ได้อีเมลกับบัญชีโซเชียลมา รอบสองก็เอาสองอย่างนั้นไปค้นต่อ ซึ่งมักพาไป
+    เจอแหล่งที่ค้นด้วยชื่อเปล่าๆ ไม่มีทางเจอ
+    """
+    used = {q.strip().strip('"').lower() for q in (already_used or [])}
+    queries: List[str] = []
+
+    def push(value):
+        value = " ".join(str(value).split())[:MAX_QUERY_CHARS]
+        low = value.lower().strip('"')
+        if value and low not in used and low not in {q.lower().strip('"') for q in queries}:
+            queries.append(value)
+
+    # ยืนยันแล้วมาก่อน แล้วค่อยเบาะแส — ภายในแต่ละกลุ่มเรียงตาม IDENTITY_TYPES
+    for group in (identity.confirmed(), identity.leads()):
+        for link in group:
+            if link.kind == "email":
+                push(link.value)
+            elif link.kind == "profile":
+                # ค้นด้วยชื่อบัญชี บัญชีเดียวกันมักถูกใช้ซ้ำข้ามแพลตฟอร์ม
+                push(link.value.split(":", 1)[-1])
+            elif link.kind == "phone":
+                push(link.value)
+            elif link.kind == "handle":
+                push(link.value)
+            if len(queries) >= max_queries:
+                return queries[:max_queries]
+    return queries[:max_queries]
+
+
 def defang(value: str) -> str:
     """ทำให้ IOC ไม่คลิกได้/ไม่ถูก auto-link — มาตรฐานของรายงาน CTI
     เพื่อไม่ให้ผู้อ่านเผลอกดเข้าไปที่โฮสต์อันตราย"""
@@ -447,7 +764,10 @@ def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
     if not text:
         return ""
     out = html.unescape(str(text))
-    out = unicodedata.normalize("NFKC", out)
+    # NFC ไม่ใช่ NFKC: NFKC แตกสระอำ (U+0E33) ออกเป็นนิคหิต+สระอา ทำให้
+    # "ทำเนียบ" กลายเป็น "ทําเนียบ" — ตรงกันด้วยตาแต่เทียบสตริงไม่ตรง
+    # ข้อความไทยทุกคำที่มีสระอำจึงเพี้ยนทั้งหมดก่อนถึงโมเดล
+    out = unicodedata.normalize("NFC", out)
     out = _RE_INVISIBLE.sub(" ", out)
     out = out.replace("<<<", "<").replace(">>>", ">")
     out = " ".join(out.split())
@@ -483,6 +803,8 @@ def build_sources(ranked_results: List[dict], scraped: Dict[str, str],
             retrieved=retrieved,
             relevance=int(record.get("relevance", 0)),
             engines=int(record.get("engines", 1)),
+            origin=str(record.get("origin", "") or ""),
+            engine=str(record.get("engine", "") or ""),
         )
         source.body = _strip_title_prefix(source.text, source.title) if retrieved else ""
         source.iocs = extract_iocs(source.text) if retrieved else {}
@@ -531,6 +853,15 @@ def collect_stats(sources: List[SourceRecord], ioc_index) -> dict:
     }
 
 
+def identity_stats(identity) -> dict:
+    if identity is None:
+        return {"identity_confirmed": 0, "identity_leads": 0}
+    return {
+        "identity_confirmed": len(identity.confirmed()),
+        "identity_leads": len(identity.leads()),
+    }
+
+
 # ---------------- 3. Dissemination ----------------
 
 def _format_ioc_index(ioc_index, limit: int = 25) -> List[str]:
@@ -558,9 +889,34 @@ def _clamp(text: str, max_chars: int) -> str:
     return text[: max_chars - len(notice)] + notice
 
 
+def _format_identity(identity) -> List[str]:
+    """ส่วนที่ตอบคำถามว่า 'ข้อมูลจากคนละเว็บชิ้นไหนเป็นของคนเดียวกัน'"""
+    lines = [
+        "[IDENTITY GRAPH — ตัวระบุที่เชื่อมโยงถึงเป้าหมาย]",
+        f"เป้าหมาย: {identity.target}",
+        f"เกณฑ์การยืนยัน: พบในแหล่งอิสระตั้งแต่ {IDENTITY_MIN_SOURCES} แหล่งขึ้นไป = ยืนยันแล้ว, "
+        "พบแหล่งเดียว = เบาะแส (ยังสรุปว่าเป็นของเป้าหมายไม่ได้)",
+    ]
+    confirmed, leads = identity.confirmed(), identity.leads()
+    if not confirmed and not leads:
+        lines.append("- ไม่พบตัวระบุที่เชื่อมโยงถึงเป้าหมายจากเนื้อหาที่ดึงมาได้")
+        return lines
+
+    for link in confirmed:
+        origin = "ผู้ใช้ระบุมาเอง" if link.seed and not link.sources else f"{len(link.sources)} แหล่ง"
+        refs = f": {', '.join(link.sources)}" if link.sources else ""
+        lines.append(f"- [ยืนยันแล้ว] [{link.label}] {defang(link.value)} — {origin}{refs}")
+    for link in leads:
+        lines.append(
+            f"- [เบาะแส] [{link.label}] {defang(link.value)} — "
+            f"{len(link.sources)} แหล่ง: {', '.join(link.sources)}"
+        )
+    return lines
+
+
 def build_dossier(question: str, selectors: Selectors, queries: List[str],
                   sources: List[SourceRecord], ioc_index, max_chars: int = 12000,
-                  engines_total: int = 0) -> str:
+                  engines_total: int = 0, identity=None) -> str:
     """ประกอบ dossier ที่ส่งให้โมเดล — มีงบตัวอักษร (max_chars) เพราะ
     gemini.ask_gemini() ปฏิเสธ prompt ที่ยาวเกินเพดาน ของเดิมยัดเนื้อหา
     20 แหล่ง x 2000 ตัวอักษรเข้าไปโดยไม่เช็คเพดานเลย"""
@@ -589,6 +945,7 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
         "(1 = ยืนยันแล้ว >=3 แหล่ง, 2 = 2 แหล่ง, 3 = แหล่งเดียว, 6 = ดึงเนื้อหาไม่ได้)",
     ]
     for source in sources:
+        origin = source.origin or "-"
         if not source.retrieved:
             status = "ดึงเนื้อหาไม่สำเร็จ"
         elif source.on_target:
@@ -597,7 +954,7 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
         else:
             status = "ไม่พบ selector ในเนื้อหา — อาจไม่เกี่ยวข้องกับเป้าหมาย"
         head.append(
-            f"[{source.ref}] {source.title[:120]} | {source.url} | "
+            f"[{source.ref}] {source.title[:120]} | {source.url} | ฝั่ง={origin} | "
             f"Admiralty {source.rating()} | {status} | relevance={source.relevance}"
         )
 
@@ -605,6 +962,10 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
     head.append("")
     head.append("[INDICATOR INDEX — IOC ถูก defang แล้ว ห้าม refang ในคำตอบ]")
     head.extend(ioc_lines or ["- ไม่พบ IOC ที่สกัดได้จากเนื้อหาที่ดึงมาได้"])
+
+    if identity is not None:
+        head.append("")
+        head.extend(_format_identity(identity))
 
     if off_target and on_target:
         head.append("")
@@ -667,13 +1028,23 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
                      "หรือ selector แคบเกินไป ลองใช้คำค้นที่กว้างขึ้น")
         return "\n".join(lines)
 
-    lines.append(f"พบ {len(ranked)} แหล่ง (แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง)")
+    clearnet = sum(1 for r in ranked if r.get("origin") == "clearnet")
+    darkweb = sum(1 for r in ranked if r.get("origin") == "darkweb")
+    lines.append(
+        f"พบ {len(ranked)} แหล่ง (เว็บเปิด {clearnet} | dark web {darkweb}) "
+        f"— แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง"
+    )
     lines.append("")
     for position, record in enumerate(ranked[:limit], start=1):
         marker = " *" if record.get("relevance", 0) > 0 else ""
+        origin = record.get("origin") or "-"
+        engine = record.get("engine") or "-"
         lines.append(f"[S{position}]{marker} {str(record.get('title', 'Untitled'))[:120]}")
         lines.append(f"      {record.get('link', '')}")
-        lines.append(f"      relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง")
+        lines.append(
+            f"      ฝั่ง={origin} | engine={engine} | "
+            f"relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง"
+        )
     lines.append("")
     lines.append("นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์")
     lines.append("ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")

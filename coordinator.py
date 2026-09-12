@@ -88,6 +88,13 @@ OSINT_SEARCH_RESULT_CAP = _env_int("OSINT_SEARCH_RESULT_CAP", 24)
 # scrape เป็นสองจังหวะ: ยิงชุดแรกที่ตรงเป้าที่สุดก่อน ถ้าได้หลักฐานพอก็จบ
 OSINT_SCRAPE_FIRST_BATCH = _env_int("OSINT_SCRAPE_FIRST_BATCH", 6)
 OSINT_MIN_VERIFIED_SOURCES = _env_int("OSINT_MIN_VERIFIED_SOURCES", 3)
+# รอบสอง: เอาตัวระบุที่เพิ่งค้นเจอ (อีเมล/โปรไฟล์/เบอร์) ไปค้นต่อ
+OSINT_PIVOT_ENABLED = _env_bool("OSINT_PIVOT_ENABLED", "true")
+OSINT_PIVOT_QUERIES = _env_int("OSINT_PIVOT_QUERIES", 3)
+OSINT_PIVOT_MIN_SECONDS = _env_float("OSINT_PIVOT_MIN_SECONDS", 20)
+# ฝั่งที่จะค้น — เว็บเปิดคือที่ที่ข้อมูลตัวตนบุคคลอยู่จริง
+OSINT_INCLUDE_CLEARNET = _env_bool("OSINT_INCLUDE_CLEARNET", "true")
+OSINT_INCLUDE_DARKWEB = _env_bool("OSINT_INCLUDE_DARKWEB", "true")
 # เว้นที่ให้คำสั่งงาน + ข้อความกรอบ ก่อนถึงเพดาน prompt ของ gemini
 _DOSSIER_RESERVED_CHARS = 1500
 COORDINATOR_VERIFICATION_ENABLED = _env_bool("COORDINATOR_VERIFICATION_ENABLED", "true")
@@ -292,22 +299,62 @@ async def _run_worker(name: str, coro) -> WorkerResult:
 
 # ---------------- Main entry point ----------------
 
-async def _collect_darkweb_evidence(question: str):
+async def _run_search_round(queries, budget_seconds):
+    """ยิงทุก query ของรอบนี้พร้อมกัน ทั้ง clearnet และ dark web
+    คืน (list ของกลุ่มผลลัพธ์, จำนวนผลดิบรวม)"""
+    if not queries:
+        return [], 0
+    groups = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                search.get_combined_results, q, budget_seconds, OSINT_SEARCH_RESULT_CAP,
+                OSINT_INCLUDE_CLEARNET, OSINT_INCLUDE_DARKWEB, True,
+            )
+            for q in queries
+        ],
+        return_exceptions=True,
+    )
+    clean = []
+    for query, group in zip(queries, groups):
+        if isinstance(group, BaseException):
+            logger.warning("OSINT SEARCH FAILED | query=%r: %s", query, group)
+            continue
+        clean.append(group)
+    return clean, sum(len(g) for g in clean)
+
+
+async def _scrape_and_assess(ranked, selectors, budget_seconds, scraped=None):
+    """ดึงเนื้อหา -> ยืนยันด้วยเนื้อหา -> เชื่อมโยงตัวตน
+    ส่ง `scraped` เดิมเข้ามาเพื่อไม่ให้ดึงหน้าที่เคยดึงไปแล้วซ้ำ"""
+    scraped = dict(scraped or {})
+    pending = [r for r in ranked if r.get("link") not in scraped]
+    scraped_now = 0
+    if pending:
+        fresh = await asyncio.to_thread(
+            scrape.scrape_multiple, pending, OSINT_SCRAPE_WORKERS,
+            budget_seconds, len(pending),
+        )
+        scraped.update(fresh)
+        scraped_now = len(pending)
+
+    sources = osint.verify_sources(
+        osint.build_sources(ranked, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
+    )
+    identity = osint.build_identity(sources, selectors)
+    return sources, scraped, identity, scraped_now
+
+
+async def _collect_osint_evidence(question: str):
     """เก็บหลักฐานตามวงจรข่าวกรอง แล้วคืน (dossier, stats)
 
-    ของเดิมทำแค่: ยิงคำถามดิบ 1 ครั้ง -> ตัด 20 อันแรกตามลำดับที่ thread คืนมา
-    -> scrape ทั้งหมด -> ต่อสตริงดิบเข้า prompt
+    รอบที่ 1  วางแผนจาก selector -> ค้น clearnet + dark web พร้อมกัน ->
+              จัดอันดับ -> ดึงเนื้อหาชุดที่ตรงเป้าที่สุด -> ยืนยันด้วยเนื้อหา
+    รอบที่ 2  เอาตัวระบุที่เพิ่งได้ (อีเมล/โปรไฟล์/เบอร์) ไปค้นต่อ แล้วรวม
+              ผลเข้ากับรอบแรก — นี่คือขั้นที่พาไปเจอแหล่งที่ค้นด้วยชื่อ
+              เปล่าๆ ไม่มีทางเจอ
+    ปิดท้าย   สกัด IOC, นับการยืนยันข้ามแหล่ง, สรุปกราฟตัวตน, ประกอบ dossier
 
-    ตอนนี้:
-      1. วางแผนการค้นหาจาก selector แล้วยิงหลาย query พร้อมกัน
-      2. จัดอันดับตามความเกี่ยวข้องก่อน scrape
-      3. scrape เป็นสองจังหวะ — ชุดแรกคือตัวที่ตรงเป้าที่สุด ถ้าได้หลักฐาน
-         ยืนยันพอแล้วก็ไม่ต้องยิงชุดที่สอง (ปกติจึง scrape ครึ่งเดียว)
-      4. ยืนยันด้วยเนื้อหาว่าหน้านั้นพูดถึงเป้าหมายจริง ไม่ใช่แค่ชื่อเรื่องตรง
-      5. สกัด IOC + นับการยืนยันข้ามแหล่ง แล้วประกอบ dossier ในงบตัวอักษร
-
-    งบเวลาใช้ deadline ร่วมอันเดียว: ถ้าขั้นค้นหาเสร็จเร็ว เวลาที่เหลือตกไป
-    เป็นของขั้น scrape แทนที่จะถูกทิ้ง
+    ทุกขั้นใช้ deadline ร่วมอันเดียว เวลาที่เหลือจากขั้นก่อนตกเป็นของขั้นถัดไป
     """
     deadline = time.monotonic() + OSINT_TOTAL_BUDGET_SECONDS
 
@@ -318,78 +365,84 @@ async def _collect_darkweb_evidence(question: str):
     queries = osint.plan_queries(question, selectors, max_queries=OSINT_MAX_QUERIES)
     logger.info("OSINT PLAN | selectors=%s | queries=%s", selectors.summary(), queries)
 
-    search_budget = min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
-    groups = await asyncio.gather(
-        *[
-            asyncio.to_thread(
-                search.get_search_results, q, None, search_budget, OSINT_SEARCH_RESULT_CAP
-            )
-            for q in queries
-        ],
-        return_exceptions=True,
+    groups, raw_total = await _run_search_round(
+        queries, min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
     )
-
-    clean_groups = []
-    for query, group in zip(queries, groups):
-        if isinstance(group, BaseException):
-            logger.warning("OSINT SEARCH FAILED | query=%r: %s", query, group)
-            continue
-        clean_groups.append(group)
-
-    raw_total = sum(len(g) for g in clean_groups)
-    ranked = osint.merge_and_rank(clean_groups, selectors, limit=OSINT_MAX_SOURCES)
+    ranked = osint.merge_and_rank(groups, selectors, limit=OSINT_MAX_SOURCES)
     if not ranked:
         logger.info("OSINT COLLECTION EMPTY | queries=%s raw=%d", queries, raw_total)
-        return None, {"sources": 0, "retrieved": 0, "on_target": 0, "gaps": 0,
-                      "iocs": 0, "corroborated_iocs": 0, "queries": queries}
+        return None, {"sources": 0, "retrieved": 0, "on_target": 0, "gaps": 0, "iocs": 0,
+                      "corroborated_iocs": 0, "identity_confirmed": 0, "identity_leads": 0,
+                      "queries": queries, "pivots": [], "rounds": 1}
 
-    # ---- จังหวะที่ 1: ยิงเฉพาะหัวตารางที่ตรงเป้าที่สุด ----
+    # ---- ดึงเนื้อหาชุดแรก (ตัวที่ตรงเป้าที่สุด) ----
     batch = ranked[: max(1, OSINT_SCRAPE_FIRST_BATCH)]
-    scraped = await asyncio.to_thread(
-        scrape.scrape_multiple, batch, OSINT_SCRAPE_WORKERS,
-        min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(batch),
+    scrape_passes = 0
+    sources, scraped, identity, did = await _scrape_and_assess(
+        batch, selectors, min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0))
     )
-    covered = batch
-    sources = osint.verify_sources(
-        osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
-    )
+    scrape_passes += 1 if did else 0
     verified = sum(1 for s in sources if s.on_target)
 
-    # ---- จังหวะที่ 2: ต่อเมื่อหลักฐานยังไม่พอ และยังมีเวลาเหลือจริง ----
-    remaining_sources = ranked[len(batch):]
-    if verified < OSINT_MIN_VERIFIED_SOURCES and remaining_sources and _left() > 8.0:
-        logger.info("OSINT SECOND PASS | verified=%d/%d ยิงต่ออีก %d แหล่ง",
-                    verified, OSINT_MIN_VERIFIED_SOURCES, len(remaining_sources))
-        more = await asyncio.to_thread(
-            scrape.scrape_multiple, remaining_sources, OSINT_SCRAPE_WORKERS,
-            min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(remaining_sources),
+    # ---- หลักฐานยังไม่พอ: ดึงแหล่งที่เหลือของรอบแรกต่อ ----
+    if verified < OSINT_MIN_VERIFIED_SOURCES and len(ranked) > len(batch) and _left() > 8.0:
+        logger.info("OSINT SECOND PASS | verified=%d/%d ดึงต่ออีก %d แหล่ง",
+                    verified, OSINT_MIN_VERIFIED_SOURCES, len(ranked) - len(batch))
+        sources, scraped, identity, did = await _scrape_and_assess(
+            ranked, selectors, min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), scraped
         )
-        scraped.update(more)
-        covered = ranked
-        sources = osint.verify_sources(
-            osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
-        )
+        scrape_passes += 1 if did else 0
         verified = sum(1 for s in sources if s.on_target)
-    else:
-        logger.info("OSINT SINGLE PASS | verified=%d แหล่ง ไม่ต้องยิงชุดที่สอง", verified)
+
+    # ---- รอบที่ 2: ค้นต่อจากตัวระบุที่เพิ่งเจอ ----
+    pivots: list = []
+    rounds = 1
+    if OSINT_PIVOT_ENABLED and _left() > OSINT_PIVOT_MIN_SECONDS:
+        pivots = osint.pivot_queries(
+            identity, selectors, already_used=queries, max_queries=OSINT_PIVOT_QUERIES
+        )
+        if pivots:
+            rounds = 2
+            logger.info("OSINT PIVOT | ค้นต่อด้วยตัวระบุที่เพิ่งเจอ: %s", pivots)
+            pivot_groups, pivot_raw = await _run_search_round(
+                pivots, min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
+            )
+            raw_total += pivot_raw
+            merged_ranked = osint.merge_and_rank(
+                groups + pivot_groups, selectors, limit=OSINT_MAX_SOURCES * 2
+            )
+            if _left() > 5.0:
+                sources, scraped, identity, did = await _scrape_and_assess(
+                    merged_ranked, selectors,
+                    min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), scraped,
+                )
+                scrape_passes += 1 if did else 0
+                verified = sum(1 for s in sources if s.on_target)
 
     ioc_index = osint.build_ioc_index(sources)
     osint.apply_corroboration(sources, ioc_index)
 
     stats = osint.collect_stats(sources, ioc_index)
+    stats.update(osint.identity_stats(identity))
     stats["queries"] = queries
-    stats["scraped_batches"] = 1 if covered is batch else 2
+    stats["pivots"] = pivots
+    stats["rounds"] = rounds
+    stats["scrape_passes"] = scrape_passes
+    stats["clearnet_sources"] = sum(1 for s in sources if s.origin == "clearnet")
+    stats["darkweb_sources"] = sum(1 for s in sources if s.origin == "darkweb")
+
     dossier = osint.build_dossier(
-        question, selectors, queries, sources, ioc_index,
+        question, selectors, queries + pivots, sources, ioc_index,
         max_chars=max(2000, gemini.RESEARCH_MAX_INPUT_CHARS - _DOSSIER_RESERVED_CHARS),
-        engines_total=raw_total,
+        engines_total=raw_total, identity=identity,
     )
     logger.info(
-        "OSINT COLLECTED | sources=%d retrieved=%d on_target=%d gaps=%d iocs=%d "
-        "corroborated=%d batches=%d dossier_chars=%d elapsed=%.1fs",
-        stats["sources"], stats["retrieved"], stats["on_target"], stats["gaps"],
-        stats["iocs"], stats["corroborated_iocs"], stats["scraped_batches"],
-        len(dossier), OSINT_TOTAL_BUDGET_SECONDS - _left(),
+        "OSINT COLLECTED | rounds=%d sources=%d (clearnet=%d darkweb=%d) retrieved=%d "
+        "on_target=%d identity_confirmed=%d leads=%d iocs=%d dossier_chars=%d elapsed=%.1fs",
+        rounds, stats["sources"], stats["clearnet_sources"], stats["darkweb_sources"],
+        stats["retrieved"], stats["on_target"], stats["identity_confirmed"],
+        stats["identity_leads"], stats["iocs"], len(dossier),
+        OSINT_TOTAL_BUDGET_SECONDS - _left(),
     )
     return dossier, stats
 
@@ -422,7 +475,7 @@ async def handle_request(
     if preset in {"personal_identity", "corporate_espionage"}:
         try:
             dossier, stats = await asyncio.wait_for(
-                _collect_darkweb_evidence(question), timeout=OSINT_TOTAL_BUDGET_SECONDS
+                _collect_osint_evidence(question), timeout=OSINT_TOTAL_BUDGET_SECONDS
             )
         except asyncio.TimeoutError:
             logger.warning("OSINT COLLECTION TIMEOUT | chat=%s budget=%.0fs",

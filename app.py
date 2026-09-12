@@ -828,7 +828,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     groups = await asyncio.gather(
         *[
-            search.get_search_results_async(
+            search.get_combined_results_async(
                 q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
             )
             for q in queries

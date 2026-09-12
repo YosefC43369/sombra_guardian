@@ -1,5 +1,4 @@
 import os
-import socket
 import time
 import asyncio
 import random
@@ -8,7 +7,7 @@ import threading
 import logging
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 
@@ -69,6 +68,17 @@ TOR_PROBE_TTL_SECONDS = nethealth.TOR_PROBE_TTL_SECONDS
 # บอกโมเดลให้ชัดว่าแหล่งนี้ดึงเนื้อหาไม่ได้ ไม่งั้น coordinator จะส่งแค่ "ชื่อเรื่อง"
 # เข้าไปใน [SCRAPED EVIDENCE] แล้วโมเดลเข้าใจผิดว่านั่นคือเนื้อหาที่ยืนยันได้
 CONTENT_UNAVAILABLE_MARKER = "[content unavailable]"
+
+# get_text() ทิ้ง href ทั้งหมด ลิงก์โปรไฟล์โซเชียลจึงหายไปก่อนถึงตัวสกัด IOC
+# ทั้งที่เป็นตัวเชื่อมตัวตนข้ามเว็บที่แข็งแรงที่สุดในงาน OSINT บุคคล
+# เก็บเฉพาะโฮสต์ที่เป็นตัวระบุตัวตนจริง ไม่เก็บลิงก์ทั่วไป เพื่อไม่ให้กินโควตา
+# ตัวอักษรของเนื้อหา (ดู osint._SOCIAL_PATTERNS ที่เป็นตัวอ่านปลายทาง)
+IDENTITY_LINK_HOSTS = (
+    "facebook.com", "fb.com", "twitter.com", "x.com", "instagram.com",
+    "linkedin.com", "tiktok.com", "github.com", "youtube.com", "youtu.be",
+    "t.me", "line.me", "pantip.com",
+)
+SCRAPE_MAX_IDENTITY_LINKS = _env_int("SCRAPE_MAX_IDENTITY_LINKS", 25)
 
 _thread_local = threading.local()
 
@@ -160,8 +170,46 @@ def get_tor_session():
     return _build_session(use_tor=True)
 
 
+def _identity_links(soup, base_url):
+    """ดึงเฉพาะลิงก์ที่เป็นตัวระบุตัวตน (โปรไฟล์โซเชียล, mailto:, tel:)
+
+    เก็บแบบเจาะจงแทนที่จะเก็บทุกลิงก์ เพราะหน้าเว็บหนึ่งหน้ามีลิงก์เป็นร้อย
+    ถ้าใส่หมดจะเบียดเนื้อหาจริงออกจากโควตาตัวอักษรที่ส่งให้โมเดล
+    """
+    found, seen = [], set()
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "javascript:")):
+            continue
+        if href.lower().startswith(("mailto:", "tel:")):
+            value = href.split(":", 1)[1].split("?")[0].strip()
+            if value and value not in seen:
+                seen.add(value)
+                found.append(value)
+        else:
+            try:
+                url = urljoin(base_url or "", href)
+            except ValueError:
+                continue
+            if not url.startswith(("http://", "https://")):
+                continue
+            host = (urlparse(url).hostname or "").lower()
+            host = host[4:] if host.startswith("www.") else host
+            if host not in IDENTITY_LINK_HOSTS:
+                continue
+            key = url.rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(url)
+        if len(found) >= SCRAPE_MAX_IDENTITY_LINKS:
+            break
+    return found
+
+
 def _extract_text(response):
-    """อ่านแบบ stream โดยไม่เกิน MAX_DOWNLOAD_BYTES แล้วถอดเป็นข้อความล้วน"""
+    """อ่านแบบ stream โดยไม่เกิน MAX_DOWNLOAD_BYTES แล้วถอดเป็นข้อความล้วน
+    พร้อมแนบลิงก์ที่ระบุตัวตนไว้ท้ายข้อความ (get_text() ทิ้ง href ทิ้งหมด)"""
     chunks = []
     bytes_read = 0
     for chunk in response.iter_content(chunk_size=8192):
@@ -180,7 +228,13 @@ def _extract_text(response):
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "template"]):
         tag.extract()
-    return ' '.join(soup.get_text(separator=' ').split())[:MAX_EXTRACTED_TEXT_CHARS]
+    text = ' '.join(soup.get_text(separator=' ').split())
+    links = _identity_links(soup, getattr(response, "url", "") or "")
+    if links:
+        # วางไว้หน้าสุดเพื่อให้รอดจากการตัดความยาว — ลิงก์ตัวตนมีค่าเชิงข่าวกรอง
+        # สูงกว่าหางของเนื้อหาหน้าเว็บ และมีจำนวนไม่มากอยู่แล้ว
+        text = "[ลิงก์ในหน้า] " + " ".join(links) + " [เนื้อหา] " + text
+    return text[:MAX_EXTRACTED_TEXT_CHARS]
 
 
 def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
