@@ -32,6 +32,7 @@ import logging
 import search
 import scrape
 import osint
+import username_osint
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
@@ -95,6 +96,10 @@ OSINT_PIVOT_MIN_SECONDS = _env_float("OSINT_PIVOT_MIN_SECONDS", 20)
 # ฝั่งที่จะค้น — เว็บเปิดคือที่ที่ข้อมูลตัวตนบุคคลอยู่จริง
 OSINT_INCLUDE_CLEARNET = _env_bool("OSINT_INCLUDE_CLEARNET", "true")
 OSINT_INCLUDE_DARKWEB = _env_bool("OSINT_INCLUDE_DARKWEB", "true")
+# ค้นบัญชีข้ามเว็บจากชื่อบัญชีที่เจอในรอบแรก (ใช้ฐานข้อมูลเว็บใน resource/data.json)
+OSINT_USERNAME_ENUM = _env_bool("OSINT_USERNAME_ENUM", "true")
+OSINT_USERNAME_MAX_HANDLES = _env_int("OSINT_USERNAME_MAX_HANDLES", 2)
+OSINT_USERNAME_BUDGET_SECONDS = _env_float("OSINT_USERNAME_BUDGET_SECONDS", 25)
 # เว้นที่ให้คำสั่งงาน + ข้อความกรอบ ก่อนถึงเพดาน prompt ของ gemini
 _DOSSIER_RESERVED_CHARS = 1500
 COORDINATOR_VERIFICATION_ENABLED = _env_bool("COORDINATOR_VERIFICATION_ENABLED", "true")
@@ -344,6 +349,60 @@ async def _scrape_and_assess(ranked, selectors, budget_seconds, scraped=None):
     return sources, scraped, identity, scraped_now
 
 
+def _handles_to_enumerate(identity, selectors, limit):
+    """ชื่อบัญชีที่ควรเอาไปค้นข้ามเว็บ — ที่ยืนยันแล้วมาก่อนเบาะแส"""
+    out, seen = [], set()
+    for link in list(identity.confirmed()) + list(identity.leads()):
+        if link.kind == "profile":
+            handle = link.value.split(":", 1)[-1]
+        elif link.kind == "handle":
+            handle = link.value
+        elif link.kind == "email":
+            handle = link.value.split("@", 1)[0]   # ชื่อบัญชีมักซ้ำกับส่วนหน้าอีเมล
+        else:
+            continue
+        key = handle.lower()
+        if key in seen or not username_osint.is_plausible_username(handle):
+            continue
+        seen.add(key)
+        out.append(handle)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _username_round(identity, selectors, budget_seconds):
+    """ค้นบัญชีชื่อเดียวกันข้ามเว็บ แล้วคืนผลในรูปแบบเดียวกับผลค้นหา
+
+    นี่คือส่วนที่หยิบความสามารถของ sites.py/checkings.py/maigret.py มาใช้จริง
+    ผลที่ได้ไหลเข้าท่อเดิมทั้งหมด (จัดอันดับ -> ดึงเนื้อหา -> ยืนยัน -> เชื่อมตัวตน)
+    จึงไม่มีการ "เชื่อว่าเป็นคนเดียวกัน" เพียงเพราะชื่อบัญชีตรงกัน
+    """
+    handles = _handles_to_enumerate(identity, selectors, OSINT_USERNAME_MAX_HANDLES)
+    if not handles:
+        return [], []
+
+    per_handle = max(6.0, budget_seconds / len(handles))
+    groups = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                username_osint.check_username_as_results, h, 0, per_handle, None
+            )
+            for h in handles
+        ],
+        return_exceptions=True,
+    )
+    clean = []
+    for handle, group in zip(handles, groups):
+        if isinstance(group, BaseException):
+            logger.warning("OSINT USERNAME FAILED | handle=%r: %s", handle, group)
+            continue
+        if group:
+            logger.info("OSINT USERNAME | %r เจอ %d เว็บ", handle, len(group))
+        clean.append(group)
+    return clean, handles
+
+
 async def _collect_osint_evidence(question: str):
     """เก็บหลักฐานตามวงจรข่าวกรอง แล้วคืน (dossier, stats)
 
@@ -395,29 +454,44 @@ async def _collect_osint_evidence(question: str):
         verified = sum(1 for s in sources if s.on_target)
 
     # ---- รอบที่ 2: ค้นต่อจากตัวระบุที่เพิ่งเจอ ----
+    # สองงานนี้เป็นอิสระจากกัน: ค้นซ้ำด้วย query ใหม่ กับ ค้นบัญชีชื่อเดียวกัน
+    # ข้ามเว็บ อย่างหลังต้องทำได้แม้ไม่มี query ใหม่ให้ยิง (เช่นเจอแต่โปรไฟล์)
     pivots: list = []
+    handles: list = []
+    pivot_groups: list = []
+    username_groups: list = []
     rounds = 1
+
     if OSINT_PIVOT_ENABLED and _left() > OSINT_PIVOT_MIN_SECONDS:
         pivots = osint.pivot_queries(
             identity, selectors, already_used=queries, max_queries=OSINT_PIVOT_QUERIES
         )
         if pivots:
-            rounds = 2
             logger.info("OSINT PIVOT | ค้นต่อด้วยตัวระบุที่เพิ่งเจอ: %s", pivots)
             pivot_groups, pivot_raw = await _run_search_round(
                 pivots, min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
             )
             raw_total += pivot_raw
-            merged_ranked = osint.merge_and_rank(
-                groups + pivot_groups, selectors, limit=OSINT_MAX_SOURCES * 2
+
+    if OSINT_USERNAME_ENUM and _left() > 10.0:
+        username_groups, handles = await _username_round(
+            identity, selectors, min(OSINT_USERNAME_BUDGET_SECONDS, _left(5.0))
+        )
+        raw_total += sum(len(g) for g in username_groups)
+
+    if pivot_groups or username_groups:
+        rounds = 2
+        merged_ranked = osint.merge_and_rank(
+            groups + pivot_groups + username_groups,
+            selectors, limit=OSINT_MAX_SOURCES * 2,
+        )
+        if _left() > 5.0:
+            sources, scraped, identity, did = await _scrape_and_assess(
+                merged_ranked, selectors,
+                min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), scraped,
             )
-            if _left() > 5.0:
-                sources, scraped, identity, did = await _scrape_and_assess(
-                    merged_ranked, selectors,
-                    min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), scraped,
-                )
-                scrape_passes += 1 if did else 0
-                verified = sum(1 for s in sources if s.on_target)
+            scrape_passes += 1 if did else 0
+            verified = sum(1 for s in sources if s.on_target)
 
     ioc_index = osint.build_ioc_index(sources)
     osint.apply_corroboration(sources, ioc_index)
@@ -427,6 +501,8 @@ async def _collect_osint_evidence(question: str):
     stats["queries"] = queries
     stats["pivots"] = pivots
     stats["rounds"] = rounds
+    stats["username_sources"] = sum(1 for s in sources if s.origin == "username")
+    stats["username_handles"] = handles
     stats["scrape_passes"] = scrape_passes
     stats["clearnet_sources"] = sum(1 for s in sources if s.origin == "clearnet")
     stats["darkweb_sources"] = sum(1 for s in sources if s.origin == "darkweb")
@@ -437,9 +513,10 @@ async def _collect_osint_evidence(question: str):
         engines_total=raw_total, identity=identity,
     )
     logger.info(
-        "OSINT COLLECTED | rounds=%d sources=%d (clearnet=%d darkweb=%d) retrieved=%d "
+        "OSINT COLLECTED | rounds=%d sources=%d (clearnet=%d darkweb=%d username=%d) retrieved=%d "
         "on_target=%d identity_confirmed=%d leads=%d iocs=%d dossier_chars=%d elapsed=%.1fs",
         rounds, stats["sources"], stats["clearnet_sources"], stats["darkweb_sources"],
+        stats["username_sources"],
         stats["retrieved"], stats["on_target"], stats["identity_confirmed"],
         stats["identity_leads"], stats["iocs"], len(dossier),
         OSINT_TOTAL_BUDGET_SECONDS - _left(),

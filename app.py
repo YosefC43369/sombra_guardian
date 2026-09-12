@@ -26,6 +26,7 @@ import detection
 import search
 import osint
 import nethealth
+import username_osint
 from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
@@ -849,6 +850,20 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         clean_groups.append(group)
 
+    # คำค้นที่เป็นชื่อบัญชี (เช่น /search thana_p) ให้ค้นข้ามเว็บจากฐานข้อมูล
+    # เว็บไซต์ใน resource/data.json ด้วย — ชื่อคนไทยจะไม่เข้าเงื่อนไขนี้
+    username_hits = []
+    handle = query.strip()
+    if username_osint.is_plausible_username(handle):
+        try:
+            username_hits = await username_osint.check_username_as_results_async(
+                handle, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
+            )
+        except Exception as e:
+            logger.warning(f"OSINT USERNAME FAILED | handle={handle!r}: {e}")
+        if username_hits:
+            clean_groups.append(username_hits)
+
     ranked = osint.merge_and_rank(
         clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP
     )
@@ -860,6 +875,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ซึ่งเป็นคนละข้อสรุปกันโดยสิ้นเชิงในเชิงข่าวกรอง
     cooling = nethealth.open_routes()
     health_bits = [f"Tor: {'ใช้งานได้' if nethealth.tor_reachable() else 'ไม่พร้อมใช้งาน'}"]
+    if username_hits:
+        health_bits.append(f"พบบัญชีชื่อเดียวกัน {len(username_hits)} เว็บ")
     if cooling:
         health_bits.append(f"เส้นทางที่พักอยู่: {', '.join(cooling)}")
     health_note = "สถานะการเก็บข้อมูล — " + " | ".join(health_bits)
@@ -3001,6 +3018,8 @@ _REQUIRED_MODULE_API = {
               "pivot_queries", "build_dossier", "format_search_report"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
+    "username_osint": ("load_sites", "check_username", "check_username_as_results",
+                       "check_username_as_results_async", "is_plausible_username"),
     "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
 }
 
@@ -3020,6 +3039,10 @@ def check_module_integrity() -> bool:
 
     if not missing:
         logger.info("MODULE CHECK: OK")
+        try:
+            logger.info("USERNAME DB: %s", username_osint.stats())
+        except Exception as e:
+            logger.warning("USERNAME DB: อ่านฐานข้อมูลเว็บไม่ได้ (%s)", e)
         return True
 
     for module_name, names in missing.items():
