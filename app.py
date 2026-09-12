@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import sys
@@ -17,6 +18,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters,
 )
@@ -79,6 +81,11 @@ import wallet as wt
 import wallet_report as wr
 
 import expense as ex
+
+import member_intel as mi
+import member_incident as mic
+import member_report as mrep
+
 import config
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -294,6 +301,68 @@ async def extract_media_from_message(message, context: ContextTypes.DEFAULT_TYPE
         
     return file_bytes, mime_type, None
         
+def _observe_member_from_update(update: Update, counts_as_message: bool = False,
+                                message_id=None):
+    """Feed one Telegram update into the member registry.
+
+    Deliberately wrapped in a broad try/except: member intelligence is
+    an observation layer, so a failure here (a locked database, a
+    malformed update) must never stop the moderation path that the group
+    actually depends on. The error is logged, not raised.
+
+    Passes username/display_name explicitly -- including None when the
+    account genuinely has no username, which is what lets
+    record_observation() tell "removed" apart from "not supplied"."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return None
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return None
+    try:
+        return mi.record_observation(
+            chat.id, user.id, username=user.username, display_name=user.full_name,
+            is_bot=bool(user.is_bot), counts_as_message=counts_as_message,
+            message_id=message_id,
+        )
+    except Exception:
+        logger.exception("MEMBER OBSERVE ERROR | chat=%s user=%s", chat.id, user.id)
+        return None
+
+
+def _record_member_action(chat_id, action, target_user_id=None, admin_user_id=None,
+                          reason="", message_id=None, executed=True, incident_id=None):
+    """Record a moderation action in the member audit trail.
+
+    `admin_user_id=None` means the bot acted automatically and is never
+    filled in with a guess; `executed=False` records an attempt that did
+    not take effect, so the log never claims an action succeeded when
+    Telegram refused it. Also non-fatal by design -- audit writing must
+    not be able to break moderation."""
+    try:
+        return mic.record_admin_action(
+            chat_id, action, target_user_id=target_user_id, admin_user_id=admin_user_id,
+            reason=reason, message_id=message_id, executed=executed,
+            incident_id=incident_id,
+        )
+    except Exception:
+        logger.exception("MEMBER ACTION LOG ERROR | chat=%s action=%s", chat_id, action)
+        return None
+
+
+def _add_member_timeline_event(chat_id, user_id, event_type, **kwargs):
+    """Guarded timeline write for the moderation path.
+
+    Same reasoning as _record_member_action: recording an observation
+    must never be able to break the delete/warn/mute the group relies
+    on, so a failure is logged rather than raised."""
+    try:
+        return mi.add_timeline_event(chat_id, user_id, event_type, **kwargs)
+    except Exception:
+        logger.exception("MEMBER TIMELINE ERROR | chat=%s user=%s", chat_id, user_id)
+        return None
+
+
 async def parse_duration(text: str):
     match = re.fullmatch(r"(\d+)(s|m|h|d)", text.strip().lower())
     if not match:
@@ -309,7 +378,11 @@ def contains_forbidden_word(text: str, words):
            return w
     return None
     
-async def apply_mute(update, context, target_user_id, seconds) -> bool:
+async def apply_mute(update, context, target_user_id, seconds, admin_user_id=None) -> bool:
+    """`admin_user_id` is the administrator who issued /mute, or None when
+    the bot muted automatically (warning threshold). It is passed through
+    to the audit trail exactly as given -- never substituted with the
+    command sender when the bot acted on its own."""
     chat = update.effective_chat
     until = int(time.time()) + seconds
     try:
@@ -320,9 +393,16 @@ async def apply_mute(update, context, target_user_id, seconds) -> bool:
             until_date=until,
        )
        logger.info(f"MUTE SUCCESS user={target_user_id} seconds={seconds}")
+       _record_member_action(chat.id, mic.AdminAction.MUTED,
+                             target_user_id=target_user_id, admin_user_id=admin_user_id,
+                             reason=f"seconds={seconds}", executed=True)
        return True
     except TelegramError as e:
         logger.info(f"MUTE ERROR: {e}")
+        # executed=False: the restriction did not actually take effect.
+        _record_member_action(chat.id, mic.AdminAction.MUTED,
+                              target_user_id=target_user_id, admin_user_id=admin_user_id,
+                              reason=f"seconds={seconds} error={e}", executed=False)
         await context.bot.send_message(chat.id, "Bot ไม่มีสิทธิ์ Restrict Members")
         return False
         
@@ -339,6 +419,12 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
     chat_id = update.effective_chat.id
     name = update.effective_user.first_name
     count = add_warning(chat_id, user_id)
+    # admin_user_id stays None: this warning came from the bot's own
+    # filters, not from an administrator issuing a command.
+    _record_member_action(chat_id, mic.AdminAction.WARNING, target_user_id=user_id,
+                          admin_user_id=None, reason=f"{reason} ({count}/{MAX_WARNINGS})")
+    _add_member_timeline_event(chat_id, user_id, mi.TimelineEvent.WARNING_ISSUED,
+                               detail=f"{count}/{MAX_WARNINGS} {reason}")
     await context.bot.send_message(chat_id, f"{reason} | {name} Warning {count}/{MAX_WARNINGS}")
     if count >= MAX_WARNINGS:
         can_delete, can_restrict = await check_bot_permissions(update, context)
@@ -380,7 +466,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
         "/debt [ชื่อ|unpaid|paid|all] - ดูรายการค้างชำระ\n"
         "/debt_summary [YYYY-MM] [ai] - สรุปยอดค้างชำระรายเดือน\n"
-        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM] - ปิดยอดชำระ (Admin)"
+        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM] - ปิดยอดชำระ (Admin)\n"
+        "\n— ระบบข้อมูลสมาชิก/เหตุการณ์/หลักฐาน (Admin ในกลุ่มเท่านั้น) —\n"
+        "/member <User ID|@user> - รายงานกิจกรรมสมาชิก (Reply ได้)\n"
+        "/memberhistory <เป้าหมาย> - ประวัติ username/ชื่อที่สังเกตได้\n"
+        "/memberrisk [เป้าหมาย] - คะแนนความเสี่ยง (ไม่ระบุ = อันดับในกลุ่ม)\n"
+        "/timeline <เป้าหมาย> [จำนวน] - ไทม์ไลน์เหตุการณ์ของสมาชิก\n"
+        "/incidents [open|สถานะ|ประเภท] - รายการเหตุการณ์\n"
+        "/incident <id> [status|note|case|verify] - รายละเอียด/จัดการเหตุการณ์\n"
+        "/incident open <CATEGORY> [SEVERITY] [สรุป] - เปิดเหตุการณ์ (Reply)\n"
+        "/evidence <id>|list|capture - คลังหลักฐาน (capture ใช้ Reply)\n"
+        "/verifyevidence <id> - ตรวจว่าหลักฐานถูกแก้ไขหรือไม่ (SHA-256)\n"
+        "/memberreport <เป้าหมาย> [json|csv] - รายงาน/ส่งออกข้อมูลสมาชิก\n"
+        "/memberreport audit [ชม.] - รายงานการดำเนินการของผู้ดูแล\n"
+        "/memberpatterns [นาที] [จำนวนบัญชี] - กิจกรรมที่สัมพันธ์กัน (ต้องตรวจสอบ)\n"
+        "/memberpurge [run|forget <เป้าหมาย>] - การเก็บ/ลบข้อมูลตามนโยบาย"
     )
     await update.message.reply_text(text)
     
@@ -466,7 +566,8 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not can_restrict:
         return await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
     target = update.message.reply_to_message.from_user
-    ok = await apply_mute(update, context, target.id, seconds)
+    ok = await apply_mute(update, context, target.id, seconds,
+                          admin_user_id=update.effective_user.id)
     if ok:
         await update.message.reply_text(f"🔇 Mute {target.first_name} เป็นเวลา {context.args[0]}")
 
@@ -481,10 +582,15 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_info = await context.bot.get_chat(chat.id)
         permissions = chat_info.permissions or ChatPermissions(can_send_messages=True)
         await context.bot.restrict_chat_member(chat.id, target.id, permissions=permissions)
+        _record_member_action(chat.id, mic.AdminAction.UNMUTED, target_user_id=target.id,
+                              admin_user_id=update.effective_user.id, executed=True)
         await update.message.reply_text(f"🔊 ปลด Mute {target.first_name} แล้ว")
         logger.info(f"UNMUTE SUCCESS user={target.id}")
     except TelegramError as e:
         logger.info(f"UNMUTE ERROR: {e}")
+        _record_member_action(chat.id, mic.AdminAction.UNMUTED, target_user_id=target.id,
+                              admin_user_id=update.effective_user.id,
+                              reason=f"error={e}", executed=False)
         await update.message.reply_text("❌ Bot ไม่มีสิทธิ์ Restrict Members")
         
 async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2741,6 +2847,823 @@ async def cmd_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (adjust/transactions)")
 
+# ---------------- Member Intelligence / Incident / Evidence (Phase 9) ----------------
+#
+# Every command here is administrator-only AND group-only. Group-only is
+# not cosmetic: is_admin() asks Telegram for the caller's status in
+# `effective_chat`, which in a private chat is the caller's own chat --
+# so a private-chat path would be asking the wrong question entirely.
+# Member intelligence is also inherently per-group data, so requiring a
+# group is the correct scope as well as the safe one.
+
+MEMBER_ADMIN_ONLY_TEXT = "❌ คำสั่งนี้ใช้ได้เฉพาะ Admin ของกลุ่ม"
+MEMBER_GROUP_ONLY_TEXT = "❌ คำสั่งนี้ใช้ได้ในกลุ่มเท่านั้น (ข้อมูลสมาชิกแยกตามกลุ่ม)"
+
+
+async def _require_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Gate for every member-intelligence command: must be a group, and
+    the caller must be a real Telegram administrator/owner of THAT group.
+    Reuses is_admin() -- there is no second, weaker admin check here and
+    no username-based or id-allowlist bypass anywhere in this family."""
+    chat = update.effective_chat
+    if chat is None or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await update.message.reply_text(MEMBER_GROUP_ONLY_TEXT)
+        return False
+    if not await is_admin(update, context):
+        await update.message.reply_text(MEMBER_ADMIN_ONLY_TEXT)
+        return False
+    return True
+
+
+async def _resolve_member_target(update: Update, args) -> tuple:
+    """Resolve the account a command is about, in priority order:
+      1. the replied-to message's sender (most reliable -- Telegram tells
+         us the id directly),
+      2. a numeric user id argument,
+      3. an @username, looked up in this chat's registry.
+
+    Returns (user_id, error_text). Username lookup is explicitly the
+    weakest form and says so when it fails: usernames change and are
+    reusable, so "not found" means "not observed under that name in this
+    chat", never "no such account"."""
+    message = update.effective_message
+    if message is not None and message.reply_to_message is not None:
+        sender = message.reply_to_message.from_user
+        if sender is not None:
+            return sender.id, None
+
+    if not args:
+        return None, ("ใช้งาน: Reply ข้อความของสมาชิก หรือระบุ User ID / @username\n"
+                      "เช่น /member 123456789 หรือ /member @someone")
+
+    token = str(args[0]).strip()
+    if token.lstrip("-").isdigit():
+        return int(token), None
+
+    # Anything left is treated as a username. Scoped to this chat, so an
+    # admin cannot resolve a name observed only in a different group.
+    chat_id = update.effective_chat.id
+    matches = [m for m in mi.find_members_by_username(token, limit=5)
+               if m["chat_id"] == chat_id]
+    if len(matches) == 1:
+        return matches[0]["user_id"], None
+    if len(matches) > 1:
+        ids = ", ".join(str(m["user_id"]) for m in matches)
+        return None, f"พบหลายบัญชีที่ใช้ชื่อนี้: {ids}\nให้ระบุ User ID โดยตรง"
+    historic = [h for h in mi.find_historic_username_holders(token, limit=10)
+                if h["chat_id"] == chat_id]
+    extra = ""
+    if historic:
+        ids = ", ".join(sorted({str(h["user_id"]) for h in historic}))
+        extra = f"\nเคยมีบัญชีที่ใช้ชื่อนี้ (จากประวัติที่สังเกตได้): {ids}"
+    return None, (f"ไม่พบบัญชีที่ใช้ชื่อ {token} ในกลุ่มนี้"
+                  f"\n(หมายถึง 'บอทไม่เคยเห็นชื่อนี้ในกลุ่มนี้' ไม่ใช่ 'ไม่มีบัญชีนี้')"
+                  f"{extra}")
+
+
+async def cmd_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Member Activity Report for one account in this group."""
+    if not await _require_group_admin(update, context):
+        return
+    user_id, error = await _resolve_member_target(update, context.args)
+    if error:
+        return await update.message.reply_text(error)
+    chat_id = update.effective_chat.id
+    data = mrep.get_member_activity_data(chat_id, user_id)
+    mic.record_admin_action(chat_id, mic.AdminAction.REPORT_GENERATED,
+                            target_user_id=user_id,
+                            admin_user_id=update.effective_user.id,
+                            reason="member activity report")
+    await _reply_chunked(update, mrep.format_member_activity_report(data))
+
+
+async def cmd_memberhistory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Observed username / display-name history for one account."""
+    if not await _require_group_admin(update, context):
+        return
+    user_id, error = await _resolve_member_target(update, context.args)
+    if error:
+        return await update.message.reply_text(error)
+    await _reply_chunked(
+        update, mrep.format_identity_history_report(update.effective_chat.id, user_id))
+
+
+async def cmd_memberrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Risk triage: one account when a target is given, otherwise the
+    group's highest-scoring accounts."""
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    message = update.effective_message
+    has_target = bool(context.args) or (message is not None
+                                        and message.reply_to_message is not None)
+    if not has_target:
+        data = mrep.get_member_risk_data(chat_id, top_n=10)
+        return await _reply_chunked(update, mrep.format_member_risk_report(data))
+
+    user_id, error = await _resolve_member_target(update, context.args)
+    if error:
+        return await update.message.reply_text(error)
+    # persist=True: a score an admin actually looked at is worth keeping,
+    # so a later decision can be explained even after the window rolls.
+    assessment = mi.assess_risk(chat_id, user_id, persist=True)
+    await _reply_chunked(update, mrep.format_single_risk_report(user_id, assessment))
+
+
+async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Chronological activity timeline for one account."""
+    if not await _require_group_admin(update, context):
+        return
+    args = list(context.args or [])
+    limit = 30
+    if args and args[-1].isdigit() and len(args) > 1:
+        limit = int(args.pop())
+    user_id, error = await _resolve_member_target(update, args)
+    if error:
+        return await update.message.reply_text(error)
+    await _reply_chunked(update, mrep.format_timeline_report(
+        update.effective_chat.id, user_id, limit=limit))
+
+
+async def cmd_incidents(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List incidents in this group. Optional filters: `open`, a status,
+    or a category."""
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    args = [a.strip().upper() for a in (context.args or [])]
+    open_only = "OPEN_ONLY" in args or "OPEN-ONLY" in args or "ACTIVE" in args
+    status = next((a for a in args if a in mic.VALID_INCIDENT_STATUSES), None)
+    category = next((a for a in args if a in mic.VALID_CATEGORIES), None)
+    incidents = mic.list_incidents(chat_id, status=status, category=category,
+                                   open_only=open_only, limit=20)
+    stats = mic.get_incident_stats(chat_id)
+    await _reply_chunked(update, mrep.format_incident_list(chat_id, incidents, stats))
+
+
+async def cmd_incident(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Incident detail and lifecycle actions.
+
+      /incident <id>                      -> full report
+      /incident <id> status <STATUS>      -> lifecycle transition
+      /incident <id> note <text>          -> investigator note
+      /incident <id> case <bb_case_id>    -> link an existing Case
+      /incident <id> verify               -> verify all attached evidence
+      /incident open <CATEGORY> [SEVERITY] [summary]  (reply) -> open one
+    """
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    args = list(context.args or [])
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/incident <id> — ดูรายงานเต็ม\n"
+            "/incident <id> status <OPEN|UNDER_REVIEW|CONFIRMED|DISMISSED|ARCHIVED>\n"
+            "/incident <id> note <ข้อความ>\n"
+            "/incident <id> case <bb_case_id>\n"
+            "/incident <id> verify — ตรวจความครบถ้วนของหลักฐานทั้งหมด\n"
+            "/incident open <CATEGORY> [SEVERITY] [สรุป] — Reply ข้อความเพื่อเปิดเหตุการณ์")
+
+    if args[0].lower() == "open":
+        return await _incident_open(update, context, args[1:])
+
+    if not args[0].lstrip("-").isdigit():
+        return await update.message.reply_text("ระบุหมายเลขเหตุการณ์เป็นตัวเลข เช่น /incident 12")
+    incident_id = int(args[0])
+    incident = mic.get_incident(incident_id)
+    if not incident:
+        return await update.message.reply_text(f"ไม่พบเหตุการณ์ #{incident_id}")
+    # An incident belongs to the group it was opened in. Without this an
+    # admin of group A could read group B's incident by guessing its id.
+    if incident["chat_id"] != chat_id:
+        return await update.message.reply_text(
+            f"เหตุการณ์ #{incident_id} ไม่ได้อยู่ในกลุ่มนี้")
+
+    if len(args) == 1:
+        bundle = mic.get_incident_bundle(incident_id, evidence_limit=20)
+        mic.record_admin_action(chat_id, mic.AdminAction.REPORT_GENERATED,
+                                target_user_id=incident["user_id"], admin_user_id=actor,
+                                incident_id=incident_id, reason="incident report")
+        return await _reply_chunked(update, mrep.format_incident_report(bundle))
+
+    action = args[1].lower()
+    rest = args[2:]
+
+    if action == "status":
+        if not rest:
+            return await update.message.reply_text(
+                "ระบุสถานะ: " + ", ".join(sorted(mic.VALID_INCIDENT_STATUSES)))
+        result = mic.update_incident_status(incident_id, rest[0], actor,
+                                           note=" ".join(rest[1:]))
+        if not result.ok:
+            return await update.message.reply_text(
+                f"❌ เปลี่ยนสถานะไม่ได้: {result.reason} {result.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ เหตุการณ์ #{incident_id}: {result.detail}")
+
+    if action == "note":
+        if not rest:
+            return await update.message.reply_text("ใช้งาน: /incident <id> note <ข้อความ>")
+        result = mic.add_incident_note(incident_id, actor, " ".join(rest))
+        if not result.ok:
+            return await update.message.reply_text(f"❌ บันทึกโน้ตไม่ได้: {result.reason}")
+        return await update.message.reply_text(f"✅ บันทึกโน้ตใน #{incident_id} แล้ว")
+
+    if action == "case":
+        if not rest or not rest[0].lstrip("-").isdigit():
+            return await update.message.reply_text("ใช้งาน: /incident <id> case <bb_case_id>")
+        result = mic.link_case(incident_id, int(rest[0]), actor)
+        if not result.ok:
+            return await update.message.reply_text(
+                f"❌ เชื่อม Case ไม่ได้: {result.reason} {result.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ เชื่อมเหตุการณ์ #{incident_id} กับ {result.detail} แล้ว")
+
+    if action == "verify":
+        summary = mic.verify_incident_evidence(incident_id, actor_user_id=actor)
+        lines = [f"🔐 ตรวจความครบถ้วนของหลักฐานในเหตุการณ์ #{incident_id}", "",
+                 f"ตรวจทั้งหมด: {summary['checked']} รายการ",
+                 f"  ✅ ไม่ถูกแก้ไข: {summary['intact']}",
+                 f"  ❌ ถูกแก้ไข: {summary['mismatched']}",
+                 f"  ⚠️ ตรวจไม่ได้: {summary['failed']}"]
+        for item in summary["results"]:
+            mark = "✅" if item["match"] else ("❌" if item["ok"] else "⚠️")
+            lines.append(f"  {mark} EV#{item['evidence_id']} ({item['reason']})")
+        lines.append("")
+        lines.append(f"⚠️ {summary['disclaimer']}")
+        return await _reply_chunked(update, "\n".join(lines))
+
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {action}")
+
+
+async def _incident_open(update: Update, context: ContextTypes.DEFAULT_TYPE, args):
+    """Open an incident manually, optionally capturing the replied-to
+    message as its first evidence record."""
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน: /incident open <CATEGORY> [SEVERITY] [สรุป]\n"
+            "CATEGORY: " + ", ".join(sorted(mic.VALID_CATEGORIES)) + "\n"
+            "SEVERITY: " + ", ".join(sorted(mic.VALID_SEVERITIES)))
+    category = args[0].strip().upper()
+    if category not in mic.VALID_CATEGORIES:
+        return await update.message.reply_text(
+            "CATEGORY ไม่ถูกต้อง — ใช้: " + ", ".join(sorted(mic.VALID_CATEGORIES)))
+    rest = args[1:]
+    severity = mic.DEFAULT_SEVERITY
+    if rest and rest[0].strip().upper() in mic.VALID_SEVERITIES:
+        severity = rest.pop(0).strip().upper()
+    summary = " ".join(rest)
+
+    replied = update.effective_message.reply_to_message
+    if replied is None or replied.from_user is None:
+        return await update.message.reply_text(
+            "Reply ข้อความของสมาชิกที่ต้องการเปิดเหตุการณ์ให้ด้วย")
+    target = replied.from_user
+
+    # Make sure the account is in the registry before snapshotting names
+    # into the incident/evidence, so the snapshots are not blank.
+    mi.record_observation(chat_id, target.id, username=target.username,
+                          display_name=target.full_name, is_bot=bool(target.is_bot))
+    result = mic.create_incident(chat_id, target.id, category, opened_by=actor,
+                                 severity=severity, summary=summary,
+                                 trigger_rules="manual:admin", source="MANUAL")
+    if not result.ok:
+        return await update.message.reply_text(
+            f"❌ เปิดเหตุการณ์ไม่ได้: {result.reason} {result.detail}".strip())
+
+    evidence = mic.capture_evidence(
+        chat_id, target.id, kind=mic.EvidenceKind.MESSAGE.value,
+        incident_id=result.incident_id, message_id=replied.message_id,
+        content=replied.text or replied.caption,
+        username=target.username, display_name=target.full_name,
+        media_kind=_member_media_kind(replied),
+        media_file_unique_id=_member_media_unique_id(replied),
+        media_mime_type=_member_media_mime(replied),
+        media_size=_member_media_size(replied),
+        captured_by=actor,
+    )
+    text = (f"✅ เปิดเหตุการณ์ #{result.incident_id} ({category}/{severity}) "
+            f"กับ User ID {target.id}")
+    if evidence.ok:
+        text += f"\n📎 เก็บหลักฐาน EV#{evidence.evidence_id} (SHA-256 {evidence.sha256[:16]}…)"
+    else:
+        text += f"\n⚠️ เก็บหลักฐานไม่สำเร็จ: {evidence.reason}"
+    await update.message.reply_text(text)
+
+
+def _member_media_kind(message):
+    """Which media kind Telegram attached, or None. Metadata only -- no
+    media bytes are downloaded or stored by the evidence vault."""
+    if message is None:
+        return None
+    if message.photo:
+        return "photo"
+    if message.document:
+        return "document"
+    if message.video:
+        return "video"
+    if message.voice:
+        return "voice"
+    if message.audio:
+        return "audio"
+    if message.sticker:
+        return "sticker"
+    if message.animation:
+        return "animation"
+    return None
+
+
+def _member_media_obj(message):
+    if message is None:
+        return None
+    if message.photo:
+        return message.photo[-1]
+    for attr in ("document", "video", "voice", "audio", "sticker", "animation"):
+        obj = getattr(message, attr, None)
+        if obj:
+            return obj
+    return None
+
+
+def _member_media_unique_id(message):
+    """Telegram's file_unique_id. Stable per file, and deliberately NOT a
+    file_id: it cannot be used to download anything, so storing it keeps
+    the reference useful for correlation without retaining the content."""
+    obj = _member_media_obj(message)
+    return getattr(obj, "file_unique_id", None) if obj else None
+
+
+def _member_media_mime(message):
+    obj = _member_media_obj(message)
+    return getattr(obj, "mime_type", None) if obj else None
+
+
+def _member_media_size(message):
+    obj = _member_media_obj(message)
+    return getattr(obj, "file_size", None) if obj else None
+
+
+async def cmd_evidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Evidence vault.
+
+      /evidence <id>              -> evidence report + custody trail
+      /evidence list [incident_id]-> list evidence in this group
+      /evidence capture [incident_id] [note]  (reply) -> capture a message
+    """
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    args = list(context.args or [])
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/evidence <id> — ดูรายงานหลักฐาน\n"
+            "/evidence list [incident_id] — ดูรายการหลักฐาน\n"
+            "/evidence capture [incident_id] [หมายเหตุ] — Reply ข้อความเพื่อเก็บเป็นหลักฐาน\n"
+            "/verifyevidence <id> — ตรวจว่าหลักฐานถูกแก้ไขหรือไม่")
+
+    sub = args[0].lower()
+
+    if sub == "capture":
+        return await _evidence_capture(update, context, args[1:])
+
+    if sub == "list":
+        incident_id = int(args[1]) if len(args) > 1 and args[1].lstrip("-").isdigit() else None
+        if incident_id is not None:
+            incident = mic.get_incident(incident_id)
+            if not incident or incident["chat_id"] != chat_id:
+                return await update.message.reply_text(
+                    f"ไม่พบเหตุการณ์ #{incident_id} ในกลุ่มนี้")
+        records = mic.list_evidence(incident_id=incident_id, chat_id=chat_id, limit=20)
+        if not records:
+            return await update.message.reply_text("ยังไม่มีหลักฐานที่ตรงเงื่อนไข")
+        lines = ["📎 รายการหลักฐาน", ""]
+        for row in records:
+            lines.append(
+                f"• EV#{row['evidence_id']} | {row['kind']} | User {row['user_id']} | "
+                f"incident={row.get('incident_id') or '-'} | "
+                f"sha256={row['sha256'][:16]}… | "
+                f"ตรวจล่าสุด={row.get('last_verify_result') or 'ยังไม่ตรวจ'}")
+        return await _reply_chunked(update, "\n".join(lines))
+
+    if not sub.lstrip("-").isdigit():
+        return await update.message.reply_text("ระบุหมายเลขหลักฐานเป็นตัวเลข เช่น /evidence 5")
+    evidence_id = int(sub)
+    record = mic.get_evidence(evidence_id)
+    if not record or record["chat_id"] != chat_id:
+        return await update.message.reply_text(f"ไม่พบหลักฐาน EV#{evidence_id} ในกลุ่มนี้")
+    mic.mark_evidence_reviewed(evidence_id, actor, note="viewed via /evidence")
+    custody = mic.get_custody_trail(evidence_id=evidence_id, limit=mic.MAX_CUSTODY_ROWS)
+    await _reply_chunked(update, mrep.format_evidence_report(record, custody))
+
+
+async def _evidence_capture(update: Update, context: ContextTypes.DEFAULT_TYPE, args):
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    replied = update.effective_message.reply_to_message
+    if replied is None or replied.from_user is None:
+        return await update.message.reply_text(
+            "Reply ข้อความที่ต้องการเก็บเป็นหลักฐานด้วย")
+
+    incident_id = None
+    rest = list(args)
+    if rest and rest[0].lstrip("-").isdigit():
+        incident_id = int(rest.pop(0))
+        incident = mic.get_incident(incident_id)
+        if not incident or incident["chat_id"] != chat_id:
+            return await update.message.reply_text(
+                f"ไม่พบเหตุการณ์ #{incident_id} ในกลุ่มนี้")
+    note = " ".join(rest)
+
+    target = replied.from_user
+    mi.record_observation(chat_id, target.id, username=target.username,
+                          display_name=target.full_name, is_bot=bool(target.is_bot))
+    result = mic.capture_evidence(
+        chat_id, target.id, kind=mic.EvidenceKind.MESSAGE.value,
+        incident_id=incident_id, message_id=replied.message_id,
+        content=replied.text or replied.caption,
+        username=target.username, display_name=target.full_name,
+        media_kind=_member_media_kind(replied),
+        media_file_unique_id=_member_media_unique_id(replied),
+        media_mime_type=_member_media_mime(replied),
+        media_size=_member_media_size(replied),
+        captured_by=actor, meta={"admin_note": note} if note else None,
+    )
+    if not result.ok:
+        return await update.message.reply_text(
+            f"❌ เก็บหลักฐานไม่ได้: {result.reason} {result.detail}".strip())
+    text = (f"📎 เก็บหลักฐาน EV#{result.evidence_id} แล้ว\n"
+            f"บัญชี: User ID {target.id}\n"
+            f"SHA-256: {result.sha256}")
+    if incident_id:
+        text += f"\nผูกกับเหตุการณ์ #{incident_id}"
+    if not mi.STORE_MESSAGE_CONTENT:
+        text += ("\n⚠️ ตั้งค่า MEMBER_STORE_MESSAGE_CONTENT ปิดอยู่ — "
+                 "บันทึกเฉพาะข้อมูลโครงสร้าง ไม่เก็บเนื้อหาข้อความ")
+    await update.message.reply_text(text)
+
+
+async def cmd_verifyevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Integrity check for one evidence record."""
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    args = list(context.args or [])
+    if not args or not args[0].lstrip("-").isdigit():
+        return await update.message.reply_text("ใช้งาน: /verifyevidence <evidence_id>")
+    evidence_id = int(args[0])
+    record = mic.get_evidence(evidence_id)
+    if not record or record["chat_id"] != chat_id:
+        return await update.message.reply_text(f"ไม่พบหลักฐาน EV#{evidence_id} ในกลุ่มนี้")
+    result = mic.verify_evidence(evidence_id, actor_user_id=update.effective_user.id)
+    await _reply_chunked(update, mrep.format_integrity_result(evidence_id, result))
+
+
+async def cmd_memberreport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reports and exports.
+
+      /memberreport <target>            -> member activity report (text)
+      /memberreport <target> json       -> JSON export (file)
+      /memberreport <target> csv        -> timeline CSV (file)
+      /memberreport audit [hours]       -> admin audit report
+      /memberreport incidents csv       -> incident CSV (file)
+      /memberreport evidence csv [incident_id] -> evidence CSV (file)
+    """
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    args = list(context.args or [])
+
+    if args and args[0].lower() == "audit":
+        hours = int(args[1]) if len(args) > 1 and args[1].isdigit() else 168
+        since = int(time.time()) - hours * 3600
+        actions = mic.list_admin_actions(chat_id, limit=50, since=since)
+        return await _reply_chunked(
+            update, mrep.format_admin_audit_report(chat_id, actions, hours=hours))
+
+    if args and args[0].lower() == "incidents":
+        payload = mrep.export_incident_csv(chat_id)
+        mic.record_admin_action(chat_id, mic.AdminAction.EVIDENCE_EXPORTED,
+                                admin_user_id=actor, reason="incident csv export")
+        return await _send_member_export(update, payload, f"incidents_{chat_id}.csv")
+
+    if args and args[0].lower() == "evidence":
+        incident_id = None
+        for token in args[1:]:
+            if token.lstrip("-").isdigit():
+                incident_id = int(token)
+                break
+        if incident_id is not None:
+            incident = mic.get_incident(incident_id)
+            if not incident or incident["chat_id"] != chat_id:
+                return await update.message.reply_text(
+                    f"ไม่พบเหตุการณ์ #{incident_id} ในกลุ่มนี้")
+        records = mic.list_evidence(incident_id=incident_id, chat_id=chat_id,
+                                    limit=mrep.MAX_EXPORT_ROWS)
+        payload = mrep.export_evidence_csv(chat_id, incident_id=incident_id)
+        mic.mark_evidence_exported([r["evidence_id"] for r in records], actor,
+                                   destination="telegram_csv")
+        return await _send_member_export(update, payload, f"evidence_{chat_id}.csv")
+
+    fmt = None
+    if args and args[-1].lower() in ("json", "csv"):
+        fmt = args.pop().lower()
+    user_id, error = await _resolve_member_target(update, args)
+    if error:
+        return await update.message.reply_text(error)
+
+    if fmt == "json":
+        payload = mrep.export_member_json(chat_id, user_id)
+        mic.record_admin_action(chat_id, mic.AdminAction.EVIDENCE_EXPORTED,
+                                target_user_id=user_id, admin_user_id=actor,
+                                reason="member json export")
+        return await _send_member_export(update, payload, f"member_{user_id}.json")
+    if fmt == "csv":
+        payload = mrep.export_timeline_csv(chat_id, user_id)
+        mic.record_admin_action(chat_id, mic.AdminAction.EVIDENCE_EXPORTED,
+                                target_user_id=user_id, admin_user_id=actor,
+                                reason="member timeline csv export")
+        return await _send_member_export(update, payload, f"timeline_{user_id}.csv")
+
+    data = mrep.get_member_activity_data(chat_id, user_id)
+    mic.record_admin_action(chat_id, mic.AdminAction.REPORT_GENERATED,
+                            target_user_id=user_id, admin_user_id=actor,
+                            reason="member report")
+    await _reply_chunked(update, mrep.format_member_activity_report(data))
+
+
+async def _send_member_export(update: Update, payload: str, filename: str) -> None:
+    """Send an export as a document. A document keeps the export intact
+    (Telegram's 4096-char message limit would otherwise split a CSV mid
+    row) and keeps untrusted content out of the message body."""
+    data = payload.encode("utf-8")
+    try:
+        await update.message.reply_document(document=io.BytesIO(data), filename=filename,
+                                            caption=f"📄 {filename} ({len(data)} bytes)")
+    except TelegramError as e:
+        logger.info(f"MEMBER EXPORT SEND ERROR: {e}")
+        await _reply_chunked(update, payload[:3500])
+
+
+async def cmd_memberpatterns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Correlated-activity report. Correlation only -- never an assertion
+    that accounts belong to the same person."""
+    if not await _require_group_admin(update, context):
+        return
+    args = list(context.args or [])
+    window = None
+    min_accounts = None
+    if args and args[0].isdigit():
+        window = int(args[0]) * 60  # minutes
+    if len(args) > 1 and args[1].isdigit():
+        min_accounts = int(args[1])
+    data = mi.find_correlated_activity(update.effective_chat.id, window_seconds=window,
+                                       min_accounts=min_accounts, limit=10)
+    await _reply_chunked(update, mrep.format_pattern_report(data))
+
+
+async def cmd_memberpurge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Data governance.
+
+      /memberpurge              -> show retention settings (no deletion)
+      /memberpurge run          -> apply configured retention now
+      /memberpurge forget <target> -> erase this module's records for one
+                                      account in this group
+
+    `forget` deliberately does not delete incidents, evidence or the
+    chain of custody: those justify administrative actions already taken,
+    and silently destroying them would break the audit trail. The command
+    says so rather than implying a full erasure."""
+    if not await _require_group_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    actor = update.effective_user.id
+    args = list(context.args or [])
+    settings = mi.retention_settings()
+
+    if not args:
+        lines = ["🗂️ การเก็บรักษาข้อมูลสมาชิก (ตั้งค่าผ่าน environment)", "",
+                 f"• ไทม์ไลน์/ลายนิ้วมือข้อความ: {settings['timeline_days']} วัน",
+                 f"• ประวัติตัวตน: {settings['identity_days']} วัน",
+                 f"• ประวัติเข้า/ออก: {settings['join_days']} วัน",
+                 f"• สแนปช็อตความเสี่ยง: {settings['risk_snapshot_days']} วัน",
+                 "  (0 = เก็บไม่จำกัด ซึ่งเป็นค่าเริ่มต้น)", "",
+                 f"• เก็บเนื้อหาข้อความเป็นหลักฐาน: "
+                 f"{'เปิด' if settings['store_message_content'] else 'ปิด'} "
+                 f"(MEMBER_STORE_MESSAGE_CONTENT)", "",
+                 "/memberpurge run — ลบข้อมูลที่เกินกำหนดเก็บทันที",
+                 "/memberpurge forget <User ID|@username> — ลบบันทึกของบัญชีนั้นในกลุ่มนี้"]
+        return await _reply_chunked(update, "\n".join(lines))
+
+    sub = args[0].lower()
+
+    if sub == "run":
+        deleted = mi.purge_expired(chat_id=chat_id, actor_user_id=actor)
+        mic.record_admin_action(chat_id, mic.AdminAction.DATA_PURGED,
+                                admin_user_id=actor, reason="retention purge")
+        if not deleted:
+            return await update.message.reply_text(
+                "ไม่มีข้อมูลที่ถึงกำหนดลบ (หรือยังไม่ได้ตั้งระยะเวลาเก็บ — ค่า 0 = เก็บไม่จำกัด)")
+        body = "\n".join(f"• {table}: {n} แถว" for table, n in sorted(deleted.items()) if n)
+        return await update.message.reply_text(
+            "🗑️ ลบข้อมูลที่เกินกำหนดเก็บแล้ว\n" + (body or "• ไม่มีแถวที่เข้าเงื่อนไข"))
+
+    if sub == "forget":
+        user_id, error = await _resolve_member_target(update, args[1:])
+        if error:
+            return await update.message.reply_text(error)
+        deleted = mi.forget_member(chat_id, user_id, actor_user_id=actor)
+        mic.record_admin_action(chat_id, mic.AdminAction.DATA_PURGED,
+                                target_user_id=user_id, admin_user_id=actor,
+                                reason="forget member records")
+        body = "\n".join(f"• {table}: {n} แถว" for table, n in sorted(deleted.items()))
+        return await _reply_chunked(update, (
+            f"🗑️ ลบบันทึกของ User ID {user_id} ในกลุ่มนี้แล้ว\n{body}\n\n"
+            "⚠️ ยังคงเก็บไว้โดยเจตนา: เหตุการณ์ (Incident), หลักฐาน, ห่วงโซ่การดูแลหลักฐาน "
+            "และ audit log — เพราะเป็นหลักฐานประกอบการดำเนินการที่ทำไปแล้ว "
+            "การลบทิ้งจะทำให้ตรวจย้อนหลังไม่ได้"))
+
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+# ---------------- Member Intelligence: automatic observation glue ----------------
+#
+# These three helpers are the ONLY place the moderation path opens an
+# incident. They are synchronous and wrapped in try/except on purpose:
+# an intelligence-layer failure must never stop a delete/warn/mute that
+# the group depends on. Each one captures the offending message BEFORE
+# the caller deletes it, because a snapshot cannot be taken afterwards.
+
+
+def _open_incident_from_detection(update: Update, worst, all_results):
+    """Open (or extend) a system incident from detection.py's results.
+
+    Category comes from member_incident's explicit detection_type map --
+    an unmapped type becomes OTHER_SECURITY_EVENT rather than being
+    guessed into PHISHING/SCAM. opened_by stays None because the bot
+    opened this, not an administrator."""
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+    if chat is None or user is None or message is None:
+        return None
+    try:
+        triggered = "; ".join(sorted({r.detection_type for r in all_results}))
+        result = mic.incident_from_detection(
+            chat.id, user.id, worst.detection_type, worst.severity,
+            reason=worst.reason, message_id=message.message_id,
+            content=message.text or message.caption,
+            username=user.username, display_name=user.full_name,
+        )
+        if result.ok and result.incident_id and triggered != worst.detection_type:
+            mic.add_incident_note(result.incident_id, user.id,
+                                  f"detection ทั้งหมดที่ตรวจพบ: {triggered}")
+        return result
+    except Exception:
+        logger.exception("MEMBER INCIDENT ERROR | chat=%s user=%s", chat.id, user.id)
+        return None
+
+
+def _open_incident_from_flood(update: Update, message):
+    """Incident for app.py's own anti-spam burst counter (separate from
+    detection.py's checks, so it is reported as FLOOD)."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return None
+    try:
+        return mic.incident_from_detection(
+            chat.id, user.id, "FLOOD", "medium",
+            reason=f"ส่งข้อความเกิน {SPAM_MESSAGE_LIMIT} ข้อความใน {SPAM_TIME_WINDOW} วินาที",
+            message_id=message.message_id if message else None,
+            content=(message.text or message.caption) if message else None,
+            username=user.username, display_name=user.full_name,
+        )
+    except Exception:
+        logger.exception("MEMBER INCIDENT ERROR (flood) | chat=%s user=%s", chat.id, user.id)
+        return None
+
+
+def _open_incident_from_forbidden_word(update: Update, message, matched_word):
+    """Incident for the forbidden-word filter.
+
+    The matched word is recorded as the triggering rule, not the whole
+    message body -- the message itself is captured as evidence, where
+    content retention is governed by MEMBER_STORE_MESSAGE_CONTENT."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return None
+    try:
+        return mic.incident_from_detection(
+            chat.id, user.id, "FORBIDDEN_WORD", "medium",
+            reason=f"พบคำต้องห้าม: {matched_word}",
+            message_id=message.message_id if message else None,
+            content=(message.text or message.caption) if message else None,
+            username=user.username, display_name=user.full_name,
+        )
+    except Exception:
+        logger.exception("MEMBER INCIDENT ERROR (word) | chat=%s user=%s", chat.id, user.id)
+        return None
+
+
+async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Observe join / leave / rejoin / restrict / ban / promote events.
+
+    This is the ONLY source of invite-link attribution available to a
+    bot, and only sometimes: Telegram populates
+    ChatMemberUpdated.invite_link for a join in limited circumstances
+    (the bot must be an administrator, and the link must be one it is
+    allowed to see). Joins through the public group username, through
+    another admin's link the bot cannot see, or by being added by an
+    existing member carry no link at all. Whatever Telegram supplies is
+    passed through verbatim; nothing is derived, and an absent link is
+    stored as NULL and reported as UNAVAILABLE -- never as "no invite
+    link was used".
+
+    `from_user` is the account that caused the transition. For a member
+    who joined or left by themselves it is that same member; for a
+    ban/restriction it is the administrator who did it. It is recorded as
+    the actor only because Telegram told us, never inferred."""
+    member_update = update.chat_member
+    if member_update is None:
+        return
+    chat = member_update.chat
+    if chat is None or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+
+    old = member_update.old_chat_member
+    new = member_update.new_chat_member
+    if new is None:
+        return
+    target = new.user
+    if target is None:
+        return
+
+    invite = member_update.invite_link
+    creator = getattr(invite, "creator", None) if invite else None
+
+    # Telegram models "restricted but no longer a member" as
+    # status=restricted with is_member=False. Reporting that as
+    # RESTRICTED would say the account is still present when it is not.
+    new_status = new.status
+    if new_status == ChatMemberStatus.RESTRICTED and getattr(new, "is_member", True) is False:
+        new_status = "left"
+    old_status = old.status if old is not None else None
+    if (old is not None and old.status == ChatMemberStatus.RESTRICTED
+            and getattr(old, "is_member", True) is False):
+        old_status = "left"
+
+    try:
+        result = mi.observe_membership_change(
+            chat.id, target.id, old_status, new_status,
+            username=target.username, display_name=target.full_name,
+            is_bot=bool(target.is_bot),
+            invite_link=getattr(invite, "invite_link", None),
+            invite_link_name=getattr(invite, "name", None),
+            invite_link_creator_id=getattr(creator, "id", None),
+            invite_link_creator_username=getattr(creator, "username", None),
+            via_join_request=bool(getattr(member_update, "via_join_request", False)),
+            via_chat_folder_link=bool(getattr(member_update, "via_chat_folder_link", False)),
+            actor_user_id=(member_update.from_user.id
+                           if member_update.from_user is not None else None),
+        )
+    except Exception:
+        logger.exception("MEMBER MEMBERSHIP OBSERVE ERROR | chat=%s user=%s",
+                         chat.id, target.id)
+        return
+
+    logger.info("MEMBERSHIP CHANGE | Chat ID: %s | User ID: %s | %s -> %s | invite: %s",
+                chat.id, target.id, result["old_status"], result["new_status"],
+                "yes" if result["invite_attribution_available"] else "unavailable")
+
+    # A ban or a restriction is a moderation action. Record it with the
+    # administrator Telegram identified -- and only when it differs from
+    # the target, since a member leaving on their own is not an
+    # administrative action against them.
+    actor = member_update.from_user.id if member_update.from_user is not None else None
+    admin_user_id = actor if (actor is not None and actor != target.id) else None
+    action = None
+    if result["new_status"] == mi.MembershipStatus.BANNED.value:
+        action = mic.AdminAction.BANNED
+    elif (result["old_status"] == mi.MembershipStatus.BANNED.value
+          and result["new_status"] in (mi.MembershipStatus.MEMBER.value,
+                                       mi.MembershipStatus.LEFT.value)):
+        action = mic.AdminAction.UNBANNED
+    elif result["new_status"] == mi.MembershipStatus.RESTRICTED.value:
+        action = mic.AdminAction.RESTRICTED
+    if action is not None:
+        _record_member_action(
+            chat.id, action, target_user_id=target.id, admin_user_id=admin_user_id,
+            reason=f"{result['old_status']} -> {result['new_status']}", executed=True)
+
+
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -2894,13 +3817,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
+        # Identity registry + message fingerprint, before detection runs:
+        # a message that is about to be deleted still needs its sender on
+        # record, and the fingerprint is what pattern analysis reads.
+        _observe_member_from_update(update, counts_as_message=True,
+                                    message_id=message.message_id)
+        try:
+            mi.record_message_pattern(chat.id, user.id, text,
+                                      message_id=message.message_id)
+        except Exception:
+            logger.exception("MEMBER PATTERN ERROR | chat=%s user=%s", chat.id, user.id)
+
         detection_results = detection.analyze_message(chat.id, user.id, text)
         if detection_results:
             worst = max(
                 detection_results,
                 key=lambda r: {"low": 0, "medium": 1, "high": 2}.get(r.severity, 0),
             )
-            await safe_delete(message, chat.id, context)
+            # Capture evidence and open/extend an incident BEFORE deleting:
+            # once the message is gone the snapshot cannot be taken, and the
+            # sender's username at this moment is what the record needs.
+            _open_incident_from_detection(update, worst, detection_results)
+            deleted = await safe_delete(message, chat.id, context)
+            _record_member_action(chat.id, mic.AdminAction.MESSAGE_DELETED,
+                                  target_user_id=user.id, admin_user_id=None,
+                                  reason=worst.reason, message_id=message.message_id,
+                                  executed=deleted)
+            _add_member_timeline_event(
+                chat.id, user.id,
+                mi.TimelineEvent.MESSAGE_REMOVED if deleted
+                else mi.TimelineEvent.SUSPICIOUS_MESSAGE,
+                message_id=message.message_id, detail=worst.reason)
             await apply_warning_and_maybe_mute(update, context, user.id, f"⚠️ {worst.reason}")
             return
     if await check_auto_reply(update, context, text):
@@ -2919,7 +3866,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dq.popleft()
         if len(dq) > SPAM_MESSAGE_LIMIT:
             logger.info(f"SPAM DETECTED | Chat ID: {chat.id} | User ID: {user.id}")
-            await safe_delete(message, chat.id, context)
+            _open_incident_from_flood(update, message)
+            deleted = await safe_delete(message, chat.id, context)
+            _record_member_action(chat.id, mic.AdminAction.MESSAGE_DELETED,
+                                  target_user_id=user.id, admin_user_id=None,
+                                  reason="anti-spam burst", message_id=message.message_id,
+                                  executed=deleted)
             await apply_warning_and_maybe_mute(update, context, user.id, "⚠️ ส่งข้อความเหี้ยไรบ่อยนักหนา ไอ้นรก")
             dq.clear()
             return
@@ -2933,7 +3885,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         matched = contains_forbidden_word(text, words)
         if matched:
             logger.info(f"MATCHED WORD: {matched}\nACTION: DELETE")
-            await safe_delete(message, chat.id, context)
+            _open_incident_from_forbidden_word(update, message, matched)
+            deleted = await safe_delete(message, chat.id, context)
+            _record_member_action(chat.id, mic.AdminAction.MESSAGE_DELETED,
+                                  target_user_id=user.id, admin_user_id=None,
+                                  reason="forbidden word", message_id=message.message_id,
+                                  executed=deleted)
             await apply_warning_and_maybe_mute(update, context, user.id, "🚫 ตรวจพบพวกลาบใช้คำต้องห้าม")
         else:
             logger.info("MATCHED WORD: NONE\nACTION: IGNORE")
@@ -3022,6 +3979,20 @@ _REQUIRED_MODULE_API = {
     "username_osint": ("load_sites", "check_username", "check_username_as_results",
                        "check_username_as_results_async", "is_plausible_username"),
     "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
+    "member_intel": ("member_intel_db_init", "record_observation",
+                     "observe_membership_change", "add_timeline_event", "get_timeline",
+                     "assess_risk", "get_member_profile", "find_correlated_activity",
+                     "record_message_pattern", "purge_expired", "forget_member"),
+    "member_incident": ("member_incident_db_init", "create_incident",
+                        "update_incident_status", "capture_evidence", "verify_evidence",
+                        "add_custody_event", "get_custody_trail", "record_admin_action",
+                        "incident_from_detection", "get_incident_bundle"),
+    "member_report": ("get_member_activity_data", "format_member_activity_report",
+                      "format_member_risk_report", "format_single_risk_report",
+                      "format_identity_history_report", "format_timeline_report",
+                      "format_incident_report", "format_evidence_report",
+                      "format_integrity_result", "format_admin_audit_report",
+                      "format_pattern_report", "export_member_json"),
 }
 
 
@@ -3094,6 +4065,12 @@ def main():
     findings_db_init()
     bb_case_db_init()
     security_testing_db_init()
+    # member_intel must init before member_incident: the incident layer's
+    # foreign-key-by-convention columns and the risk engine's
+    # CONFIRMED-incident signal both assume the registry's tables exist.
+    # member_report.py owns no tables and deliberately has no db_init.
+    mi.member_intel_db_init()
+    mic.member_incident_db_init()
     github_repo_db_init()
     dl.debt_ledger_db_init()
     wt.wallet_db_init()
@@ -3136,6 +4113,21 @@ def main():
     app.add_handler(CommandHandler("bbevidence", cmd_bbevidence))
     app.add_handler(CommandHandler("bbcase", cmd_bbcase))
     app.add_handler(CommandHandler("bbscan", cmd_bbscan))
+    # cmd_bbreport existed but was never registered, so /bbreport was
+    # unreachable and bb_report.py was dead code. Registered here with
+    # the rest of the reporting commands.
+    app.add_handler(CommandHandler("bbreport", cmd_bbreport))
+    app.add_handler(CommandHandler("member", cmd_member))
+    app.add_handler(CommandHandler("memberhistory", cmd_memberhistory))
+    app.add_handler(CommandHandler("memberrisk", cmd_memberrisk))
+    app.add_handler(CommandHandler("timeline", cmd_timeline))
+    app.add_handler(CommandHandler("incidents", cmd_incidents))
+    app.add_handler(CommandHandler("incident", cmd_incident))
+    app.add_handler(CommandHandler("evidence", cmd_evidence))
+    app.add_handler(CommandHandler("verifyevidence", cmd_verifyevidence))
+    app.add_handler(CommandHandler("memberreport", cmd_memberreport))
+    app.add_handler(CommandHandler("memberpatterns", cmd_memberpatterns))
+    app.add_handler(CommandHandler("memberpurge", cmd_memberpurge))
     app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(CommandHandler("sign", cmd_sign))
     app.add_handler(CommandHandler("debt", cmd_debt))
@@ -3151,6 +4143,12 @@ def main():
     app.add_handler(CommandHandler("debt_pay", cmd_debt_pay))
     app.add_handler(CommandHandler("wallet_admin", cmd_wallet_admin))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
+    # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
+    # members' join/leave/ban transitions and the only source of
+    # invite-link attribution. run_polling already requests
+    # Update.ALL_TYPES, which is required for chat_member to arrive.
+    app.add_handler(ChatMemberHandler(on_chat_member_update,
+                                      ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.CaptionRegex(IMAGINE_CAPTION_RE),

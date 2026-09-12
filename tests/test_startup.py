@@ -84,6 +84,39 @@ if booted is not None:
         check(f"/{want} ถูกลงทะเบียนตอนบูต", want in cmds, sorted(cmds))
     check("มี error handler ติดตั้งไว้", len(booted.error_handlers) >= 1)
 
+    # ---- 5. ระบบข้อมูลสมาชิก/เหตุการณ์/หลักฐาน ต่อเข้ากับบูตจริง ----
+    for want in ("member", "memberhistory", "memberrisk", "timeline", "incidents",
+                 "incident", "evidence", "verifyevidence", "memberreport",
+                 "memberpatterns", "memberpurge", "bbreport"):
+        check(f"/{want} ถูกลงทะเบียนตอนบูต", want in cmds, sorted(cmds))
+
+    # ไม่มีคำสั่งชนกัน — ถ้าชน python-telegram-bot จะเรียกตัวแรกเงียบๆ
+    all_cmds = []
+    for h in booted.handlers:
+        all_cmds.extend(getattr(h, "commands", None) or [])
+    dupes = sorted({c for c in all_cmds if all_cmds.count(c) > 1})
+    check("ไม่มีชื่อคำสั่งซ้ำกัน", not dupes, f"ซ้ำ: {dupes}")
+
+    # ChatMemberHandler คือทางเดียวที่บอทจะเห็นการเข้า/ออกกลุ่มของคนอื่น
+    # และเป็นแหล่งเดียวของข้อมูลลิงก์เชิญ
+    from telegram.ext import ChatMemberHandler
+    check("มี ChatMemberHandler สำหรับ join/leave/ban",
+          any(isinstance(h, ChatMemberHandler) for h in booted.handlers))
+
+# ---- 6. ตารางของโมดูลใหม่ถูกสร้างจริงตอน main() ----
+import sqlite3
+_conn = sqlite3.connect(os.path.join(WORK, "bot.db"))
+_tables = {r[0] for r in _conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+_conn.close()
+for _t in ("mi_members", "mi_identity_history", "mi_timeline", "mi_join_events",
+           "mi_risk_snapshots", "mi_message_patterns", "mi_incidents",
+           "mi_incident_notes", "mi_evidence", "mi_custody", "mi_admin_actions"):
+    check(f"ตาราง {_t} ถูกสร้างตอนบูต", _t in _tables, sorted(_tables))
+
+# ตารางเดิมต้องยังอยู่ — init ใหม่ต้องไม่ไปแตะของเดิม
+for _t in ("security_events", "user_behavior", "audit_log", "bb_findings", "bb_cases"):
+    check(f"ตารางเดิม {_t} ยังอยู่", _t in _tables, sorted(_tables))
+
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL: print("FAILED:", FAIL)
 sys.exit(1 if FAIL else 0)
