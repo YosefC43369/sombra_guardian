@@ -1,163 +1,290 @@
-# Telegram Group Moderation Bot
+<h1 align="center">🛡️ Sombra Guardian</h1>
 
-บอทดูแลกลุ่ม Telegram ขนาดเล็ก-กลาง: กรองคำต้องห้าม, ระบบ Warning, Mute/Unmute, Anti-Spam
+<p align="center">
+  <b>บอทดูแลกลุ่ม Telegram แบบครบวงจร — กันสแปม · ผู้ช่วย AI · OSINT · สืบสวนเหตุการณ์ · เก็บหลักฐาน · การเงินกลุ่ม</b><br>
+  <sub>An all-in-one Telegram group guardian: moderation, AI assistant, OSINT, incident investigation, evidence vault, and group finance.</sub>
+</p>
 
-## Features
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/python--telegram--bot-22.8-2CA5E0?logo=telegram&logoColor=white" alt="python-telegram-bot 22.8">
+  <img src="https://img.shields.io/badge/version-0.6.5-success" alt="version 0.6.5">
+  <img src="https://img.shields.io/badge/deploy-Docker%20%7C%20Render-informational?logo=docker&logoColor=white" alt="deploy">
+  <img src="https://img.shields.io/badge/tests-1000%2B%20passing-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/stdlib--first-no%20heavy%20deps-orange" alt="stdlib-first">
+</p>
 
-- Forbidden Word Filter (ไทย/อังกฤษ) เปิด/ปิดได้ พร้อมจัดการรายการคำ
-- Warning System (ค่าเริ่มต้น 3 Warning = Mute 10 นาที)
-- Mute/Unmute ด้วยการ Reply ข้อความ รองรับเวลา `10s 10m 1h 1d`
-- Basic Anti-Spam (ค่าเริ่มต้น 5 ข้อความ / 10 วินาที)
-- ตรวจสอบสิทธิ์ Admin จริงผ่าน Telegram (ไม่ใช้ Username)
-- Debug Log ละเอียดสำหรับ Render Logs
+---
 
-## Installation
+## 📖 เกี่ยวกับ (About)
+
+**Sombra Guardian** เป็นบอทดูแลกลุ่ม Telegram ที่รวมงานหลายด้านไว้ในตัวเดียว โดยยึดหลัก
+**"เก็บเฉพาะข้อมูลที่ Telegram Bot API ให้บอทได้จริง"** และ **"แยกข้อเท็จจริงออกจากการวิเคราะห์เสมอ"**
+
+โมดูลส่วนใหญ่เขียนด้วย **Python standard library ล้วน** (sqlite3, hashlib, re) — ไม่มี framework หนัก,
+ไม่มี background thread, ทุกอย่างทำงานได้บน **Render Background Worker** หรือ **Docker** ตัวเล็ก ๆ
+
+> ⚠️ บอทนี้มีความสามารถด้าน OSINT และการทดสอบความปลอดภัย ใช้ได้เฉพาะงานที่ได้รับอนุญาตเท่านั้น —
+> อ่านหัวข้อ [Disclaimer](#-disclaimer) ก่อนใช้งาน
+
+---
+
+## 📑 สารบัญ (Summary)
+
+- [Features](#-features)
+- [Installation](#-installation)
+- [BotFather &amp; Group Setup](#-botfather--group-setup)
+- [Configuration](#-configuration)
+- [Usage — Commands](#-usage--commands)
+- [Architecture](#-architecture)
+- [Security &amp; Privacy](#-security--privacy)
+- [Testing](#-testing)
+- [Disclaimer](#-disclaimer)
+- [Credits](#-credits)
+
+---
+
+## ✨ Features
+
+| ด้าน | ความสามารถ |
+|---|---|
+| 🛡️ **Moderation** | กรองคำต้องห้าม (ไทย/อังกฤษ), ระบบ Warning (3 ครั้ง → Mute), Anti-Spam, Anti-Flood, Anti-Link, Anti-Mention, normalize ข้อความหลบเลี่ยง |
+| 🧠 **Detection Engine** | ตรวจ burst, ข้อความซ้ำ, อีโมจิเกินจริง, ลิงก์/โดเมนต้องห้าม — แยกโมดูล ทำงานแบบ deterministic ไม่พึ่ง AI |
+| 🤖 **AI (Gemini/GPT)** | แท็กบอทเพื่อถามคำถาม, วิเคราะห์รูป/PDF/ไฟล์, สร้างรูปด้วย `/imagine`, คัดกรองสแปมด้วย AI (มีระบบโควตารายวัน) |
+| 👤 **Member Intelligence** | ทะเบียนสมาชิก, ประวัติชื่อ/username, ไทม์ไลน์กิจกรรม, คะแนนความเสี่ยงแบบอธิบายได้, วิเคราะห์รูปแบบที่สัมพันธ์กัน |
+| 🚨 **Incident & Evidence** | เปิดเหตุการณ์ตาม lifecycle, คลังหลักฐานพร้อม snapshot, ตรวจความครบถ้วนด้วย SHA-256, chain of custody, audit log ผู้ดูแล |
+| 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์ |
+| 🐞 **Bug Bounty / Sec Testing** | จัดการ Program/Authorization/Scope, บันทึก Finding/Evidence/Case, สแกนความปลอดภัยเฉพาะเป้าหมายที่ได้รับอนุญาต |
+| 📊 **Reporting** | Dashboard สรุปกลุ่ม, รายงานแยก 4 ส่วน (ข้อเท็จจริง / การวิเคราะห์ / การดำเนินการ / ข้อจำกัด), ส่งออก JSON/CSV |
+| 💰 **Group Finance** | บันทึกหนี้ (`/sign`), กระเป๋าเงิน, ฝาก/ถอน/โอน, บิล, ประวัติธุรกรรม |
+| 📰 **News** | ดึงข่าวความปลอดภัยจาก RSS แล้วสรุปด้วย AI ส่งเข้ากลุ่มอัตโนมัติ |
+| 🗂️ **GitHub Sandbox** | โคลน repo (เฉพาะ `github.com/<owner>/<repo>`) เข้า workspace แยกส่วนเพื่อรีวิว |
+
+---
+
+## 🚀 Installation
+
+### With Git (แนะนำสำหรับพัฒนา)
 
 ```bash
-git clone <your-repo-url>
-cd <your-repo>
+git clone https://github.com/YosefC43369/sombra_guardian.git
+cd sombra_guardian
+
 python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
 pip install -r requirements.txt
-cp .env.example .env       # ใส่ BOT_TOKEN ของคุณ
-python bot.py
+
+cp .env.example .env              # แล้วแก้ไขใส่ค่าจริง (ดูหัวข้อ Configuration)
+python app.py
 ```
 
-## BotFather Setup
+### With Docker
 
-1. เปิดแชท [@BotFather](https://t.me/BotFather) → พิมพ์ `/newbot`
-2. ตั้งชื่อบอทและ username ตามที่ต้องการ
-3. คัดลอก Token ที่ได้ไปใส่ในไฟล์ `.env`
-4. **สำคัญ**: พิมพ์ `/mybots` → เลือกบอท → `Bot Settings` → `Group Privacy` → กด `Turn off`
-   (ถ้าไม่ปิด บอทจะอ่านได้เฉพาะคำสั่ง `/command` เท่านั้น จะไม่เห็นข้อความทั่วไปของสมาชิก)
+```bash
+git clone https://github.com/YosefC43369/sombra_guardian.git
+cd sombra_guardian
+cp .env.example .env              # ใส่ค่าจริงก่อน build
 
-## Telegram Group Setup
+docker build -t sombra-guardian .
+docker run --env-file .env sombra-guardian
+```
 
-1. เพิ่มบอทเข้ากลุ่ม
-2. ตั้งบอทเป็น Admin พร้อมสิทธิ์ **Delete Messages** และ **Restrict Members**
-3. ทดสอบด้วย `/status` เพื่อยืนยันว่าบอทมีสิทธิ์ครบ
+> `docker-entrypoint.sh` จะเริ่ม Tor ให้อัตโนมัติ (สำหรับค้น dark web) แล้วจึงรันบอท
 
-## Environment Variables
-
-| ตัวแปร | ความหมาย |
-|---|---|
-| `BOT_TOKEN` | Token จาก @BotFather (ห้าม Commit ขึ้น GitHub) |
-
-### ตัวแปรของระบบข้อมูลสมาชิก (ไม่ตั้งก็ใช้ค่าเริ่มต้นได้)
-
-| ตัวแปร | ค่าเริ่มต้น | ความหมาย |
-|---|---|---|
-| `MEMBER_RISK_WINDOW_SECONDS` | `604800` (7 วัน) | ช่วงเวลาที่ใช้คิดคะแนนความเสี่ยง |
-| `MEMBER_RISK_MEDIUM_MIN` | `30` | คะแนนขั้นต่ำของระดับ MEDIUM |
-| `MEMBER_RISK_HIGH_MIN` | `70` | คะแนนขั้นต่ำของระดับ HIGH |
-| `MEMBER_STORE_MESSAGE_CONTENT` | `true` | เก็บเนื้อหาข้อความเป็นหลักฐานหรือไม่ (ปิดได้เพื่อความเป็นส่วนตัว) |
-| `MEMBER_EVIDENCE_CONTENT_MAX_CHARS` | `4000` | ความยาวเนื้อหาสูงสุดต่อหลักฐาน |
-| `MEMBER_AUTO_INCIDENT` | `true` | เปิดเหตุการณ์อัตโนมัติเมื่อระบบตรวจพบ |
-| `MEMBER_AUTO_INCIDENT_MIN_SEVERITY` | `medium` | ความรุนแรงขั้นต่ำที่เปิดเหตุการณ์อัตโนมัติ |
-| `MEMBER_AUTO_INCIDENT_DEDUPE_SECONDS` | `900` | รวมเหตุการณ์ซ้ำประเภทเดียวกันในช่วงนี้เป็นเหตุการณ์เดียว |
-| `MEMBER_PATTERN_WINDOW_SECONDS` | `3600` | ช่วงเวลาที่ใช้หากิจกรรมที่สัมพันธ์กัน |
-| `MEMBER_PATTERN_MIN_ACCOUNTS` | `3` | จำนวนบัญชีขั้นต่ำที่ถือว่าเป็นรูปแบบ |
-| `MEMBER_RETENTION_TIMELINE_DAYS` | `0` | วันเก็บไทม์ไลน์ (`0` = ไม่จำกัด) |
-| `MEMBER_RETENTION_IDENTITY_DAYS` | `0` | วันเก็บประวัติตัวตน (`0` = ไม่จำกัด) |
-| `MEMBER_RETENTION_JOIN_DAYS` | `0` | วันเก็บประวัติเข้า/ออก (`0` = ไม่จำกัด) |
-| `MEMBER_RETENTION_RISK_SNAPSHOT_DAYS` | `90` | วันเก็บสแนปช็อตคะแนนความเสี่ยง |
-
-## Render Deployment
+### On Render (Background Worker)
 
 1. Push โค้ดขึ้น GitHub
-2. เข้า [Render](https://render.com) → `New` → `Background Worker` (ใช้ Long Polling ไม่ต้องเปิด Port)
-3. เชื่อม GitHub Repository ที่สร้างไว้
-4. ตั้งค่า Service:
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python bot.py`
-5. ไปที่ `Environment` → เพิ่ม `BOT_TOKEN` = token ของคุณ
-6. กด `Deploy`
-7. เปิดแท็บ `Logs` → ต้องเห็น `BOT STARTING`, `DATABASE: OK`, `HANDLERS: OK`, `POLLING: STARTED`
-8. ทดสอบส่ง `/start` ในกลุ่ม
+2. Render → **New** → **Background Worker** (ใช้ Long Polling ไม่ต้องเปิดพอร์ต)
+3. **Build Command**: `pip install -r requirements.txt` · **Start Command**: `python app.py`
+4. เพิ่ม Environment Variables ตาม `.env.example`
+5. Deploy แล้วดู Logs ต้องเห็น `BOT STARTING`, `DATABASE: OK`, `HANDLERS: OK`, `POLLING: STARTED`
 
-## Commands
+---
+
+## 🤖 BotFather &amp; Group Setup
+
+1. เปิด [@BotFather](https://t.me/BotFather) → `/newbot` → ตั้งชื่อและ username → คัดลอก **Token**
+2. **สำคัญ**: `/mybots` → เลือกบอท → `Bot Settings` → `Group Privacy` → **Turn off**
+   *(ถ้าไม่ปิด บอทจะเห็นเฉพาะคำสั่ง `/command` ไม่เห็นข้อความทั่วไป — ระบบกันสแปมและ Member Intelligence จะไม่ทำงาน)*
+3. เพิ่มบอทเข้ากลุ่ม แล้วตั้งเป็น **Admin** พร้อมสิทธิ์ **Delete Messages** + **Restrict Members**
+   *(ถ้าไม่เป็น Admin บอทจะไม่ได้รับเหตุการณ์เข้า/ออกกลุ่ม และไม่มีข้อมูลลิงก์เชิญเลย)*
+4. ทดสอบด้วย `/status` เพื่อยืนยันสิทธิ์
+
+---
+
+## ⚙️ Configuration
+
+คัดลอก `.env.example` เป็น `.env` แล้วใส่ค่าจริง — **ห้าม commit `.env` ที่มีค่าจริงขึ้น git**
+(ไฟล์ `.env` ถูก ignore ไว้แล้ว ไฟล์ที่ track คือ `.env.example` ซึ่งเป็นเทมเพลตไม่มีความลับ)
+
+| ตัวแปรสำคัญ | ต้องมี | ความหมาย |
+|---|:---:|---|
+| `BOT_TOKEN` | ✅ | Token จาก @BotFather |
+| `GPT_API_KEY` | ⭕ | คีย์ AI (ปิดไว้ก็ได้ ระบบ deterministic ยังทำงานครบ) |
+| `GPT_MODEL` / `GPT_IMAGE_MODEL` | ⭕ | เลือกโมเดล AI / โมเดลสร้างรูป |
+| `TOR_SOCKS_HOST` / `TOR_SOCKS_PORT` | ⭕ | ปลายทาง Tor สำหรับค้น dark web |
+| `MEMBER_STORE_MESSAGE_CONTENT` | ⭕ | เก็บเนื้อหาข้อความเป็นหลักฐานหรือไม่ (ปิดเพื่อความเป็นส่วนตัว) |
+| `MEMBER_RISK_WINDOW_SECONDS` | ⭕ | ช่วงเวลาที่ใช้คิดคะแนนความเสี่ยง |
+| `MEMBER_RETENTION_*_DAYS` | ⭕ | ระยะเวลาเก็บข้อมูลแต่ละประเภท (`0` = ไม่จำกัด) |
+
+> รายการตัวแปรทั้งหมด (ข่าว, OSINT, quota, retention ฯลฯ) ดูได้ในไฟล์ `.env.example` ที่มีคำอธิบายทุกบรรทัด
+
+---
+
+## 💬 Usage — Commands
+
+### 🛡️ Moderation
 
 | คำสั่ง | สิทธิ์ | คำอธิบาย |
 |---|---|---|
-| `/start`, `/help` | ทุกคน | ข้อมูลเบื้องต้น |
-| `/status` | ทุกคน | สถานะบอทและสิทธิ์ |
-| `/filter_on`, `/filter_off` | Admin | เปิด/ปิดตัวกรองคำ |
-| `/addword <คำ>` | Admin | เพิ่มคำต้องห้าม |
-| `/delword <คำ>` | Admin | ลบคำต้องห้าม |
-| `/listwords` | ทุกคน | ดูรายการคำต้องห้าม |
-| `/warnings` (Reply) | Admin | ดู Warning ของสมาชิก |
-| `/resetwarn` (Reply) | Admin | รีเซ็ต Warning |
-| `/mute 10m` (Reply) | Admin | Mute สมาชิก |
-| `/unmute` (Reply) | Admin | ปลด Mute |
+| `/start` `/help` `/status` `/id` | ทุกคน | ข้อมูลบอท / สถานะสิทธิ์ / Chat ID |
+| `/filter_on` `/filter_off` | Admin | เปิด/ปิดตัวกรองคำ |
+| `/addword <คำ>` `/delword <คำ>` `/listwords` | Admin | จัดการคำต้องห้าม |
+| `/warnings` `/resetwarn` *(Reply)* | Admin | ดู/รีเซ็ต Warning |
+| `/mute 10m` `/unmute` *(Reply)* | Admin | ปิด/ปลดเสียง (รองรับ `s m h d`) |
+| `/announce <chat_id> <ข้อความ>` | Admin ของกลุ่มนั้น | ประกาศเข้ากลุ่ม (สั่งในแชทส่วนตัว) |
+| `/groupstats` `/dashboard` | Admin | สถิติกลุ่ม / สรุปความปลอดภัย |
 
-## ระบบข้อมูลสมาชิก / เหตุการณ์ / หลักฐาน
+### 🤖 AI
 
-ช่วยผู้ดูแลตอบคำถามว่า **บัญชีใดทำอะไร เมื่อไร มีหลักฐานอะไร และผู้ดูแลดำเนินการอะไรต่อ**
-โดยใช้เฉพาะข้อมูลที่ Telegram Bot API ให้บอทได้จริง
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `@ชื่อบอท <คำถาม>` | ถาม AI ในแชท (มีโควตารายวัน) |
+| ส่งรูป/PDF/TXT + แท็กบอท | ให้ AI วิเคราะห์ไฟล์/รูป |
+| `/imagine <คำอธิบาย>` | สร้างรูปด้วย AI |
 
-| คำสั่ง | สิทธิ์ | คำอธิบาย |
-|---|---|---|
-| `/member <User ID\|@user>` | Admin (ในกลุ่ม) | รายงานกิจกรรมสมาชิก (Reply ได้) |
-| `/memberhistory <เป้าหมาย>` | Admin (ในกลุ่ม) | ประวัติ username / ชื่อที่แสดงที่สังเกตได้ |
-| `/memberrisk [เป้าหมาย]` | Admin (ในกลุ่ม) | คะแนนความเสี่ยงพร้อมเหตุผล (ไม่ระบุ = อันดับในกลุ่ม) |
-| `/timeline <เป้าหมาย> [จำนวน]` | Admin (ในกลุ่ม) | ไทม์ไลน์เหตุการณ์เรียงตามเวลา |
-| `/incidents [open\|สถานะ\|ประเภท]` | Admin (ในกลุ่ม) | รายการเหตุการณ์ |
-| `/incident <id>` | Admin (ในกลุ่ม) | รายงานเหตุการณ์เต็ม + หลักฐาน + chain of custody |
-| `/incident <id> status <สถานะ>` | Admin (ในกลุ่ม) | เปลี่ยนสถานะตาม lifecycle |
-| `/incident <id> note\|case\|verify` | Admin (ในกลุ่ม) | เพิ่มโน้ต / เชื่อม Case / ตรวจหลักฐานทั้งหมด |
-| `/incident open <CATEGORY> [SEVERITY]` | Admin (ในกลุ่ม) | เปิดเหตุการณ์เอง (Reply ข้อความ) |
-| `/evidence <id>\|list\|capture` | Admin (ในกลุ่ม) | คลังหลักฐาน (`capture` ใช้ Reply) |
-| `/verifyevidence <id>` | Admin (ในกลุ่ม) | ตรวจ SHA-256 ว่าบันทึกหลักฐานถูกแก้ไขหรือไม่ |
-| `/memberreport <เป้าหมาย> [json\|csv]` | Admin (ในกลุ่ม) | รายงาน / ส่งออกเป็นไฟล์ |
-| `/memberreport audit [ชม.]` | Admin (ในกลุ่ม) | รายงานการดำเนินการของผู้ดูแล |
-| `/memberpatterns [นาที] [บัญชี]` | Admin (ในกลุ่ม) | กิจกรรมที่สัมพันธ์กัน (ต้องตรวจสอบเพิ่ม) |
-| `/memberpurge [run\|forget <เป้าหมาย>]` | Admin (ในกลุ่ม) | ดู/บังคับใช้นโยบายการเก็บข้อมูล |
+### 👤 Member Intelligence &amp; Incidents *(Admin ในกลุ่มเท่านั้น)*
 
-**ทุกคำสั่งใช้ได้เฉพาะผู้ดูแลจริงของกลุ่มนั้น และใช้ในกลุ่มเท่านั้น** — ข้อมูลแยกตามกลุ่ม
-ผู้ดูแลกลุ่ม A อ่านเหตุการณ์/หลักฐานของกลุ่ม B ไม่ได้แม้จะเดาหมายเลขถูก
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/member <User ID\|@user>` | รายงานกิจกรรมสมาชิก (Reply ได้) |
+| `/memberhistory <เป้าหมาย>` | ประวัติ username / ชื่อที่สังเกตได้ |
+| `/memberrisk [เป้าหมาย]` | คะแนนความเสี่ยงพร้อมเหตุผล (ไม่ระบุ = อันดับในกลุ่ม) |
+| `/timeline <เป้าหมาย>` | ไทม์ไลน์เหตุการณ์เรียงตามเวลา |
+| `/incidents [open\|สถานะ\|ประเภท]` | รายการเหตุการณ์ |
+| `/incident <id> [status\|note\|case\|verify]` | รายละเอียด/จัดการเหตุการณ์ |
+| `/incident open <CATEGORY> [SEVERITY]` | เปิดเหตุการณ์เอง (Reply) |
+| `/evidence <id>\|list\|capture` | คลังหลักฐาน (`capture` ใช้ Reply) |
+| `/verifyevidence <id>` | ตรวจ SHA-256 ว่าหลักฐานถูกแก้ไขหรือไม่ |
+| `/memberreport <เป้าหมาย> [json\|csv]` | รายงาน / ส่งออกไฟล์ |
+| `/memberreport audit [ชม.]` | รายงานการดำเนินการของผู้ดูแล |
+| `/memberpatterns [นาที] [บัญชี]` | กิจกรรมที่สัมพันธ์กัน (ต้องตรวจสอบเพิ่ม) |
+| `/memberpurge [run\|forget <เป้าหมาย>]` | นโยบายการเก็บ/ลบข้อมูล |
 
-### ต้องตั้งค่าใน Telegram เพิ่ม
+### 🔎 OSINT *(Admin)*
 
-- บอทต้องเป็น **ผู้ดูแลกลุ่ม** เพื่อรับเหตุการณ์ `chat_member` (เข้า/ออก/แบน) — ถ้าไม่เป็น
-  จะไม่เห็นการเข้า-ออกของสมาชิกและไม่มีข้อมูลลิงก์เชิญเลย
-- ต้องปิด **Group Privacy** ตามขั้นตอนด้านบน ไม่งั้นบอทเห็นแค่คำสั่ง `/command`
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/search <คำค้น\|อีเมล\|โดเมน\|@user\|BTC>` | ค้น OSINT เว็บเปิด + dark web |
+| `/identity <เป้าหมาย>` | วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล |
+| `/corporate <เป้าหมาย>` | วิเคราะห์ข้อมูลองค์กรที่รั่วไหล |
 
-### รายงานแยก 4 ส่วนเสมอ
+### 🐞 Bug Bounty &amp; Authorized Security Testing *(Admin)*
 
-ทุกรายงานแยกให้ชัดว่าอะไรคืออะไร ไม่ปนกัน:
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/bbprogram` `/bbauth` `/bbscope` | จัดการ Program / Authorization / Scope |
+| `/bbcheck` `/bbfinding` `/bbevidence` | ตรวจ scope / บันทึก Finding / Evidence |
+| `/bbcase` `/bbreport` | จัดการ Case / รายงานสรุป Program |
+| `/bbscan <program_id> <check_type> <target>` | สแกน **เฉพาะเป้าหมายที่ได้รับอนุญาตแล้ว** |
 
-1. **ข้อเท็จจริงที่สังเกตได้** — สิ่งที่บอทได้รับจาก Telegram จริง หรือทำเอง
-2. **การวิเคราะห์ของระบบ** — คะแนน/ระดับ/การจัดประเภท (ผู้ดูแลไม่เห็นด้วยได้)
-3. **การดำเนินการของผู้ดูแล** — ทำอะไรไปแล้ว โดยใคร
-4. **ข้อจำกัด / ข้อมูลที่ไม่มี** — สิ่งที่ระบบนี้รู้ไม่ได้ (มีทุกรายงาน ไม่มีการละ)
+### 💰 Finance &amp; 🗂️ GitHub
 
-### สิ่งที่ระบบนี้ทำไม่ได้ (Telegram Bot API ไม่ให้)
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/sign <ชื่อ> <จำนวน> [รายการ]` | บันทึกยอดค้างชำระ (Admin) |
+| `/debt` `/debt_summary` `/paid` | ดู/สรุป/ปิดยอดหนี้ |
+| `/wallet` `/deposit` `/withdraw` `/transfer` `/payment` `/bill` `/history` | กระเป๋าเงินกลุ่ม |
+| `/github clone\|status\|files\|cleanup\|list` | โคลน repo (`github.com` เท่านั้น) เข้า sandbox |
 
-- **ไม่มี IP address** — Bot API ไม่เคยให้ IP ของผู้ใช้ ระบบนี้จึงไม่เก็บและไม่เดา
-- ไม่มีเบอร์โทร อีเมล ข้อมูลอุปกรณ์ เวอร์ชันแอป ข้อมูลเซสชัน/การเข้าสู่ระบบ cookie หรือ token
-- ไม่มีรายชื่อสมาชิกทั้งกลุ่ม และไม่รู้ว่าผู้ใช้อยู่กลุ่มอื่นใด
-- ไม่มีข้อมูลย้อนหลังก่อนบอทเข้ากลุ่ม หรือช่วงที่บอทไม่ได้เป็นผู้ดูแล
-- **ข้อมูลลิงก์เชิญมีเฉพาะบางกรณี** ที่ Telegram ส่งมา — ไม่มีข้อมูลลิงก์ ≠ ไม่ได้ใช้ลิงก์
-- ไม่ยืนยันตัวตนในโลกจริงของเจ้าของบัญชี
-- **คะแนนความเสี่ยงไม่ใช่ข้อพิสูจน์** — เป็นเครื่องมือจัดลำดับการตรวจสอบเท่านั้น
-- **รูปแบบที่คล้ายกันไม่ใช่ข้อพิสูจน์ว่าเป็นคนเดียวกัน** — ระบบไม่สรุปเรื่องนี้ให้
-- แฮช SHA-256 บอกว่า "บันทึกถูกแก้ไขหรือไม่" ไม่ได้บอกว่าใครสร้างเนื้อหา
-- ไฟล์สื่อเก็บเฉพาะ `file_unique_id` + metadata ไม่ได้ดาวน์โหลดตัวไฟล์มาเก็บ
+---
 
-## Gemini AI
+## 🏗️ Architecture
 
-แท็กชื่อบอท (เช่น `@ชื่อบอทของคุณ`) ตามด้วยคำถามในแชท บอทจะส่งข้อความไปถาม Gemini แล้วตอบกลับในแชทเดียวกัน เช่น:
+โครงสร้างแบบ **หนึ่งโมดูล = หนึ่งความรับผิดชอบ** ใช้ SQLite ฐานเดียว (`bot.db`) และ audit log ร่วมกัน
 
-`@ชื่อบอทของคุณ วันนี้อากาศเป็นอย่างไร`
+| โมดูล | หน้าที่ |
+|---|---|
+| `app.py` | Entry point — Telegram handlers, การเชื่อมทุกโมดูล, initialization |
+| `security.py` | Security events, risk score, audit log (ฐานร่วมของทุกโมดูล) |
+| `detection.py` | Detection engine — spam / flood / link / mention / duplicate (deterministic) |
+| `analytics.py` · `dashboard.py` | สถิติกลุ่มระดับรวม / รายงานสรุป |
+| `member_intel.py` | ทะเบียนสมาชิก, ประวัติตัวตน, ไทม์ไลน์, ความเสี่ยง, invite tracking, pattern analysis |
+| `member_incident.py` | เหตุการณ์, คลังหลักฐาน, ความครบถ้วน (SHA-256), chain of custody, admin audit |
+| `member_report.py` | เรนเดอร์รายงานแยก 4 ส่วน + ส่งออก JSON/CSV (ไม่มีตารางเป็นของตัวเอง) |
+| `scope_policy.py` · `findings.py` · `bb_case.py` · `bb_report.py` | Bug bounty: authorization → finding → case → report |
+| `security_testing.py` | สแกนความปลอดภัยเฉพาะ scope ที่อนุญาต |
+| `search.py` · `scrape.py` · `osint.py` · `coordinator.py` · `username_osint.py` · `nethealth.py` | ชุด OSINT / ค้นหา / Tor routing |
+| `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
+| `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |
+| `gemini.py` · `quota.py` · `news.py` · `config.py` · `envutil.py` | AI, โควตา, ข่าว, config |
 
-**หมายเหตุ**: การถามผ่านการแท็กจะไม่ผ่านระบบ Anti-Spam เดิม (ทำงานแบบเดียวกับ Auto-Reply Trigger) หากมีคนแท็กถามรัว ๆ อาจใช้โควตา Gemini API สูงกว่าที่ตั้งใจไว้ — ถ้าต้องการจำกัดสามารถแจ้งให้ทำเพิ่มได้
+**หลักการ:** เพิ่มตารางด้วย `CREATE TABLE IF NOT EXISTS` เท่านั้น (ไม่มี destructive migration),
+ทุก query เป็น parameterized, ข้อความ/ชื่อของผู้ใช้ถือเป็น **ข้อมูล ไม่ใช่คำสั่ง**
 
-## Troubleshooting
+---
 
-- **Bot ไม่ตอบ**: ตรวจสอบ `BOT_TOKEN` ใน Render Environment และดูว่า Service กำลัง Running
-- **Bot ไม่เห็นข้อความ / ไม่มี `MESSAGE RECEIVED`**: ปิด Privacy Mode ผ่าน @BotFather ตามขั้นตอนด้านบน
-- **พบคำต้องห้ามแต่ไม่ลบ**: ดู Log ว่ามี `DELETE ERROR` หรือไม่ → มักเกิดจากบอทยังไม่ได้เป็น Admin
-- **Delete error: Forbidden**: บอทไม่ได้เป็น Admin หรือถูกถอดสิทธิ์ Delete Messages
-- **Bot ไม่มี Permission**: ให้สิทธิ์ Delete Messages และ Restrict Members ในตั้งค่ากลุ่ม
-- **Render Bot ไม่ทำงาน**: ตรวจสอบ Build/Start Command และดู Logs ว่า Error ตรงไหน
-- **Conflict: terminated by other getUpdates request**: มีบอทตัวเดียวกันรันซ้ำสองที่ (เช่นรันในเครื่องพร้อมกับ Render) ให้ปิดตัวใดตัวหนึ่ง
+## 🔒 Security &amp; Privacy
+
+- **ตรวจสิทธิ์ผ่าน Telegram จริง** — ทุกคำสั่งที่อ่อนไหวเช็ก `is_admin` กับ Telegram โดยตรง (ไม่ใช้ username), fail-closed เมื่อเช็กไม่ได้
+- **แยกตามกลุ่ม** — เหตุการณ์/หลักฐานผูกกับ `chat_id`; ผู้ดูแลกลุ่มหนึ่งอ่านข้อมูลอีกกลุ่มไม่ได้แม้เดาหมายเลขถูก
+- **SQL ปลอดภัย** — ทุก query แบบ parameterized, ไม่มีการต่อสตริงจาก input ของผู้ใช้
+- **โคลน repo แบบ allow-list** — รับเฉพาะ `https://github.com/<owner>/<repo>`, กัน `ext::`/`file://`/userinfo/SSRF, แยก workspace + จำกัดขนาด/เวลา
+- **หลักฐานตรวจสอบได้** — SHA-256 บอก "ถูกแก้ไขหรือไม่" (ไม่ได้บอกว่าใครสร้าง), chain of custody เป็น append-only
+- **Privacy-by-design** — เก็บเฉพาะข้อมูลที่ Telegram ให้จริง, เก็บเนื้อหาข้อความปิดได้, retention ตั้งค่าได้, มีคำสั่งลบ/ลืมข้อมูล
+- **ความลับไม่ขึ้น git** — `.env` ถูก ignore; commit เฉพาะ `.env.example` (ไม่มีความลับจริง)
+
+### ❌ สิ่งที่ระบบนี้ทำไม่ได้ (ข้อจำกัดของ Telegram Bot API)
+
+Telegram Bot API **ไม่ให้** และระบบนี้จึงไม่เก็บ/ไม่เดา:
+**IP address, เบอร์โทร, อีเมล, ข้อมูลอุปกรณ์, session/token, cookie**, รายชื่อสมาชิกทั้งกลุ่ม,
+กลุ่มอื่นที่ผู้ใช้อยู่, ข้อมูลย้อนหลังก่อนบอทเข้ากลุ่ม, และการยืนยันตัวตนในโลกจริง
+
+- **คะแนนความเสี่ยง** = เครื่องมือช่วยจัดลำดับตรวจสอบ ไม่ใช่ข้อพิสูจน์ความผิด
+- **รูปแบบที่คล้ายกัน** = "กิจกรรมที่สัมพันธ์กัน" ไม่ใช่ข้อสรุปว่าเป็นคนเดียวกัน
+- **ข้อมูลลิงก์เชิญ** มีเฉพาะบางกรณีที่ Telegram ส่งมา — "ไม่มีข้อมูล" ≠ "ไม่ได้ใช้ลิงก์"
+
+---
+
+## 🧪 Testing
+
+ชุดทดสอบเป็นสคริปต์ standalone (ตั้ง exit code เอง) และชุด unittest — รวมกว่า **1,000 tests** ไม่ต้องต่อเน็ต/Tor
+
+```bash
+# ชุดโมดูลหลัก (unittest)
+python test_member_intel.py
+python test_member_incident.py
+python test_mute_regression.py
+python -m unittest test_bb_report
+
+# ชุด OSINT / search / scrape ทั้งหมด
+python tests/run_all.py
+
+# จำลองการบูตจริงทั้ง main() (ยกเว้น run_polling)
+python tests/test_startup.py
+```
+
+---
+
+## ⚖️ Disclaimer
+
+Sombra Guardian มีไว้สำหรับ **การดูแลกลุ่ม, การกลั่นกรองเนื้อหา, การจัดทำเอกสารเหตุการณ์,
+การเก็บรักษาหลักฐาน, และการสืบสวน/รายงานที่ชอบด้วยกฎหมายเท่านั้น**
+
+ความสามารถด้าน OSINT และการทดสอบความปลอดภัย (`/search`, `/identity`, `/corporate`, `/bbscan`)
+ต้องใช้ **เฉพาะกับเป้าหมายที่คุณเป็นเจ้าของหรือได้รับอนุญาตเป็นลายลักษณ์อักษรแล้วเท่านั้น** —
+`/bbscan` จะปฏิเสธเป้าหมายที่ไม่ได้อยู่ใน Authorization/Scope ที่อนุมัติไว้
+
+ผู้ใช้เป็นผู้รับผิดชอบต่อการปฏิบัติตามกฎหมาย ข้อกำหนดของ Telegram และกฎหมายคุ้มครองข้อมูลส่วนบุคคล
+ที่เกี่ยวข้องในเขตอำนาจของตนเอง ผู้พัฒนาไม่รับผิดชอบต่อการนำไปใช้ในทางมิชอบ
+
+---
+
+## 🙏 Credits
+
+- พัฒนาโดย **[@wissha_yosef](https://t.me/wissha_yosef)**
+- สร้างบน [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
+- ฐานข้อมูลเว็บสำหรับค้น username อ้างอิงแนวทางจากโครงการ OSINT แบบเปิด
+
+> ยังไม่ได้กำหนด License อย่างเป็นทางการ — หากต้องการนำไปใช้ต่อ/แจกจ่าย โปรดติดต่อผู้พัฒนา

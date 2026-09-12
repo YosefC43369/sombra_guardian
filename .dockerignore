@@ -1,0 +1,34 @@
+# Secrets & runtime data — must never be baked into image layers.
+# The container receives config at runtime (docker run --env-file .env),
+# so the real .env and the SQLite database must stay out of the build.
+.env
+.env.*
+!.env.example
+bot.db
+*.db
+*.sqlite
+*.sqlite3
+
+# VCS & CI
+.git
+.gitignore
+.github
+
+# Python caches / virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Tests are not needed in the runtime image
+test_*.py
+tests/
+
+# Local scratch / editor
+*.log
+.DS_Store
+.idea/
+.vscode/

@@ -386,10 +386,19 @@ async def apply_mute(update, context, target_user_id, seconds, admin_user_id=Non
     chat = update.effective_chat
     until = int(time.time()) + seconds
     try:
+       # SECURITY FIX: the kwarg was `can_send_message` (singular), which is
+       # not a valid ChatPermissions field in python-telegram-bot v20+ and
+       # raised TypeError *before* restrict_chat_member ever ran. Because
+       # the surrounding except only catches TelegramError, that TypeError
+       # propagated and the restriction never applied -- so /mute AND the
+       # automatic "3 warnings -> mute" escalation silently did nothing,
+       # a total bypass of the bot's main enforcement action.
+       # no_permissions() also revokes media/other-message rights, so a
+       # muted user can no longer bypass the text mute by posting a photo.
        await context.bot.restrict_chat_member(
             chat.id,
             target_user_id,
-            permissions=ChatPermissions(can_send_message=False),
+            permissions=ChatPermissions.no_permissions(),
             until_date=until,
        )
        logger.info(f"MUTE SUCCESS user={target_user_id} seconds={seconds}")
