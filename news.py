@@ -47,13 +47,16 @@ DB_PATH = "bot.db"
 
 # ---------------- Config ----------------
 
-HTTP_TIMEOUT_SECONDS = float(os.getenv("NEWS_HTTP_TIMEOUT", "15"))
-CHECK_INTERVAL_DEFAULT = int(os.getenv("NEWS_CHECK_INTERVAL", "600"))
-MAX_ITEMS_PER_CYCLE_DEFAULT = int(os.getenv("NEWS_MAX_ITEMS_PER_CYCLE", "5"))
-SEND_BACKLOG_ON_FIRST_RUN = os.getenv("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false").lower() == "true"
-ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "1200"))
-AI_SUMMARY_MAX_CHARS = int(os.getenv("NEWS_AI_SUMMARY_MAX_CHARS", "1200"))
-RSS_SUMMARY_MIN_CHARS = int(os.getenv("NEWS_RSS_SUMMARY_MIN_CHARS", "50"))
+# ใช้ตัวอ่าน env ที่ทนค่าว่าง — NEWS_* ใน .env อาจถูกปล่อยว่างได้
+from envutil import env_int, env_float, env_bool
+
+HTTP_TIMEOUT_SECONDS = env_float("NEWS_HTTP_TIMEOUT", 15)
+CHECK_INTERVAL_DEFAULT = env_int("NEWS_CHECK_INTERVAL", 600)
+MAX_ITEMS_PER_CYCLE_DEFAULT = env_int("NEWS_MAX_ITEMS_PER_CYCLE", 5)
+SEND_BACKLOG_ON_FIRST_RUN = env_bool("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false")
+ARTICLE_MAX_CHARS = env_int("NEWS_ARTICLE_MAX_CHARS", 1200)
+AI_SUMMARY_MAX_CHARS = env_int("NEWS_AI_SUMMARY_MAX_CHARS", 1200)
+RSS_SUMMARY_MIN_CHARS = env_int("NEWS_RSS_SUMMARY_MIN_CHARS", 50)
 _BLOCKED_DOMAINS_THIS_CYCLE: set[str] = set()
 
 _HTTP_HEADERS = {

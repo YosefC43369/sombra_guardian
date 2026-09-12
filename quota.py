@@ -11,21 +11,22 @@ Design constraints (matches security.py / analytics.py):
 - CREATE TABLE IF NOT EXISTS only; never touches other modules' tables.
 """
 
-import os
 import sqlite3
 import time
 import logging
+
+from envutil import env_int   # ทน env ค่าว่าง (.env มีคีย์ค่าว่างหลายตัว)
 
 logger = logging.getLogger("modbot.quota")
 
 DB_PATH = "bot.db"
 
 # 0 = unlimited. Override via env without touching code.
-MEMBER_DAILY_LIMIT = int(os.getenv("AI_MEMBER_DAILY_LIMIT", "10"))
-ADMIN_DAILY_LIMIT = int(os.getenv("AI_ADMIN_DAILY_LIMIT", "0"))
+MEMBER_DAILY_LIMIT = env_int("AI_MEMBER_DAILY_LIMIT", 10)
+ADMIN_DAILY_LIMIT = env_int("AI_ADMIN_DAILY_LIMIT", 0)
 
 # Chat-wide cap on automatic Gemini spam-classifier calls (0 = unlimited).
-CLASSIFIER_DAILY_LIMIT = int(os.getenv("AI_CLASSIFIER_DAILY_LIMIT", "300"))
+CLASSIFIER_DAILY_LIMIT = env_int("AI_CLASSIFIER_DAILY_LIMIT", 300)
 
 
 def _conn():

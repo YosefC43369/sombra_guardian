@@ -60,12 +60,35 @@ from security import DB_PATH
 
 logger = logging.getLogger("modbot.chain")
 
+def _env_int(name, default):
+    """ทน env ค่าว่าง — .env ที่ commit ไว้ตั้ง CHAIN_STARTUP_DELAY= ว่างไว้
+    ซึ่งเดิมทำให้ int("") ระเบิดตั้งแต่ import (blockchain/src/ อยู่คนละที่กับ
+    envutil.py จึงมีตัวช่วยในไฟล์เองตามข้อจำกัด standard-library-only)"""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name, default):
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
 CHAIN_ENABLED = os.getenv("CHAIN_ENABLED", "true").lower() != "false"
 CHAIN_BINARY_ENV = os.getenv("CHAIN_BINARY", "").strip()
-CHAIN_ANCHOR_INTERVAL = int(os.getenv("CHAIN_ANCHOR_INTERVAL", "300"))
-CHAIN_MAX_TX_PER_BLOCK = int(os.getenv("CHAIN_MAX_TX_PER_BLOCK", "500"))
-CHAIN_TIMEOUT_SECONDS = float(os.getenv("CHAIN_TIMEOUT", "30"))
-CHAIN_STARTUP_DELAY = int(os.getenv("CHAIN_STARTUP_DELAY", "20"))
+CHAIN_ANCHOR_INTERVAL = _env_int("CHAIN_ANCHOR_INTERVAL", 300)
+CHAIN_MAX_TX_PER_BLOCK = _env_int("CHAIN_MAX_TX_PER_BLOCK", 500)
+CHAIN_TIMEOUT_SECONDS = _env_float("CHAIN_TIMEOUT", 30)
+CHAIN_STARTUP_DELAY = _env_int("CHAIN_STARTUP_DELAY", 20)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CANDIDATE_PATHS = (

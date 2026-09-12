@@ -27,6 +27,7 @@ import search
 import osint
 import nethealth
 import username_osint
+import envutil
 from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
@@ -91,7 +92,7 @@ TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_p
 GITHUB_FILES_DISPLAY_CAP = 200  # /github files: max rows shown even after _reply_chunked splitting
 GITHUB_INTERVAL_SECONDS = 3600  # how often the TTL sweep background task runs
 SEARCH_RESULTS_DISPLAY_CAP = 20  # /search: max sources listed in the reply
-SEARCH_COMMAND_BUDGET_SECONDS = float(os.getenv("SEARCH_COMMAND_BUDGET_SECONDS", "40"))
+SEARCH_COMMAND_BUDGET_SECONDS = envutil.env_float("SEARCH_COMMAND_BUDGET_SECONDS", 40)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",

@@ -74,10 +74,10 @@ class FindingsTestCase(unittest.TestCase):
     
     def test_valid_creation(self):
         pid = self._fully_authorized_program()
-        r = f.create_find(pid, "example.com", "Reflected XSS", created_by=42)
+        r = f.create_finding(pid, "example.com", "Reflected XSS", created_by=42)
         self.assertTrue(r.ok)
         self.assertIsNotNone(r.finding_id)
-        finding = f.get_finding(f.finding_id)
+        finding = f.get_finding(r.finding_id)
         self.assertEqual(finding["status"], f.FindingStatus.OPEN.value)
         self.assertEqual(finding["severity"], f.Severity.MEDIUM.value)
         
