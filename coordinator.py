@@ -31,6 +31,7 @@ import asyncio
 import logging
 import search
 import scrape
+import osint
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
@@ -43,12 +44,53 @@ from quota import check_and_use_classifier_quota
 
 logger = logging.getLogger("modbot.coordinator")
 
+
+def _env_int(name, default):
+    """os.getenv(name, default) คืน "" เมื่อ .env ตั้งคีย์ไว้แต่ปล่อยค่าว่าง
+    ไม่ได้คืน default — int("") จึงระเบิดตั้งแต่ตอน import ทำให้บอทไม่สตาร์ทเลย
+    (.env ที่ commit ไว้ตั้ง COORDINATOR_MAX_WORKERS= ว่างไว้จริงๆ)"""
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except (TypeError, ValueError):
+        logger.warning("COORDINATOR CONFIG | %s is not an int, using default %s", name, default)
+        return int(default)
+
+
+def _env_float(name, default):
+    try:
+        return float(str(os.getenv(name, default)).strip())
+    except (TypeError, ValueError):
+        logger.warning("COORDINATOR CONFIG | %s is not a float, using default %s", name, default)
+        return float(default)
+
+
+def _env_bool(name, default):
+    value = str(os.getenv(name, default)).strip().lower()
+    if not value:
+        value = str(default).strip().lower()
+    return value in ("true", "1", "yes", "on")
+
+
 # ---------------- Config ----------------
 
-COORDINATOR_MAX_WORKERS = int(os.getenv("COORDINATOR_MAX_WORKERS", "3"))
-COORDINATOR_VERIFICATION_ENABLED = os.getenv(
-    "COORDINATOR_VERIFICATION_ENABLED", "true"
-).lower() == "true"
+COORDINATOR_MAX_WORKERS = _env_int("COORDINATOR_MAX_WORKERS", 3)
+
+# ---------------- OSINT collection (preset personal_identity / corporate_espionage) ----------------
+# ทุกค่ามีเพดานเวลาเพราะเส้นทางนี้ถูกเรียกตรงจาก handler ของ app.py
+OSINT_MAX_QUERIES = _env_int("OSINT_MAX_QUERIES", 3)
+OSINT_MAX_SOURCES = _env_int("OSINT_MAX_SOURCES", 12)
+OSINT_SCRAPE_WORKERS = _env_int("OSINT_SCRAPE_WORKERS", 5)
+OSINT_SEARCH_BUDGET_SECONDS = _env_float("OSINT_SEARCH_BUDGET_SECONDS", 35)
+OSINT_SCRAPE_BUDGET_SECONDS = _env_float("OSINT_SCRAPE_BUDGET_SECONDS", 45)
+OSINT_TOTAL_BUDGET_SECONDS = _env_float("OSINT_TOTAL_BUDGET_SECONDS", 100)
+# หยุดค้นเมื่อได้ผลไม่ซ้ำครบเท่านี้ — ไม่ต้องรอ engine ที่เหลือจนหมด budget
+OSINT_SEARCH_RESULT_CAP = _env_int("OSINT_SEARCH_RESULT_CAP", 24)
+# scrape เป็นสองจังหวะ: ยิงชุดแรกที่ตรงเป้าที่สุดก่อน ถ้าได้หลักฐานพอก็จบ
+OSINT_SCRAPE_FIRST_BATCH = _env_int("OSINT_SCRAPE_FIRST_BATCH", 6)
+OSINT_MIN_VERIFIED_SOURCES = _env_int("OSINT_MIN_VERIFIED_SOURCES", 3)
+# เว้นที่ให้คำสั่งงาน + ข้อความกรอบ ก่อนถึงเพดาน prompt ของ gemini
+_DOSSIER_RESERVED_CHARS = 1500
+COORDINATOR_VERIFICATION_ENABLED = _env_bool("COORDINATOR_VERIFICATION_ENABLED", "true")
 
 WORKER_TIMEOUT_LOCAL = 5        # security / analytics: local SQLite reads
 WORKER_TIMEOUT_NEWS = 20        # httpx fetch, bounded by news.HTTP_TIMEOUT_SECONDS
@@ -250,25 +292,117 @@ async def _run_worker(name: str, coro) -> WorkerResult:
 
 # ---------------- Main entry point ----------------
 
-async def _collect_darkweb_evidence(query: str):
-    """Search and scrape dark-web results for authorized OSINT analysis."""
-    search_results = await asyncio.to_thread(
-        search.get_search_results,
-        query,
+async def _collect_darkweb_evidence(question: str):
+    """เก็บหลักฐานตามวงจรข่าวกรอง แล้วคืน (dossier, stats)
+
+    ของเดิมทำแค่: ยิงคำถามดิบ 1 ครั้ง -> ตัด 20 อันแรกตามลำดับที่ thread คืนมา
+    -> scrape ทั้งหมด -> ต่อสตริงดิบเข้า prompt
+
+    ตอนนี้:
+      1. วางแผนการค้นหาจาก selector แล้วยิงหลาย query พร้อมกัน
+      2. จัดอันดับตามความเกี่ยวข้องก่อน scrape
+      3. scrape เป็นสองจังหวะ — ชุดแรกคือตัวที่ตรงเป้าที่สุด ถ้าได้หลักฐาน
+         ยืนยันพอแล้วก็ไม่ต้องยิงชุดที่สอง (ปกติจึง scrape ครึ่งเดียว)
+      4. ยืนยันด้วยเนื้อหาว่าหน้านั้นพูดถึงเป้าหมายจริง ไม่ใช่แค่ชื่อเรื่องตรง
+      5. สกัด IOC + นับการยืนยันข้ามแหล่ง แล้วประกอบ dossier ในงบตัวอักษร
+
+    งบเวลาใช้ deadline ร่วมอันเดียว: ถ้าขั้นค้นหาเสร็จเร็ว เวลาที่เหลือตกไป
+    เป็นของขั้น scrape แทนที่จะถูกทิ้ง
+    """
+    deadline = time.monotonic() + OSINT_TOTAL_BUDGET_SECONDS
+
+    def _left(floor=0.0):
+        return max(floor, deadline - time.monotonic())
+
+    selectors = osint.extract_selectors(question)
+    queries = osint.plan_queries(question, selectors, max_queries=OSINT_MAX_QUERIES)
+    logger.info("OSINT PLAN | selectors=%s | queries=%s", selectors.summary(), queries)
+
+    search_budget = min(OSINT_SEARCH_BUDGET_SECONDS, _left(5.0))
+    groups = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                search.get_search_results, q, None, search_budget, OSINT_SEARCH_RESULT_CAP
+            )
+            for q in queries
+        ],
+        return_exceptions=True,
     )
-    
-    search_results = search_results[:20]
 
-    if not search_results:
-        return [], {}
+    clean_groups = []
+    for query, group in zip(queries, groups):
+        if isinstance(group, BaseException):
+            logger.warning("OSINT SEARCH FAILED | query=%r: %s", query, group)
+            continue
+        clean_groups.append(group)
 
-    scraped_results = await asyncio.to_thread(
-        scrape.scrape_multiple,
-        search_results,
-        5,
+    raw_total = sum(len(g) for g in clean_groups)
+    ranked = osint.merge_and_rank(clean_groups, selectors, limit=OSINT_MAX_SOURCES)
+    if not ranked:
+        logger.info("OSINT COLLECTION EMPTY | queries=%s raw=%d", queries, raw_total)
+        return None, {"sources": 0, "retrieved": 0, "on_target": 0, "gaps": 0,
+                      "iocs": 0, "corroborated_iocs": 0, "queries": queries}
+
+    # ---- จังหวะที่ 1: ยิงเฉพาะหัวตารางที่ตรงเป้าที่สุด ----
+    batch = ranked[: max(1, OSINT_SCRAPE_FIRST_BATCH)]
+    scraped = await asyncio.to_thread(
+        scrape.scrape_multiple, batch, OSINT_SCRAPE_WORKERS,
+        min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(batch),
     )
+    covered = batch
+    sources = osint.verify_sources(
+        osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
+    )
+    verified = sum(1 for s in sources if s.on_target)
 
-    return search_results, scraped_results
+    # ---- จังหวะที่ 2: ต่อเมื่อหลักฐานยังไม่พอ และยังมีเวลาเหลือจริง ----
+    remaining_sources = ranked[len(batch):]
+    if verified < OSINT_MIN_VERIFIED_SOURCES and remaining_sources and _left() > 8.0:
+        logger.info("OSINT SECOND PASS | verified=%d/%d ยิงต่ออีก %d แหล่ง",
+                    verified, OSINT_MIN_VERIFIED_SOURCES, len(remaining_sources))
+        more = await asyncio.to_thread(
+            scrape.scrape_multiple, remaining_sources, OSINT_SCRAPE_WORKERS,
+            min(OSINT_SCRAPE_BUDGET_SECONDS, _left(5.0)), len(remaining_sources),
+        )
+        scraped.update(more)
+        covered = ranked
+        sources = osint.verify_sources(
+            osint.build_sources(covered, scraped, scrape.CONTENT_UNAVAILABLE_MARKER), selectors
+        )
+        verified = sum(1 for s in sources if s.on_target)
+    else:
+        logger.info("OSINT SINGLE PASS | verified=%d แหล่ง ไม่ต้องยิงชุดที่สอง", verified)
+
+    ioc_index = osint.build_ioc_index(sources)
+    osint.apply_corroboration(sources, ioc_index)
+
+    stats = osint.collect_stats(sources, ioc_index)
+    stats["queries"] = queries
+    stats["scraped_batches"] = 1 if covered is batch else 2
+    dossier = osint.build_dossier(
+        question, selectors, queries, sources, ioc_index,
+        max_chars=max(2000, gemini.RESEARCH_MAX_INPUT_CHARS - _DOSSIER_RESERVED_CHARS),
+        engines_total=raw_total,
+    )
+    logger.info(
+        "OSINT COLLECTED | sources=%d retrieved=%d on_target=%d gaps=%d iocs=%d "
+        "corroborated=%d batches=%d dossier_chars=%d elapsed=%.1fs",
+        stats["sources"], stats["retrieved"], stats["on_target"], stats["gaps"],
+        stats["iocs"], stats["corroborated_iocs"], stats["scraped_batches"],
+        len(dossier), OSINT_TOTAL_BUDGET_SECONDS - _left(),
+    )
+    return dossier, stats
+
+
+_NO_EVIDENCE_BLOCK = (
+    "[INTELLIGENCE DOSSIER]\n"
+    "การเก็บข้อมูลรอบนี้ไม่ได้ผลลัพธ์ใดๆ — ไม่มีแหล่งข่าว ไม่มีเนื้อหา ไม่มี IOC\n"
+    "สาเหตุที่เป็นไปได้: Tor ไม่ได้รันอยู่, tor2web gateway ล่ม, "
+    "หรือ selector ไม่ตรงกับสิ่งที่ถูก index ไว้\n"
+    "ให้รายงานตรงๆ ว่าไม่มีหลักฐาน ระบุว่านี่คือช่องว่างข่าวกรอง "
+    "และเสนอขั้นตอนการเก็บข้อมูลถัดไป ห้ามสร้างข้อค้นพบขึ้นมาเองจากความรู้ทั่วไป"
+)
+
 
 async def handle_request(
     *,
@@ -286,51 +420,43 @@ async def handle_request(
     (ok, text) contract. LOW complexity takes the exact pre-Coordinator
     path: one ask_gemini() call, nothing else."""
     if preset in {"personal_identity", "corporate_espionage"}:
-        search_results, scraped_results = await _collect_darkweb_evidence(
-            question
-        )
-
-        if not search_results:
-            return await gemini.ask_gemini(
-                question,
-                preset=preset,
-                custom_instructions=custom_instructions,
+        try:
+            dossier, stats = await asyncio.wait_for(
+                _collect_darkweb_evidence(question), timeout=OSINT_TOTAL_BUDGET_SECONDS
             )
+        except asyncio.TimeoutError:
+            logger.warning("OSINT COLLECTION TIMEOUT | chat=%s budget=%.0fs",
+                           chat_id, OSINT_TOTAL_BUDGET_SECONDS)
+            dossier, stats = None, {}
+        except Exception:
+            logger.exception("OSINT COLLECTION CRASHED | chat=%s", chat_id)
+            dossier, stats = None, {}
 
-        source_lines = []
-        for item in search_results:
-            title = item.get("title", "Untitled")
-            link = item.get("link", "")
-            if link:
-                source_lines.append(f"- {title}: {link}")
-
-        evidence_lines = []
-        for url, text in scraped_results.items():
-            evidence_lines.append(
-                f"Source: {url}\n{text}"
-            )
-
-        darkweb_context = (
-            f"\n\n[DARK WEB SEARCH RESULTS]\n"
-            f"{chr(10).join(source_lines)}\n\n"
-            f"[SCRAPED EVIDENCE]\n"
-            f"{chr(10).join(evidence_lines)}"
-        )
+        # ไม่มีหลักฐาน = ต้องบอกโมเดลว่าไม่มี ไม่ใช่ปล่อยให้ตอบจากความรู้ทั่วไป
+        # (ของเดิม fallback ไป ask_gemini เปล่าๆ ซึ่งเปิดทางให้แต่งข้อค้นพบขึ้นมาเอง)
+        evidence_block = dossier if dossier else _NO_EVIDENCE_BLOCK
 
         research_prompt = (
-            f"{question}\n\n"
-            f"Use the following retrieved evidence as the only evidence "
-            f"for your analysis.\n"
-            f"{darkweb_context}"
+            f"คำสั่งงานข่าวกรอง: {question}\n\n"
+            f"{evidence_block}\n\n"
+            "[คำสั่งปิดท้าย] วิเคราะห์โดยใช้เฉพาะหลักฐานข้างบนเท่านั้น "
+            "อ้างอิงทุกข้อเท็จจริงด้วยรหัสแหล่ง [S#] และรายงานช่องว่างข่าวกรองตามจริง"
         )
+        limit = gemini.RESEARCH_MAX_INPUT_CHARS
+        if len(research_prompt) > limit:
+            research_prompt = research_prompt[:limit]
+            logger.warning("OSINT PROMPT CLAMPED | chat=%s to %d chars", chat_id, limit)
 
+        logger.info("OSINT REQUEST | chat=%s preset=%s stats=%s prompt_chars=%d",
+                    chat_id, preset, stats, len(research_prompt))
         return await gemini.ask_gemini(
             research_prompt,
             preset=preset,
             custom_instructions=custom_instructions,
             media=media,
+            max_input_chars=limit,
         )
-        
+
     if media:
         return await gemini.ask_gemini(
             question,

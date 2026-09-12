@@ -1,5 +1,7 @@
 import os
 import socket
+import time
+import asyncio
 import random
 import requests
 import threading
@@ -8,7 +10,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+
+import nethealth
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -26,9 +30,15 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.3179.54"
 ]
 
-TOR_GATEWAY_SUFFIXES = [
-    s.strip() for s in os.getenv("TOR_GATEWAY_SUFFIXES", ".ly,.ps").split(",") if s.strip()
-]
+_logger = logging.getLogger("modbot.scrape")
+
+# config ของ Tor/gateway และตัวอ่าน env อยู่ที่ nethealth.py ที่เดียว
+# (.env ที่ commit ไว้ตั้ง TOR_GATEWAY_SUFFIXES= ว่าง ซึ่งเดิมแปลว่า "ไม่มี
+#  gateway สำรองเลย" — nethealth ถือว่าค่าว่าง = ใช้ default)
+TOR_GATEWAY_SUFFIXES = nethealth.TOR_GATEWAY_SUFFIXES
+_env_int = nethealth.env_int
+_env_float = nethealth.env_float
+
 
 def _onion_to_gateway(url, suffix):
     parsed = urlparse(url)
@@ -40,23 +50,48 @@ def _onion_to_gateway(url, suffix):
         netloc += f":{parsed.port}"
     return parsed._replace(scheme="https", netloc=netloc).geturl()
 
-MAX_DOWNLOAD_BYTES = 1_000_000
-MAX_EXTRACTED_TEXT_CHARS = 50_000
-MAX_RETURN_CHARS = 2_000
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "127.0.0.1")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
-ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
-_thread_local = threading.local()
-_logger = logging.getLogger(__name__)
 
-def _tor_reachable(timeout=2.0) -> bool:
-    try:
-        with socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout):
-            return True
-    except OSError:
+MAX_DOWNLOAD_BYTES = _env_int("SCRAPE_MAX_DOWNLOAD_BYTES", 1_000_000)
+MAX_EXTRACTED_TEXT_CHARS = _env_int("SCRAPE_MAX_EXTRACTED_TEXT_CHARS", 50_000)
+MAX_RETURN_CHARS = _env_int("SCRAPE_MAX_RETURN_CHARS", 2_000)
+TOR_SOCKS_HOST = nethealth.TOR_SOCKS_HOST
+TOR_SOCKS_PORT = nethealth.TOR_SOCKS_PORT
+ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
+
+# ---------------- Limits (เรียกผ่าน coordinator จาก handler ของ app.py: ต้องมีเพดานเวลาเสมอ) ----------------
+SCRAPE_CONNECT_TIMEOUT = _env_float("SCRAPE_CONNECT_TIMEOUT", 10)
+SCRAPE_READ_TIMEOUT = _env_float("SCRAPE_READ_TIMEOUT", 25)
+SCRAPE_TOTAL_BUDGET_SECONDS = _env_float("SCRAPE_TOTAL_BUDGET_SECONDS", 60)
+SCRAPE_MAX_URLS = _env_int("SCRAPE_MAX_URLS", 20)
+# "auto" = ใช้ Tor ถ้า SOCKS port เปิดอยู่, "true"/"false" = บังคับ
+SCRAPE_USE_TOR = os.getenv("SCRAPE_USE_TOR", "auto").strip().lower()
+TOR_PROBE_TTL_SECONDS = nethealth.TOR_PROBE_TTL_SECONDS
+# บอกโมเดลให้ชัดว่าแหล่งนี้ดึงเนื้อหาไม่ได้ ไม่งั้น coordinator จะส่งแค่ "ชื่อเรื่อง"
+# เข้าไปใน [SCRAPED EVIDENCE] แล้วโมเดลเข้าใจผิดว่านั่นคือเนื้อหาที่ยืนยันได้
+CONTENT_UNAVAILABLE_MARKER = "[content unavailable]"
+
+_thread_local = threading.local()
+
+
+def _tor_reachable(timeout=2.0, force=False) -> bool:
+    """ใช้ probe ร่วมกับ search.py ผ่าน nethealth — scrape_multiple() ยิงพร้อมกัน
+    หลาย thread ถ้าเปิด socket ทดสอบใหม่ทุก URL คือเสียเวลาเปล่าล้วนๆ"""
+    return nethealth.tor_reachable(timeout=timeout, force=force)
+
+
+def _tor_enabled() -> bool:
+    if SCRAPE_USE_TOR in ("false", "0", "off", "no"):
         return False
+    if SCRAPE_USE_TOR in ("true", "1", "on", "yes"):
+        return True
+    return _tor_reachable()
+
 
 def _normalize_url_data(url_data):
+    """รับได้ทั้ง dict ที่ search.py คืนมา และ str ธรรมดา เผื่อ app.py
+    ส่งลิสต์ URL ล้วนๆ เข้ามาเอง (เช่น จากคำสั่งที่ผู้ใช้พิมพ์ลิงก์มาตรงๆ)"""
+    if isinstance(url_data, str):
+        return url_data.strip(), "Untitled"
     if not isinstance(url_data, dict):
         return "", "Untitled"
     url = str(url_data.get("link") or "").strip()
@@ -64,12 +99,35 @@ def _normalize_url_data(url_data):
     return url, title
 
 
+def _remaining(deadline):
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _timeout_for(deadline, is_onion):
+    """(connect, read) ที่ไม่มีทางเกินเวลาที่เหลือของ budget รวม
+    คืน None เมื่อหมดเวลาแล้ว (ผู้เรียกต้องเลิกยิงต่อ)"""
+    connect_timeout = SCRAPE_CONNECT_TIMEOUT if is_onion else max(SCRAPE_CONNECT_TIMEOUT / 2, 3.0)
+    read_timeout = SCRAPE_READ_TIMEOUT
+    left = _remaining(deadline)
+    if left is not None:
+        if left <= 0:
+            return None
+        connect_timeout = min(connect_timeout, max(left, 1.0))
+        read_timeout = min(read_timeout, max(left, 1.0))
+    return (connect_timeout, read_timeout)
+
+
 def _build_session(use_tor=False):
     session = requests.Session()
     retry = Retry(
-        total=3,
-        read=3,
-        connect=3,
+        total=2,
+        # read=0: read-timeout ต้องไม่ retry — ของเดิม read=3 + read timeout 30s
+        # แปลว่า URL เดียวกินได้ถึง ~120s ต่อ 1 gateway ซึ่งเป็นต้นเหตุที่
+        # /identity, /corporate ใน app.py ค้างยาว
+        read=0,
+        connect=2,
         backoff_factor=0.3,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=frozenset(["GET", "HEAD"]),
@@ -101,12 +159,41 @@ def get_tor_session():
     """
     return _build_session(use_tor=True)
 
-def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051, control_password=None):
+
+def _extract_text(response):
+    """อ่านแบบ stream โดยไม่เกิน MAX_DOWNLOAD_BYTES แล้วถอดเป็นข้อความล้วน"""
+    chunks = []
+    bytes_read = 0
+    for chunk in response.iter_content(chunk_size=8192):
+        if not chunk:
+            continue
+        bytes_read += len(chunk)
+        if bytes_read > MAX_DOWNLOAD_BYTES:
+            break
+        chunks.append(chunk)
+
+    raw = b"".join(chunks)
+    if not raw:
+        return ""
+
+    html = raw.decode(response.encoding or "utf-8", errors="replace")
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.extract()
+    return ' '.join(soup.get_text(separator=' ').split())[:MAX_EXTRACTED_TEXT_CHARS]
+
+
+def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
+                  control_password=None, deadline=None):
     """
-    Scrapes a single URL. .onion URLs go through a tor2web gateway
-    (rewritten via TOR_GATEWAY_SUFFIXES) instead of a local Tor SOCKS
-    proxy, failing over across suffixes since these gateways die often.
+    Scrapes a single URL. .onion URLs go through the local Tor SOCKS proxy
+    when one is reachable, and fall back to a tor2web gateway (rewritten via
+    TOR_GATEWAY_SUFFIXES) otherwise, failing over across suffixes since these
+    gateways die often.
     Returns a tuple (url, scraped_text).
+
+    ของเดิมบังคับ _get_session(use_tor=False) เสมอ ทั้งที่นิยาม get_tor_session()
+    และ _tor_reachable() ไว้แล้ว — เครื่องที่รัน Tor อยู่จึงไม่เคยได้ใช้ Tor เลย
     """
     url, title = _normalize_url_data(url_data)
     if not url:
@@ -114,94 +201,184 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051, 
 
     parsed_url = urlparse(url)
     if parsed_url.scheme not in ("http", "https"):
-        return url, title
+        _logger.debug("SCRAPE SKIPPED | unsupported scheme url=%s", url)
+        return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
 
     is_onion = (parsed_url.hostname or "").lower().endswith(".onion")
-    candidate_urls = [_onion_to_gateway(url, s) for s in TOR_GATEWAY_SUFFIXES] if is_onion else [url]
+    if is_onion:
+        candidate_urls = []
+        if _tor_enabled():
+            candidate_urls.append((url, True, "tor"))
+        candidate_urls.extend(
+            (_onion_to_gateway(url, suffix), False, suffix) for suffix in TOR_GATEWAY_SUFFIXES
+        )
+        # ข้าม gateway ที่ circuit breaker พักอยู่ — ใช้ประวัติร่วมกับ search.py
+        # จึงรู้ตั้งแต่ตอนค้นแล้วว่า gateway ตัวไหนตาย ไม่ต้องมาเรียนรู้ใหม่ตอน scrape
+        candidate_urls = [c for c in candidate_urls if not nethealth.blocked(f"route:{c[2]}")]
+        if not candidate_urls:
+            _logger.debug("SCRAPE NO LIVE ROUTE | url=%s", url)
+            return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
+    else:
+        candidate_urls = [(url, False, "direct")]
 
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
     }
-    session = _get_session(use_tor=False)
 
-    for candidate in candidate_urls:
+    for candidate, use_tor, route in candidate_urls:
+        route_key = f"route:{route}"
+        timeout = _timeout_for(deadline, is_onion)
+        if timeout is None:
+            _logger.debug("SCRAPE BUDGET EXHAUSTED | url=%s", url)
+            break
+
         response = None
         try:
-            timeout = (10, 30) if is_onion else (5, 25)
-            response = session.get(candidate, headers=headers, timeout=timeout, stream=True)
+            response = _get_session(use_tor=use_tor).get(
+                candidate, headers=headers, timeout=timeout, stream=True
+            )
             if response.status_code != 200:
+                _logger.debug(
+                    "SCRAPE NON-200 | url=%s route=%s status=%s", url, route, response.status_code
+                )
+                # เช่นเดียวกับ search.py: 404 ไม่ใช่ความผิดของ gateway
+                if is_onion and (response.status_code >= 500 or response.status_code == 429):
+                    nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
                 continue
+
+            if is_onion:
+                nethealth.record(route_key, True, nethealth.ROUTE_FAILURE_THRESHOLD)
 
             content_type = (response.headers.get("Content-Type") or "").lower()
             if content_type and not any(t in content_type for t in ALLOWED_CONTENT_TYPES):
-                return url, title
+                _logger.debug("SCRAPE SKIPPED | url=%s content-type=%s", url, content_type)
+                return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
 
-            chunks = []
-            bytes_read = 0
-            for chunk in response.iter_content(chunk_size=8192):
-                if not chunk:
-                    continue
-                bytes_read += len(chunk)
-                if bytes_read > MAX_DOWNLOAD_BYTES:
-                    break
-                chunks.append(chunk)
-
-            html = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
-            soup = BeautifulSoup(html, "html.parser")
-            for script in soup(["script", "style"]):
-                script.extract()
-            text = ' '.join(soup.get_text(separator=' ').split())[:MAX_EXTRACTED_TEXT_CHARS]
-            return url, (f"{title} - {text}" if text else title)
+            text = _extract_text(response)
+            return url, (f"{title} - {text}" if text else f"{title} - {CONTENT_UNAVAILABLE_MARKER}")
+        except requests.exceptions.InvalidSchema as exc:
+            # socks5h ต้องมี PySocks (มีอยู่ใน requirements.txt) — ถ้าหายให้ตกไป gateway
+            _logger.warning("SCRAPE TOR UNAVAILABLE | url=%s: %s", url, exc)
+            if is_onion:
+                nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
+            continue
         except Exception as exc:
-            _logger.debug("Gateway attempt failed url=%s via=%s: %s", url, candidate, exc)
+            _logger.debug("Gateway attempt failed url=%s route=%s: %s", url, route, exc)
+            if is_onion:
+                nethealth.record(route_key, False, nethealth.ROUTE_FAILURE_THRESHOLD)
             continue
         finally:
             if response is not None:
                 response.close()
 
-    return url, title
-    
-def scrape_multiple(urls_data, max_workers=5):
+    return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
+
+
+def _truncate(content):
+    if len(content) <= MAX_RETURN_CHARS:
+        return content
+    suffix = "...(truncated)"
+    if len(suffix) >= MAX_RETURN_CHARS:
+        # Fallback: ensure we never exceed MAX_RETURN_CHARS even if suffix is long
+        return suffix[:MAX_RETURN_CHARS]
+    return content[: MAX_RETURN_CHARS - len(suffix)] + suffix
+
+
+def scrape_multiple(urls_data, max_workers=5, budget_seconds=None, max_urls=None):
     """
     Scrapes multiple URLs concurrently using a thread pool.
+
+    เรียกจาก coordinator._collect_darkweb_evidence() -> /identity, /corporate ใน app.py
+    จึงต้องมี budget รวม และต้องไม่ raise ออกไปหา caller เด็ดขาด (คืน {} แทน)
     """
     results = {}
-    max_workers = max(1, min(int(max_workers), 16))
     if not isinstance(urls_data, (list, tuple)):
+        _logger.info("SCRAPE SKIPPED | urls_data is %s, expected list/tuple", type(urls_data).__name__)
         return results
+
+    max_workers = max(1, min(int(max_workers or 5), 16))
+    budget = float(budget_seconds) if budget_seconds else SCRAPE_TOTAL_BUDGET_SECONDS
+    cap = int(max_urls) if max_urls else SCRAPE_MAX_URLS
+    started = time.monotonic()
+    deadline = started + budget
 
     # Deduplicate links to reduce unnecessary requests under real workloads.
     unique_urls_data = []
     seen_links = set()
     for item in urls_data:
         url, title = _normalize_url_data(item)
-        if not url or url in seen_links:
+        key = url.rstrip("/").lower()
+        if not url or key in seen_links:
             continue
-        seen_links.add(url)
+        seen_links.add(key)
         unique_urls_data.append({"link": url, "title": title})
+        if len(unique_urls_data) >= cap:
+            break
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    if not unique_urls_data:
+        return results
+
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         future_to_url = {
-            executor.submit(scrape_single, url_data): url_data
+            executor.submit(scrape_single, url_data, deadline=deadline): url_data
             for url_data in unique_urls_data
         }
-        for future in as_completed(future_to_url):
-            try:
-                url, content = future.result()
+        try:
+            for future in as_completed(future_to_url, timeout=budget):
+                try:
+                    url, content = future.result()
+                except Exception as exc:
+                    _logger.debug("Worker failed to scrape a URL: %s", exc)
+                    continue
                 if not url:
                     continue
-                if len(content) > MAX_RETURN_CHARS:
-                    suffix = "...(truncated)"
-                    if len(suffix) >= MAX_RETURN_CHARS:
-                        # Fallback: ensure we never exceed MAX_RETURN_CHARS even if suffix is long
-                        content = suffix[:MAX_RETURN_CHARS]
-                    else:
-                        available = MAX_RETURN_CHARS - len(suffix)
-                        content = content[:available] + suffix
-                results[url] = content
-            except Exception as exc:
-                _logger.debug("Worker failed to scrape a URL: %s", exc)
-                continue
+                results[url] = _truncate(content or "")
+        except FuturesTimeout:
+            _logger.warning(
+                "SCRAPE BUDGET TIMEOUT | budget=%.1fs done=%d/%d",
+                budget, len(results), len(unique_urls_data),
+            )
+    finally:
+        # ไม่รอ thread ที่ยังค้าง (แต่ละ request มี timeout ของตัวเองอยู่แล้ว)
+        # ไม่งั้น handler ของ app.py จะถูกหน่วงต่อแม้จะหมด budget ไปแล้ว
+        executor.shutdown(wait=False, cancel_futures=True)
 
+    fetched = sum(1 for text in results.values() if CONTENT_UNAVAILABLE_MARKER not in text)
+    _logger.info(
+        "SCRAPE DONE | requested=%d returned=%d with_content=%d elapsed=%.1fs",
+        len(unique_urls_data), len(results), fetched, time.monotonic() - started,
+    )
     return results
+
+
+# ---------------- async / Telegram helpers (สำหรับ app.py) ----------------
+
+async def scrape_multiple_async(urls_data, max_workers=5, budget_seconds=None, max_urls=None):
+    """เวอร์ชัน async สำหรับเรียกตรงจาก handler ของ app.py — ข้างในเป็น requests
+    แบบ blocking ทั้งหมด ถ้าเรียกบน event loop ตรงๆ บอทจะค้างทั้งตัว"""
+    return await asyncio.to_thread(
+        scrape_multiple, urls_data, max_workers, budget_seconds, max_urls
+    )
+
+
+async def scrape_single_async(url_data, budget_seconds=None):
+    """สำหรับกรณีดึงลิงก์เดียว (เช่นผู้ใช้ส่งลิงก์มาให้บอทสรุป)"""
+    deadline = time.monotonic() + (float(budget_seconds) if budget_seconds
+                                   else SCRAPE_TOTAL_BUDGET_SECONDS)
+    return await asyncio.to_thread(scrape_single, url_data, False, 5, 9051, None, deadline)
+
+
+def format_scrape_results(results, limit=None, header="📄 เนื้อหาที่ดึงได้"):
+    """จัดผลลัพธ์เป็นข้อความไทยพร้อมส่งเข้า gemini.split_telegram_message() ของ app.py
+    (plain text ล้วน ไม่ใส่ Markdown/HTML เพราะเนื้อหาจากเว็บมีอักขระพิเศษเยอะ
+    ถ้า escape ไม่ครบ Telegram จะตีข้อความกลับทั้งก้อน)"""
+    if not results:
+        return "ดึงเนื้อหาจากลิงก์ไม่สำเร็จ (Tor/gateway อาจใช้งานไม่ได้ในตอนนี้)"
+
+    items = list(results.items())[: (limit or SCRAPE_MAX_URLS)]
+    lines = [f"{header} {len(items)}/{len(results)} รายการ", ""]
+    for index, (url, text) in enumerate(items, start=1):
+        lines.append(f"{index}. {url}\n{text}")
+    return "\n\n".join(lines)
