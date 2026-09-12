@@ -242,6 +242,7 @@ class SourceRecord:
     origin: str = ""        # clearnet / darkweb
     engine: str = ""        # engine ที่ค้นเจอแหล่งนี้
     body: str = ""          # เนื้อหาจริงโดยตัด title ที่ scrape.py ใส่นำหน้าออก
+    snippet: str = ""       # คำโปรยจากเอนจิน — ข้อมูลสำรองเมื่อ scrape ไม่ได้
     content_hits: int = 0
     matched_selectors: List[str] = field(default_factory=list)
 
@@ -511,20 +512,30 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
             key = link.rstrip("/").lower()
             if key in merged:
                 merged[key]["engines"] += 1      # หลาย query/engine ชี้มาที่เดียวกัน
+                # แถวเดียวกันจากหลาย query — เก็บ snippet ที่ยาว/มีข้อมูลกว่าไว้
+                snip = str(item.get("snippet") or "").strip()
+                if len(snip) > len(merged[key].get("snippet", "")):
+                    merged[key]["snippet"] = snip
                 continue
             merged[key] = {
                 "link": link,
                 "title": str(item.get("title") or "Untitled").strip() or "Untitled",
+                "snippet": str(item.get("snippet") or "").strip(),
                 "engines": 1,
                 "origin": item.get("origin", ""),
                 "engine": item.get("engine", ""),
             }
 
     for record in merged.values():
-        haystack = f"{record['title']} {record['link']}".lower()
+        # รวม snippet (คำโปรยของเอนจิน) เข้าไปในการให้คะแนนด้วย — เป็นสัญญาณ
+        # ความเกี่ยวข้องก่อน scrape ที่ชื่อเรื่อง+URL อย่างเดียวไม่มี
+        haystack = f"{record['title']} {record['link']} {record.get('snippet', '')}".lower()
         hits = sum(1 for value in sel_values if value and value in haystack)
+        # snippet ที่ตรง selector ให้คะแนนเพิ่มอีกชั้น (เจอในคำโปรย = สัญญาณจริง)
+        snip_low = record.get("snippet", "").lower()
+        snip_hits = sum(1 for value in sel_values if value and value in snip_low)
         # แหล่งที่ถูกชี้ซ้ำจากหลาย query = สัญญาณว่าเกี่ยวข้องจริง
-        record["relevance"] = hits * 3 + (record["engines"] - 1)
+        record["relevance"] = hits * 3 + snip_hits + (record["engines"] - 1)
 
     ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], r["link"]))
     return ranked[: max(1, int(limit))]
@@ -805,9 +816,13 @@ def build_sources(ranked_results: List[dict], scraped: Dict[str, str],
             engines=int(record.get("engines", 1)),
             origin=str(record.get("origin", "") or ""),
             engine=str(record.get("engine", "") or ""),
+            snippet=str(record.get("snippet", "") or ""),
         )
         source.body = _strip_title_prefix(source.text, source.title) if retrieved else ""
-        source.iocs = extract_iocs(source.text) if retrieved else {}
+        # ดึง IOC จากทั้งเนื้อหาที่ scrape ได้ และคำโปรยของเอนจิน — คำโปรยมักมี
+        # อีเมล/โปรไฟล์อยู่แล้ว ทำให้ได้ IOC แม้ scrape เนื้อหาจริงไม่สำเร็จ
+        combined = " ".join(filter(None, (source.text if retrieved else "", source.snippet)))
+        source.iocs = extract_iocs(combined) if combined else {}
         sources.append(source)
     return sources
 
@@ -825,8 +840,17 @@ def verify_sources(sources: List[SourceRecord],
     for source in sources:
         source.content_hits = 0
         source.matched_selectors = []
-        if not source.retrieved or not weighted:
+        if not weighted:
             continue
+
+        # คำโปรยของเอนจิน: สัญญาณก่อน scrape ว่าแหล่งนี้พูดถึงเป้าหมายไหม
+        # ช่วยจัดอันดับให้แหล่งที่คำโปรยตรงเป้าได้ scrape ก่อน และเป็นตัวตัดสิน
+        # เวลา scrape เนื้อหาจริงไม่สำเร็จ (onion ล่มบ่อย แต่ Ahmia ยังมีคำโปรย)
+        snippet = (source.snippet or "").lower()
+        snippet_matched = [v for v, _ in weighted if v in snippet]
+        if snippet_matched:
+            source.relevance += 2 * len(snippet_matched)
+
         text = (source.body or "").lower()
         matched = [(value, weight) for value, weight in weighted if value in text]
         if not matched:
@@ -957,6 +981,10 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
             f"[{source.ref}] {source.title[:120]} | {source.url} | ฝั่ง={origin} | "
             f"Admiralty {source.rating()} | {status} | relevance={source.relevance}"
         )
+        # คำโปรยจากเอนจิน = สรุปที่เอนจินให้มา ไม่ใช่เนื้อหาที่ยืนยันแล้ว
+        # มีประโยชน์มากเวลา scrape ไม่ได้ แต่ต้องกำกับให้ชัดว่ายังไม่ยืนยัน
+        if source.snippet and not source.on_target:
+            head.append(f"      คำโปรยจากเอนจิน (ยังไม่ยืนยัน): {source.snippet[:200]}")
 
     ioc_lines = _format_ioc_index(ioc_index)
     head.append("")
