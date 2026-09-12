@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import sqlite3
 import logging
@@ -826,13 +827,18 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
+    # ถ้าไฟล์บนเครื่องอัปเดตไม่ครบ (app.py ใหม่ + search.py เก่า) ให้ถอยไปใช้
+    # ฟังก์ชันเดิมแทนที่จะโยน AttributeError ใส่ผู้ใช้กลางคำสั่ง
+    search_one = getattr(search, "get_combined_results_async", None)
+    if search_one is None:
+        logger.error(
+            "OSINT SEARCH DEGRADED | search.py ไม่มี get_combined_results_async "
+            "(ไฟล์บนเครื่องอัปเดตไม่ครบ) — ค้นเฉพาะ dark web ไปก่อน"
+        )
+        search_one = search.get_search_results_async
+
     groups = await asyncio.gather(
-        *[
-            search.get_combined_results_async(
-                q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
-            )
-            for q in queries
-        ],
+        *[search_one(q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS) for q in queries],
         return_exceptions=True,
     )
 
@@ -2982,11 +2988,58 @@ async def post_shutdown(app):
     
 # ---------------- Main ----------------
 
+# ฟังก์ชันที่ app.py เรียกข้ามโมดูล — ตรวจตั้งแต่บูตว่ามีครบไหม
+# เคยเจอกรณีไฟล์บนเซิร์ฟเวอร์อัปเดตไม่ครบ (app.py ใหม่ แต่ search.py เก่า)
+# แล้วไปพังเป็น AttributeError กลางคำสั่งของผู้ใช้ ซึ่งหาสาเหตุยากกว่ามาก
+_REQUIRED_MODULE_API = {
+    "search": ("get_search_results", "get_search_results_async",
+               "get_combined_results", "get_combined_results_async",
+               "get_clearnet_results"),
+    "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
+    "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
+              "build_sources", "verify_sources", "build_identity",
+              "pivot_queries", "build_dossier", "format_search_report"),
+    "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
+    "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
+    "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
+}
+
+
+def check_module_integrity() -> bool:
+    """เช็กว่าโมดูลที่ app.py พึ่งพา มีฟังก์ชันที่เรียกจริงครบไหม
+    คืน True เมื่อครบ; ถ้าไม่ครบจะ log ชื่อไฟล์ที่ต้องอัปเดตให้ชัด"""
+    missing = {}
+    for module_name, names in _REQUIRED_MODULE_API.items():
+        module = sys.modules.get(module_name)
+        if module is None:
+            missing[module_name] = ["<โมดูลไม่ถูกโหลด>"]
+            continue
+        absent = [n for n in names if not hasattr(module, n)]
+        if absent:
+            missing[module_name] = absent
+
+    if not missing:
+        logger.info("MODULE CHECK: OK")
+        return True
+
+    for module_name, names in missing.items():
+        logger.error(
+            "MODULE CHECK FAILED | %s.py ไม่มี: %s "
+            "-- ไฟล์บนเซิร์ฟเวอร์น่าจะอัปเดตไม่ครบ ให้ดึงโค้ดใหม่ทั้งชุด",
+            module_name, ", ".join(names),
+        )
+    logger.error(
+        "MODULE CHECK | บอทจะยังทำงานต่อ แต่คำสั่งที่ใช้ของที่ขาดจะทำงานไม่ครบ"
+    )
+    return False
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
+    check_module_integrity()
     # Names and model ids only -- never a key or any fragment of one.
     config.log_startup_summary()
     db_info()
