@@ -142,9 +142,21 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.3179.54"
 ]
 
+# แต่ละ engine พก:
+#   result_selectors : CSS ที่ชี้ "แถวผลลัพธ์" — ดึงลิงก์+snippet เฉพาะในแถวนั้น
+#                      ไม่งั้นจะได้ลิงก์ nav/ads/เอนจินอื่นของหน้า engine ปนมา
+#   clearnet_index   : True = เป็นดัชนี .onion ที่มีหน้าเว็บเปิด ยิงตรงได้เลย
+#                      ไม่ต้องผ่าน Tor/gateway (ผลที่ได้ยังเป็น .onion ตามปกติ)
+# Ahmia เป็นดัชนี onion ที่คัดกรองมาแล้ว จึงแม่นกว่าเอนจิน onion ทั่วไป และ
+# ahmia.fi (เว็บเปิด) ทำให้ค้น dark web ได้แม้ Tor ยังต่อไม่ได้
 SEARCH_ENGINES = [
-    {"name": "Ahmia", "url": "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q={query}"},
-    {"name": "OnionLand", "url": "http://3bbad7fauom4d6sgppalyqddsqbf5u5p56b5k5uk2zxsy3d6ey2jobad.onion/search?q={query}"},
+    {"name": "Ahmia (web)", "url": "https://ahmia.fi/search/?q={query}",
+     "clearnet_index": True,
+     "result_selectors": ["li.result h4 a", "ol.searchResults li h4 a", "li.result a"]},
+    {"name": "Ahmia", "url": "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q={query}",
+     "result_selectors": ["li.result h4 a", "ol.searchResults li h4 a", "li.result a"]},
+    {"name": "OnionLand", "url": "http://3bbad7fauom4d6sgppalyqddsqbf5u5p56b5k5uk2zxsy3d6ey2jobad.onion/search?q={query}",
+     "result_selectors": ["div.result h2 a", "div.result a.title", "a.result-link"]},
     {"name": "Torgle", "url": "http://iy3544gmoeclh5de6gez2256v6pjh4omhpqdh2wpeeppjtvqmjhkfwad.onion/torgle/?query={query}"},
     {"name": "Amnesia", "url": "http://amnesia7u5odx5xbwtpnqk3edybgud5bmiagu75bnqx2crntw5kry7ad.onion/search?query={query}"},
     {"name": "Kaizer", "url": "http://kaizerwfvp5gxu6cppibp7jhcqptavq3iqef66wbxenh6a2fklibdvid.onion/search?q={query}"},
@@ -155,16 +167,28 @@ SEARCH_ENGINES = [
     {"name": "Find Tor", "url": "http://findtorroveq5wdnipkaojfpqulxnkhblymc7aramjzajcvpptd4rjqd.onion/search?q={query}"},
     {"name": "Excavator", "url": "http://2fd6cemt4gmccflhm6imvdfvli3nf7zn6rfrwpsy7uhxrgbypvwf5fad.onion/search?query={query}"},
     {"name": "Onionway", "url": "http://oniwayzz74cv2puhsgx4dpjwieww4wdphsydqvf5q7eyz4myjvyw26ad.onion/search.php?s={query}"},
-    {"name": "Tor66", "url": "http://tor66sewebgixwhcqfnp5inzp5x5uohhdy3kvtnyfxc2e5mxiuh34iid.onion/search?q={query}"},
+    {"name": "Tor66", "url": "http://tor66sewebgixwhcqfnp5inzp5x5uohhdy3kvtnyfxc2e5mxiuh34iid.onion/search?q={query}",
+     "result_selectors": ["div.result a", "a.title"]},
     {"name": "OSS", "url": "http://3fzh7yuupdfyjhwt3ugzqqof6ulbcl27ecev33knxe3u7goi3vfn2qqd.onion/oss/index.php?search={query}"},
     {"name": "Torgol", "url": "http://torgolnpeouim56dykfob6jh5r2ps2j73enc42s2um4ufob3ny4fcdyd.onion/?q={query}"},
-    {"name": "The Deep Searches", "url": "http://searchgf7gdtauh7bhnbyed4ivxqmuoat3nm6zfrg3ymkq6mtnpye3ad.onion/search?q={query}"},
+    {"name": "The Deep Searches", "url": "http://searchgf7gdtauh7bhnbyed4ivxqmuoat3nm6zfrg3ymkq6mtnpye3ad.onion/search?q={query}",
+     "result_selectors": ["div.result h5 a", "div.result a", "a.title"]},
 ]
 
 # Backward-compatible flat list used by existing search logic
 DEFAULT_SEARCH_ENGINES = [e["url"] for e in SEARCH_ENGINES]
 
 _ENGINE_NAME_BY_URL = {e["url"]: e["name"] for e in SEARCH_ENGINES}
+_ENGINE_BY_URL = {e["url"]: e for e in SEARCH_ENGINES}
+
+# โฮสต์ของ "ตัวเอนจินค้นหา" ทั้งหมด — ผลลัพธ์ที่ชี้กลับไปหาเอนจินพวกนี้
+# (ไม่ว่าเอนจินไหนเป็นคนคืนมา) ไม่ใช่หลักฐาน เป็นแค่ลิงก์ข้ามเอนจิน/nav
+_ONION_ENGINE_HOSTS = frozenset(
+    (urlparse(e["url"]).hostname or "").lower()
+    for e in SEARCH_ENGINES
+)
+
+SEARCH_MAX_SNIPPET_CHARS = _env_int("SEARCH_MAX_SNIPPET_CHARS", 300)
 
 
 def _build_onion_url_re():
@@ -183,7 +207,14 @@ def _build_onion_url_re():
 
 
 _ONION_URL_RE = _build_onion_url_re()
-_REDIRECT_PARAM_KEYS = ("url", "u", "redirect", "r", "target", "link", "q")
+# redirect_url = Ahmia, d = OnionLand — เอนจินห่อ .onion ปลายทางไว้ในพารามิเตอร์พวกนี้
+_REDIRECT_PARAM_KEYS = ("redirect_url", "url", "u", "redirect", "r", "target", "link", "q", "d")
+
+
+def _is_engine_onion(url: str) -> bool:
+    """ผลลัพธ์ที่ชี้กลับไปหาตัวเอนจินค้นหาเอง (ข้ามเอนจิน/nav) — ไม่ใช่หลักฐาน"""
+    host = (urlparse(url).hostname or "").lower()
+    return host in _ONION_ENGINE_HOSTS
 
 
 def get_tor_session():
@@ -294,18 +325,50 @@ def _href_to_onion(href, base_host):
     return None
 
 
-def _extract_links(html, base_url, limit):
-    """แทน inline-parsing เดิมที่ใช้ `except:` เปล่าครอบทุกอย่าง
-    (ซึ่งกลืน KeyboardInterrupt/SystemExit ไปด้วย) และคัดลิงก์ด้วย
-    'search' not in link ซึ่งตัดผลลัพธ์จริงที่บังเอิญมีคำว่า search ทิ้งไปฟรีๆ"""
+def _snippet_from(node, title: str) -> str:
+    """ดึงคำโปรยของแถวผลลัพธ์ โดยตัดชื่อเรื่องที่ซ้ำอยู่หัวแถวออก
+    snippet คือคำอธิบายที่เอนจินสรุปให้ — เป็นสัญญาณช่วยจัดอันดับก่อน scrape
+    และเป็นข้อมูลสำรองเวลา scrape เนื้อหาจริงไม่ได้"""
+    if node is None:
+        return ""
+    text = " ".join(node.get_text(separator=" ").split())
+    if title and text.lower().startswith(title.lower()):
+        text = text[len(title):].strip(" -–|:")
+    return text[:SEARCH_MAX_SNIPPET_CHARS]
+
+
+def _onion_result_rows(soup, selectors):
+    """คืนแถวผลลัพธ์ตาม CSS selector ของเอนจิน (title anchor แต่ละอัน)
+    ถ้าไม่มี selector หรือไม่แมตช์ ค่อยถอยไปพิจารณาทุก <a> ในหน้า"""
+    for selector in selectors or []:
+        try:
+            found = soup.select(selector)
+        except Exception:
+            found = []
+        anchors = [a for a in found if a.name == "a" and a.get("href")]
+        if anchors:
+            return anchors, True
+    return [a for a in soup.find_all("a", href=True)], False
+
+
+def _extract_links(html, base_url, limit, selectors=None):
+    """ดึงผลลัพธ์ .onion จากหน้าเอนจิน — คืน [{"title","link","snippet"}]
+
+    เดิมดึงทุก <a> ทั้งหน้าที่ resolve เป็น .onion ได้ จึงได้ลิงก์ข้ามเอนจิน,
+    nav, และโฆษณาปนมาเยอะ ตอนนี้:
+      1. ถ้ามี result_selectors ของเอนจิน ดึงเฉพาะในแถวผลลัพธ์
+      2. ตัดผลที่ชี้กลับหาตัวเอนจินค้นหาใดๆ (ไม่ใช่แค่เอนจินปัจจุบัน)
+      3. เก็บ snippet ของแต่ละแถวไว้ช่วยจัดอันดับและเป็นข้อมูลสำรอง
+    """
     soup = BeautifulSoup(html, "html.parser")
     base_host = (urlparse(_gateway_to_onion(base_url)).hostname or "").lower()
 
+    anchors, from_rows = _onion_result_rows(soup, selectors)
     links = []
     seen = set()
-    for anchor in soup.find_all("a", href=True):
+    for anchor in anchors:
         url = _href_to_onion(anchor.get("href"), base_host)
-        if not url:
+        if not url or _is_engine_onion(url):
             continue
 
         key = url.rstrip("/").lower()
@@ -319,11 +382,17 @@ def _extract_links(html, base_url, limit):
         if len(title) < SEARCH_MIN_TITLE_CHARS:
             continue
 
+        # snippet: ข้อความของแถว (บล็อกแม่ของ anchor) หักชื่อเรื่องออก
+        row = anchor.find_parent(["li", "article", "section", "div", "td", "p"]) or anchor
+        snippet = _snippet_from(row, title)
+
         seen.add(key)
-        links.append({"title": title, "link": url})
+        links.append({"title": title, "link": url, "snippet": snippet})
         if limit and len(links) >= limit:
             break
 
+    if not from_rows and selectors:
+        logger.debug("ONION FALLBACK | selector ไม่แมตช์ ใช้ทั้งหน้า base=%s", base_host)
     return links
 
 
@@ -338,13 +407,50 @@ def fetch_search_results(endpoint, query, deadline=None, max_results=None):
     """
     encoded_query = quote_plus(query)
     onion_url = endpoint.format(query=encoded_query)
-    engine_name = _ENGINE_NAME_BY_URL.get(endpoint, urlparse(onion_url).hostname or endpoint)
+    engine = _ENGINE_BY_URL.get(endpoint, {})
+    engine_name = engine.get("name", _ENGINE_NAME_BY_URL.get(endpoint, urlparse(onion_url).hostname or endpoint))
+    selectors = engine.get("result_selectors")
     limit = SEARCH_MAX_RESULTS_PER_ENGINE if max_results is None else max_results
 
     engine_key = f"engine:{engine_name}"
     if nethealth.blocked(engine_key):
         logger.debug("SEARCH ENGINE SKIPPED (cooldown) | engine=%s", engine_name)
         return []
+
+    def _tag(results):
+        for item in results:
+            item["engine"] = engine_name
+            item["origin"] = "darkweb"
+        return results
+
+    # ดัชนี onion ที่มีหน้าเว็บเปิด (Ahmia web): ยิงตรงผ่าน clearnet ครั้งเดียว
+    # ไม่ต้องมี Tor เลย — ผลที่ได้ยังเป็น .onion ตามปกติ ทำให้ค้น dark web ได้
+    # แม้ Tor ต่อไม่ได้ และดัชนีที่คัดกรองแล้วให้ผลแม่นกว่าเอนจิน onion ทั่วไป
+    if engine.get("clearnet_index"):
+        timeout = _timeout_for(deadline)
+        if timeout is None:
+            return []
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+        }
+        try:
+            response = _get_session(use_tor=False).get(
+                onion_url, headers=headers, timeout=timeout, allow_redirects=True
+            )
+            if response.status_code != 200:
+                nethealth.record(engine_key, False, nethealth.ENGINE_FAILURE_THRESHOLD)
+                return []
+            nethealth.record(engine_key, True, nethealth.ENGINE_FAILURE_THRESHOLD)
+            return _tag(_extract_links(response.text, onion_url, limit, selectors))
+        except requests.RequestException as exc:
+            logger.debug("SEARCH INDEX FAILED | engine=%s: %s", engine_name, exc)
+            nethealth.record(engine_key, False, nethealth.ENGINE_FAILURE_THRESHOLD)
+            return []
+        except Exception as exc:
+            logger.debug("SEARCH INDEX PARSE FAILED | engine=%s: %s", engine_name, exc)
+            return []
 
     attempts = []
     if _tor_enabled():
@@ -390,13 +496,13 @@ def fetch_search_results(endpoint, query, deadline=None, max_results=None):
             # ได้ 200 = เส้นทางใช้ได้ ต่อให้ query นี้ไม่มีผลลัพธ์ก็ตาม
             reached = True
             nethealth.record(route_key, True, nethealth.ROUTE_FAILURE_THRESHOLD)
-            links = _extract_links(response.text, attempt_url, limit)
+            links = _extract_links(response.text, attempt_url, limit, selectors)
             if links:
                 logger.debug(
                     "SEARCH OK | engine=%s route=%s results=%d", engine_name, route, len(links)
                 )
                 nethealth.record(engine_key, True, nethealth.ENGINE_FAILURE_THRESHOLD)
-                return links
+                return _tag(links)
         except requests.exceptions.InvalidSchema as exc:
             # socks5h ต้องมี PySocks (มีใน requirements.txt) — ถ้าหาย ให้ตกไป gateway
             logger.warning("SEARCH TOR UNAVAILABLE | engine=%s: %s", engine_name, exc)
