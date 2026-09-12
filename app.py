@@ -3057,12 +3057,30 @@ def check_module_integrity() -> bool:
     return False
 
 
+def log_tor_status() -> bool:
+    """บอกตั้งแต่บูตว่า dark web ค้นได้ไหม — ผู้ใช้เคยเห็น 'Tor: ไม่พร้อมใช้งาน'
+    กลางผลลัพธ์แล้วไม่รู้ว่าต้องทำอะไร บรรทัดนี้บอกสถานะและวิธีแก้ให้ชัดตั้งแต่แรก"""
+    host = nethealth.TOR_SOCKS_HOST
+    port = nethealth.TOR_SOCKS_PORT
+    if nethealth.tor_reachable(force=True):
+        logger.info("TOR: เชื่อมต่อได้ที่ %s:%s — ค้น dark web (.onion) ได้", host, port)
+        return True
+    logger.warning(
+        "TOR: เชื่อมต่อ %s:%s ไม่ได้ — /identity, /corporate, /search จะค้นได้เฉพาะ "
+        "เว็บเปิดไปก่อน วิธีเปิด dark web: รัน Tor ในคอนเทนเนอร์ (Dockerfile ติดตั้งไว้แล้ว "
+        "ผ่าน docker-entrypoint.sh) หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
+        host, port,
+    )
+    return False
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
     logger.info("BOT STARTING")
     check_module_integrity()
+    log_tor_status()
     # Names and model ids only -- never a key or any fragment of one.
     config.log_startup_summary()
     db_info()

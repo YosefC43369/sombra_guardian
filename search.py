@@ -539,14 +539,36 @@ def format_search_results(results, limit=None, header="🔎 ผลการค�
 # โซเชียลของใครเลย งาน OSINT ตัวตนบุคคลส่วนใหญ่อยู่บนเว็บเปิด จึงต้องมีชั้นนี้
 # engine ทุกตัวที่เลือกมาเรียกได้โดยไม่ต้องใช้ API key
 
+# แต่ละ engine พก:
+#   result_selectors : CSS ที่ชี้ "โซนผลลัพธ์" เท่านั้น — ดึงลิงก์เฉพาะในโซนนี้
+#                      ไม่งั้นจะได้ลิงก์ footer/nav/โซเชียลของตัว engine เองปนมา
+#                      (นั่นคือบั๊กที่ทำให้ /search คืน app.startpage.com, git.marginalia.nu)
+#   own_domains      : โดเมนของ engine เอง (จับรวม subdomain) ที่ต้องตัดทิ้งเสมอ
 CLEARNET_ENGINES = [
-    {"name": "DuckDuckGo", "url": "https://html.duckduckgo.com/html/?q={query}"},
-    {"name": "Mojeek", "url": "https://www.mojeek.com/search?q={query}"},
-    {"name": "Brave", "url": "https://search.brave.com/search?q={query}"},
-    {"name": "Startpage", "url": "https://www.startpage.com/sp/search?query={query}"},
-    {"name": "Bing", "url": "https://www.bing.com/search?q={query}&setlang=th"},
-    {"name": "Marginalia", "url": "https://search.marginalia.nu/search?query={query}"},
-    {"name": "Ecosia", "url": "https://www.ecosia.org/search?q={query}"},
+    {"name": "DuckDuckGo", "url": "https://html.duckduckgo.com/html/?q={query}",
+     "result_selectors": ["a.result__a", "a.result__url"],
+     "own_domains": ["duckduckgo.com", "duck.com"]},
+    {"name": "Mojeek", "url": "https://www.mojeek.com/search?q={query}",
+     "result_selectors": ["ul.results-standard li h2 a", "a.ob", "ul.results-standard li a"],
+     "own_domains": ["mojeek.com"]},
+    {"name": "Brave", "url": "https://search.brave.com/search?q={query}",
+     "result_selectors": ["a.result-header", "#results a[href^='http']", "a.h"],
+     "own_domains": ["brave.com"]},
+    {"name": "Startpage", "url": "https://www.startpage.com/sp/search?query={query}",
+     "result_selectors": ["a.result-link", "a.w-gl__result-title",
+                          "a.result-title", "div.w-gl__result a[href^='http']"],
+     "own_domains": ["startpage.com"]},
+    {"name": "Bing", "url": "https://www.bing.com/search?q={query}&setlang=th",
+     "result_selectors": ["li.b_algo h2 a", "ol#b_results li.b_algo a[href^='http']"],
+     "own_domains": ["bing.com", "microsoft.com", "microsofttranslator.com", "msn.com"]},
+    {"name": "Marginalia", "url": "https://search.marginalia.nu/search?query={query}",
+     "result_selectors": ["section.card.search-result h2 a", "div.result h2 a",
+                          "a.result-title", "main a[href^='http']"],
+     "own_domains": ["marginalia.nu", "marginalia-search.com"]},
+    {"name": "Ecosia", "url": "https://www.ecosia.org/search?q={query}",
+     "result_selectors": ["a.result__title-link", "a.result-title",
+                          "div.mainline a.result__link"],
+     "own_domains": ["ecosia.org"]},
 ]
 
 CLEARNET_ENABLED = nethealth.env_bool("SEARCH_CLEARNET_ENABLED", "true")
@@ -558,22 +580,29 @@ CLEARNET_DISABLED = {
     for name in nethealth.env_list("SEARCH_CLEARNET_DISABLED", "") or []
 }
 
-# โฮสต์ที่เป็นโครงสร้างของ engine เอง / CDN / นโยบาย — ไม่ใช่ผลการค้นหา
-_CLEARNET_SKIP_HOSTS = frozenset((
-    "duckduckgo.com", "html.duckduckgo.com", "duck.com", "spreadprivacy.com",
-    "mojeek.com", "www.mojeek.com", "search.brave.com", "brave.com",
-    "startpage.com", "www.startpage.com", "bing.com", "www.bing.com",
-    "microsoft.com", "go.microsoft.com", "microsofttranslator.com",
-    "marginalia.nu", "search.marginalia.nu", "ecosia.org", "www.ecosia.org",
-    "google.com", "www.google.com", "policies.google.com", "support.google.com",
-    "w3.org", "schema.org", "gstatic.com", "googleapis.com", "gravatar.com",
-    "creativecommons.org", "wikimedia.org",
+# โดเมนที่เป็นโครงสร้างของ engine / CDN / โซเชียลของตัว engine เอง / นโยบาย
+# เทียบแบบ suffix จึงจับ subdomain ทั้งหมดด้วย (เดิมเทียบตรงตัว app.startpage.com
+# กับ git.marginalia.nu จึงหลุดผ่านมาเป็น "ผลลัพธ์")
+_CLEARNET_SKIP_DOMAINS = frozenset((
+    "duckduckgo.com", "duck.com", "spreadprivacy.com",
+    "mojeek.com", "brave.com", "startpage.com", "startpage.eu",
+    "bing.com", "microsoft.com", "microsofttranslator.com", "msn.com",
+    "marginalia.nu", "marginalia-search.com", "ecosia.org",
+    "google.com", "gstatic.com", "googleapis.com", "gravatar.com",
+    "w3.org", "schema.org", "creativecommons.org", "wikimedia.org",
+    # โซเชียลของตัว engine (footer) — จับที่ path แทน ดูใน _is_engine_social()
+))
+# บัญชีโซเชียลของตัว engine เองที่โผล่ใน footer — ตัด path พวกนี้ทิ้ง
+_ENGINE_SOCIAL_HANDLES = frozenset((
+    "startpage", "startpagesearch", "duckduckgo", "mojeek", "brave",
+    "bravesoftware", "bing", "ecosia", "marginaliasearch", "marginalia_nu",
 ))
 # พารามิเตอร์ที่ engine ใช้ห่อ URL ปลายทางไว้ (DuckDuckGo=uddg, Bing=u, ทั่วไป=url)
 _CLEARNET_REDIRECT_KEYS = ("uddg", "url", "u", "q", "r", "redirect", "target", "to")
 _RE_THAI = re.compile(r"[฀-๿]")
 
 _CLEARNET_ENGINE_NAME_BY_URL = {e["url"]: e["name"] for e in CLEARNET_ENGINES}
+_CLEARNET_ENGINE_BY_URL = {e["url"]: e for e in CLEARNET_ENGINES}
 DEFAULT_CLEARNET_ENGINES = [e["url"] for e in CLEARNET_ENGINES]
 
 
@@ -584,6 +613,42 @@ def _active_clearnet_engines():
     ]
 
 
+def _host_matches(host: str, domains) -> bool:
+    """host ตรงกับโดเมนใน set ไหม โดยจับ subdomain ด้วย (suffix match)
+    เช่น app.startpage.com ตรงกับ startpage.com"""
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for domain in domains:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
+def _is_engine_social(url: str) -> bool:
+    """ลิงก์โซเชียลของตัว engine เองใน footer (เช่น twitter.com/startpage)
+    บัญชีโซเชียลจริงของเป้าหมายจะไม่ตรงกับรายชื่อแบรนด์ engine พวกนี้"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    social_hosts = ("twitter.com", "x.com", "facebook.com", "instagram.com",
+                    "mastodon.social", "reddit.com", "youtube.com", "linkedin.com",
+                    "github.com", "t.me", "tiktok.com")
+    if not any(host == h or host.endswith("." + h) for h in social_hosts):
+        return False
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    if not segments:
+        return False
+    # reddit ใช้ /r/<name> หรือ /user/<name>, ที่อื่นใช้ /<name>
+    if segments[0].lower() in ("r", "user", "u") and len(segments) > 1:
+        handle = segments[1]
+    else:
+        handle = segments[0]
+    return handle.lstrip("@").lower() in _ENGINE_SOCIAL_HANDLES
+
+
 def _accept_language_for(query: str) -> str:
     """คำค้นภาษาไทยต้องขอผลภาษาไทย ไม่งั้น engine หลายตัวคืนผลอังกฤษล้วน
     แล้วชื่อคนไทยก็จะหาไม่เจอทั้งที่มีข้อมูลอยู่"""
@@ -592,7 +657,7 @@ def _accept_language_for(query: str) -> str:
     return "en-US,en;q=0.9,th;q=0.6"
 
 
-def _href_to_clearnet(href, base_host):
+def _href_to_clearnet(href, base_host, own_domains=()):
     """ดึง URL ผลลัพธ์จริงจาก href หนึ่งอัน — engine ส่วนใหญ่ห่อปลายทางไว้ใน
     พารามิเตอร์ redirect (DuckDuckGo ใช้ uddg=, Bing ใช้ u=) ถ้าไม่แกะออก
     เราจะได้แต่ลิงก์ของ engine เองซึ่งไม่มีค่าเชิงข่าวกรองเลย"""
@@ -626,22 +691,41 @@ def _href_to_clearnet(href, base_host):
         host = (parsed.hostname or "").lower()
         if not host or host == base_host:
             continue
-        stripped = host[4:] if host.startswith("www.") else host
-        if host in _CLEARNET_SKIP_HOSTS or stripped in _CLEARNET_SKIP_HOSTS:
+        # ตัดโดเมนของ engine เอง (รวม subdomain) + engine โครงสร้าง/CDN/นโยบาย
+        if _host_matches(host, own_domains) or _host_matches(host, _CLEARNET_SKIP_DOMAINS):
+            continue
+        # ตัดลิงก์โซเชียลของตัว engine เองใน footer
+        if _is_engine_social(candidate):
             continue
         # ตัด fragment ทิ้ง คนละ fragment ไม่ใช่คนละหน้า
         return parsed._replace(fragment="").geturl()
     return None
 
 
-def _extract_clearnet_links(html, base_url, limit):
+def _anchors_in_results(soup, selectors):
+    """คืน anchor เฉพาะในโซนผลลัพธ์ตาม CSS selector ของ engine นั้น
+    ถ้า selector ไม่แมตช์เลย (engine เปลี่ยน markup) ค่อยถอยไปทั้งหน้า
+    ซึ่งตัวกรองโดเมน/โซเชียลจะช่วยกันขยะไว้อีกชั้น"""
+    for selector in selectors or []:
+        try:
+            found = soup.select(selector)
+        except Exception:
+            found = []
+        anchors = [a for a in found if a.name == "a" and a.get("href")]
+        if anchors:
+            return anchors, True
+    return [a for a in soup.find_all("a", href=True)], False
+
+
+def _extract_clearnet_links(html, base_url, limit, selectors=None, own_domains=()):
     soup = BeautifulSoup(html, "html.parser")
     base_host = (urlparse(base_url).hostname or "").lower()
 
+    anchors, from_results = _anchors_in_results(soup, selectors)
     links = []
     seen = set()
-    for anchor in soup.find_all("a", href=True):
-        url = _href_to_clearnet(anchor.get("href"), base_host)
+    for anchor in anchors:
+        url = _href_to_clearnet(anchor.get("href"), base_host, own_domains)
         if not url:
             continue
         key = url.rstrip("/").lower()
@@ -658,13 +742,16 @@ def _extract_clearnet_links(html, base_url, limit):
         links.append({"title": title, "link": url})
         if limit and len(links) >= limit:
             break
+    if not from_results:
+        logger.debug("CLEARNET FALLBACK | ใช้ทั้งหน้า (selector ไม่แมตช์) base=%s", base_host)
     return links
 
 
 def fetch_clearnet_results(endpoint, query, deadline=None, max_results=None):
     """ยิง clearnet engine 1 ตัว ใช้ circuit breaker ตัวเดียวกับฝั่ง dark web
     จึงจำได้ว่า engine ไหนบล็อกเราอยู่และข้ามไปชั่วคราว"""
-    engine_name = _CLEARNET_ENGINE_NAME_BY_URL.get(endpoint, endpoint)
+    engine = _CLEARNET_ENGINE_BY_URL.get(endpoint, {})
+    engine_name = engine.get("name", _CLEARNET_ENGINE_NAME_BY_URL.get(endpoint, endpoint))
     engine_key = f"engine:{engine_name}"
     if nethealth.blocked(engine_key):
         logger.debug("CLEARNET ENGINE SKIPPED (cooldown) | engine=%s", engine_name)
@@ -691,7 +778,11 @@ def fetch_clearnet_results(endpoint, query, deadline=None, max_results=None):
                          engine_name, response.status_code)
             nethealth.record(engine_key, False, nethealth.ENGINE_FAILURE_THRESHOLD)
             return []
-        links = _extract_clearnet_links(response.text, url, limit)
+        links = _extract_clearnet_links(
+            response.text, url, limit,
+            selectors=engine.get("result_selectors"),
+            own_domains=engine.get("own_domains", ()),
+        )
         # ตอบ 200 = engine ยังใช้งานได้ ถึงจะไม่มีผลลัพธ์ก็ตาม
         # การนับ "ผลว่าง" เป็นความล้มเหลวจะพัก engine ที่ทำงานดีทิ้งไป 5 นาที
         # เพราะชื่อคนที่หายากจริงๆ ย่อมไม่มีผลในบาง engine เป็นเรื่องปกติ
