@@ -5,7 +5,7 @@
 <h1 align="center">🛡️ Sombra Guardian</h1>
 
 <p align="center">
-  <b>บอทดูแลกลุ่ม Telegram แบบครบวงจร — กันสแปม · ผู้ช่วย AI · OSINT · สืบสวนเหตุการณ์ · เก็บหลักฐาน · การเงินกลุ่ม</b><br>
+  <b>บอตดูแลกลุ่ม Telegram แบบครบวงจร — กันสแปม · ผู้ช่วย AI · OSINT · ข่าวกรอง · เก็บหลักฐาน · ระบบบล็อกเชนและคริปโต · เจาะระบบ/หาช่องโหว่ </b><br>
   <sub>An all-in-one Telegram group guardian: moderation, AI assistant, OSINT, incident investigation, evidence vault, and group finance.</sub>
 </p>
 
