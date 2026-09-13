@@ -56,6 +56,7 @@
 | 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์ |
 | 🐞 **Bug Bounty / Sec Testing** | จัดการ Program/Authorization/Scope, บันทึก Finding/Evidence/Case, สแกนความปลอดภัยเฉพาะเป้าหมายที่ได้รับอนุญาต |
 | 🛰️ **Scan Campaign** | รันชุด passive check รวดเดียว, ให้เกรดภาพรวมแบบอธิบายได้, เก็บประวัติสแกน, และยกข้อสังเกตขึ้นเป็น Finding ได้ด้วยคำสั่งเดียว |
+| 🎯 **Red Team Assessment** | จัดการ Engagement + Rules of Engagement (RoE gate), ทะเบียนเป้าหมายในขอบเขต, จัดระดับข้อค้นพบ (VERIFIED_RISK/EXPOSURE/LEAD/UNKNOWN แบบ human-in-the-loop), เส้นทางโจมตี, คลังหลักฐาน SHA-256, ตรวจช่องว่างการป้องกัน, ไทม์ไลน์, และรายงาน/ส่งมอบ |
 | 📊 **Reporting** | Dashboard สรุปกลุ่ม, รายงานแยก 4 ส่วน (ข้อเท็จจริง / การวิเคราะห์ / การดำเนินการ / ข้อจำกัด), ส่งออก JSON/CSV |
 | 💰 **Group Finance** | บันทึกหนี้ (`/sign`), กระเป๋าเงิน, ฝาก/ถอน/โอน, บิล, ประวัติธุรกรรม |
 | 📰 **News** | ดึงข่าวความปลอดภัยจาก RSS แล้วสรุปด้วย AI ส่งเข้ากลุ่มอัตโนมัติ |
@@ -194,6 +195,21 @@ docker run --env-file .env sombra-guardian
 | `/scanview <scan_id>` | รายงานผลสแกนละเอียด + เลขลำดับข้อสังเกต |
 | `/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ]` | ยกข้อสังเกตขึ้นเป็น Finding จริง (re-check scope) |
 
+### 🎯 Red Team Assessment *(Admin + Rules of Engagement)*
+
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/engagement new\|list\|show\|authorize\|operator\|status\|kill` | จัดการ Engagement + RoE sign-off + kill-switch |
+| `/scope <eid> add\|list` | ขอบเขต RoE (delegate ไป `scope_policy`) |
+| `/roe <eid> <target>` | ตรวจ RoE gate ว่า target อยู่ในขอบเขตหรือไม่ (ไม่แตะเครือข่าย) |
+| `/rttarget <eid> add\|list` | ทะเบียนเป้าหมาย — ลงทะเบียนได้เฉพาะที่ RoE อนุญาต |
+| `/rtfinding <eid> new\|list\|reclass` | ข้อค้นพบ; VERIFIED_RISK ต้องมี human review + หลักฐาน |
+| `/rtvector <eid> new\|list\|review` | เส้นทางโจมตีที่เป็นไปได้ (CONFIRMED ต้องผ่านรีวิว) |
+| `/rtevidence <eid> add\|list\|verify` | คลังหลักฐาน + ตรวจ SHA-256 (PII ถูก scrub) |
+| `/rtreview <eid> queue\|decide` | คิว human-in-the-loop (P1/P2/P3) |
+| `/rttimeline <eid>` | ไทม์ไลน์ (แยก OBSERVED/OPERATOR/ADMIN) |
+| `/redteam_report <eid> [json\|csv\|remediation]` | รายงาน/ส่งออก/แพ็กเกจส่งมอบ Blue Team |
+
 ### 💰 Finance &amp; 🗂️ GitHub
 
 | คำสั่ง | คำอธิบาย |
@@ -221,6 +237,8 @@ docker run --env-file .env sombra-guardian
 | `scope_policy.py` · `findings.py` · `bb_case.py` · `bb_report.py` | Bug bounty: authorization → finding → case → report |
 | `security_testing.py` | passive check เฉพาะ scope ที่อนุญาต (headers/tls/cookies/redirects/cors/technology) |
 | `bb_scan.py` | Scan campaign — orchestrate หลาย check, ให้เกรด, เก็บประวัติ, bridge ข้อสังเกต → Finding |
+| `redteam.py` | Red Team: engagement + RoE gate (reuse `scope_policy.evaluate_target`), targets, findings classification, vectors, evidence (SHA-256 + append-only custody), timeline, review queue, defensive-gap, retention |
+| `redteam_report.py` | Red Team executive/technical report, remediation hand-off, JSON/CSV export (แยก RAW/OBSERVATION/AI/HUMAN) |
 | `search.py` · `scrape.py` · `osint.py` · `coordinator.py` · `username_osint.py` · `nethealth.py` | ชุด OSINT / ค้นหา / Tor routing |
 | `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
 | `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |

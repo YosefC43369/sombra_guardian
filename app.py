@@ -79,6 +79,8 @@ from bb_scan import (
     format_scan_result, format_scan_report, format_scan_list, format_promote_result,
     VALID_PROFILES, DEFAULT_PROFILE,
 )
+import redteam as rtm
+import redteam_report as rtr
 
 import debt_ledger as dl
 import debt_report as dr
@@ -500,7 +502,18 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scan <program_id> [quick|full] <target> - สแกนแบบ passive หลายรายการรวดเดียว\n"
         "/scans <program_id> - ประวัติการสแกน\n"
         "/scanview <scan_id> - รายงานผลสแกนแบบละเอียด\n"
-        "/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ] - ยกข้อสังเกตเป็น Finding"
+        "/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ] - ยกข้อสังเกตเป็น Finding\n"
+        "\n— Red Team Assessment (Admin + Rules of Engagement) —\n"
+        "/engagement new|list|show|authorize|operator|status|kill - จัดการงาน Red Team\n"
+        "/scope <engagement_id> add|list - ขอบเขต (Rules of Engagement)\n"
+        "/roe <engagement_id> <target> - ตรวจว่า target อยู่ในขอบเขต RoE หรือไม่\n"
+        "/rttarget <engagement_id> add|list - ทะเบียนเป้าหมาย (ต้องอยู่ในขอบเขต)\n"
+        "/rtfinding <engagement_id> new|list|reclass - ข้อค้นพบ + การจัดระดับ\n"
+        "/rtvector <engagement_id> new|list|review - เส้นทางโจมตีที่เป็นไปได้\n"
+        "/rtevidence <engagement_id> add|list|verify - คลังหลักฐาน + ตรวจความครบถ้วน\n"
+        "/rtreview <engagement_id> [queue|decide] - คิวตรวจสอบโดยมนุษย์\n"
+        "/rttimeline <engagement_id> - ไทม์ไลน์การปฏิบัติงาน\n"
+        "/redteam_report <engagement_id> [json|csv|remediation] - รายงาน/ส่งมอบ"
     )
     await update.message.reply_text(text)
     
@@ -3779,6 +3792,450 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
             reason=f"{result['old_status']} -> {result['new_status']}", executed=True)
 
 
+# ---------------- Red Team Assessment (Phase 11, RoE-gated) ----------------
+#
+# Every command is Telegram-Admin gated (necessary, not sufficient) and
+# every operational action additionally passes redteam.check_roe(), whose
+# operator allowlist / scope / window / kill-switch decide authorization.
+# check_roe has no is_admin input, so chat-admin never widens RoE scope.
+
+RT_ADMIN_ONLY = "❌ คำสั่งนี้ใช้ได้เฉพาะ Admin"
+
+
+async def _rt_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not await is_admin(update, context):
+        await update.message.reply_text(RT_ADMIN_ONLY)
+        return False
+    return True
+
+
+def _rt_eid(args, index=0):
+    """Parse an engagement id from args[index]; None if not an int."""
+    if len(args) <= index or not str(args[index]).lstrip("-").isdigit():
+        return None
+    return int(args[index])
+
+
+async def cmd_engagement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/engagement new|list|show|authorize|operator|status|kill"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/engagement new <ชื่องาน...>\n"
+            "/engagement list\n"
+            "/engagement show <engagement_id>\n"
+            "/engagement authorize <engagement_id> <RoE_reference...>\n"
+            "/engagement operator <engagement_id> <user_id>\n"
+            "/engagement status <engagement_id> <PAUSED|AUTHORIZED|LIMITED_SCOPE|EXPIRED>\n"
+            "/engagement kill <engagement_id> [เหตุผล...]")
+    sub = args[0].lower()
+
+    if sub == "new":
+        name = " ".join(args[1:])
+        if not name:
+            return await update.message.reply_text("ใช้งาน: /engagement new <ชื่องาน...>")
+        r = rtm.create_engagement(chat_id, name, created_by=actor)
+        if not r.ok:
+            return await update.message.reply_text(f"❌ {r.reason} {r.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ สร้าง Engagement {r.detail} (#{r.id}) สถานะ PENDING_APPROVAL\n"
+            f"ต่อไป: /scope {r.id} add INCLUDE DOMAIN <domain> แล้ว "
+            f"/engagement authorize {r.id} <RoE ref>")
+
+    if sub == "list":
+        items = rtm.list_engagements(chat_id)
+        if not items:
+            return await update.message.reply_text("ยังไม่มี Engagement ในกลุ่มนี้")
+        lines = [f"#{e['engagement_id']} {e['code']} [{e['status']}] {e['name']}"
+                 for e in items]
+        return await _reply_chunked(update, "Engagements:\n" + "\n".join(lines))
+
+    eid = _rt_eid(args, 1)
+    if eid is None:
+        return await update.message.reply_text("❌ ต้องระบุ engagement_id เป็นตัวเลข")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != chat_id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+
+    if sub == "show":
+        stats = rtm.get_engagement_stats(eid)
+        ops = ", ".join(str(o["operator_id"]) for o in rtm.list_operators(eid))
+        text = (f"Engagement {engagement['code']} (#{eid})\n"
+                f"ชื่อ: {engagement['name']}\nสถานะ: {engagement['status']}\n"
+                f"RoE: {engagement.get('roe_reference') or '-'}\n"
+                f"ผู้ปฏิบัติงาน: {ops}\n"
+                f"targets={stats['targets']} findings VERIFIED={stats['by_class'].get('VERIFIED_RISK',0)} "
+                f"EXPOSURE={stats['by_class'].get('EXPOSURE',0)} LEAD={stats['by_class'].get('LEAD',0)}\n"
+                f"defensive_gaps={stats['defensive_gaps']} open_reviews={stats['open_reviews']}")
+        return await update.message.reply_text(text)
+
+    if sub == "authorize":
+        roe = " ".join(args[2:])
+        if not roe:
+            return await update.message.reply_text(
+                "ใช้งาน: /engagement authorize <engagement_id> <RoE_reference...>\n"
+                "ต้องมี scope rule อย่างน้อยหนึ่งข้อก่อน (/scope add)")
+        r = rtm.authorize_engagement(eid, approver_id=actor, roe_reference=roe)
+        if not r.ok:
+            return await update.message.reply_text(f"❌ {r.reason} {r.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ Engagement {engagement['code']} → {r.detail} (RoE: {roe})")
+
+    if sub == "operator":
+        if not _rt_eid(args, 2):
+            return await update.message.reply_text(
+                "ใช้งาน: /engagement operator <engagement_id> <user_id>")
+        r = rtm.add_operator(eid, int(args[2]), actor_id=actor)
+        return await update.message.reply_text(
+            f"✅ เพิ่มผู้ปฏิบัติงาน {args[2]}" if r.ok else f"❌ {r.reason}")
+
+    if sub == "status":
+        if len(args) < 3:
+            return await update.message.reply_text(
+                "ใช้งาน: /engagement status <engagement_id> <สถานะ>")
+        r = rtm.set_engagement_status(eid, args[2], actor_id=actor)
+        return await update.message.reply_text(
+            f"✅ {r.detail}" if r.ok else f"❌ {r.reason} {r.detail}".strip())
+
+    if sub == "kill":
+        r = rtm.trigger_kill_switch(eid, actor_id=actor, reason=" ".join(args[2:]))
+        return await update.message.reply_text(
+            f"🛑 KILL-SWITCH: Engagement {engagement['code']} → TERMINATED" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scope <engagement_id> add <INCLUDE|EXCLUDE> <DOMAIN|URL|IP|CIDR> <pattern> | list"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน:\n/scope <engagement_id> add <INCLUDE|EXCLUDE> <DOMAIN|URL|IP|CIDR> <pattern>\n"
+            "/scope <engagement_id> list")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower()
+    if sub == "add":
+        if len(args) < 5:
+            return await update.message.reply_text(
+                "ใช้งาน: /scope <engagement_id> add <INCLUDE|EXCLUDE> <DOMAIN|URL|IP|CIDR> <pattern>")
+        r = rtm.add_scope(eid, args[2], args[3], args[4], actor_id=actor)
+        return await update.message.reply_text(
+            f"✅ เพิ่ม scope: {r.detail}" if r.ok else f"❌ {r.reason} {r.detail}".strip())
+    if sub == "list":
+        rules = rtm.list_scope(eid)
+        if not rules:
+            return await update.message.reply_text("ยังไม่มี scope rule")
+        lines = [f"#{r['rule_id']} {r['rule_type']} {r['target_type']} {r['pattern']}"
+                 for r in rules]
+        return await _reply_chunked(update, "Scope:\n" + "\n".join(lines))
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_roe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/roe <engagement_id> <target> — dry-run the RoE gate for a target."""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text("ใช้งาน: /roe <engagement_id> <target>")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    target = " ".join(args[1:])
+    d = rtm.check_roe(eid, target, update.effective_user.id)
+    if d.allowed:
+        return await update.message.reply_text(f"✅ ALLOW — {target} อยู่ในขอบเขต RoE")
+    await update.message.reply_text(
+        f"⛔ DENY — {target}\nด่านที่บล็อก: {d.stage}\nเหตุผล: {d.reason}"
+        f"{chr(10) + d.detail if d.detail else ''}")
+
+
+async def cmd_rttarget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rttarget <engagement_id> add <category> <value> | list"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน:\n/rttarget <engagement_id> add <category> <value>\n"
+            "/rttarget <engagement_id> list\n"
+            "category: " + ", ".join(sorted(rtm.VALID_ASSET_CATEGORIES)))
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower()
+    if sub == "add":
+        if len(args) < 4:
+            return await update.message.reply_text(
+                "ใช้งาน: /rttarget <engagement_id> add <category> <value>")
+        r = rtm.register_target(eid, " ".join(args[3:]), args[2], operator_id=actor)
+        return await update.message.reply_text(
+            f"✅ ลงทะเบียนเป้าหมาย #{r.id} ({r.detail})" if r.ok
+            else f"⛔ ปฏิเสธ: {r.reason} {r.detail}".strip())
+    if sub == "list":
+        targets = rtm.list_targets(eid)
+        if not targets:
+            return await update.message.reply_text("ยังไม่มีเป้าหมาย")
+        lines = [f"#{t['target_id']} [{t['category']}/{t['authorization_status']}] "
+                 f"{t['value']} (risk {t['risk_score']}, {t['testing_status']})"
+                 for t in targets]
+        return await _reply_chunked(update, "Targets:\n" + "\n".join(lines))
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_rtfinding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rtfinding <engagement_id> new|list|reclass"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/rtfinding <engagement_id> new <UNKNOWN|LEAD|EXPOSURE> <severity> <confidence> <หัวข้อ...>\n"
+            "/rtfinding <engagement_id> list [classification]\n"
+            "/rtfinding <engagement_id> reclass <finding_id> <classification>\n"
+            "severity: CRITICAL/HIGH/MEDIUM/LOW/INFORMATIONAL · confidence: HIGH/MEDIUM/LOW\n"
+            "หมายเหตุ: VERIFIED_RISK ตั้งตรงๆ ไม่ได้ ต้องผ่าน /rtreview decide หรือ reclass พร้อมหลักฐาน")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower()
+    if sub == "new":
+        if len(args) < 6:
+            return await update.message.reply_text(
+                "ใช้งาน: /rtfinding <engagement_id> new <class> <severity> <confidence> <หัวข้อ...>")
+        r = rtm.create_finding(eid, " ".join(args[5:]), operator_id=actor,
+                               classification=args[2], severity=args[3], confidence=args[4])
+        return await update.message.reply_text(
+            f"✅ Finding #{r.id} ({r.detail})" if r.ok else f"❌ {r.reason} {r.detail}".strip())
+    if sub == "list":
+        cls = args[2] if len(args) > 2 else None
+        findings = rtm.list_findings(eid, classification=cls)
+        if not findings:
+            return await update.message.reply_text("ยังไม่มี finding")
+        lines = [f"#{f['finding_id']} [{f['classification']}/{f['severity']}] {f['title']} "
+                 f"(conf {f['confidence']})" for f in findings]
+        return await _reply_chunked(update, "Findings:\n" + "\n".join(lines))
+    if sub == "reclass":
+        if len(args) < 4 or not _rt_eid(args, 2):
+            return await update.message.reply_text(
+                "ใช้งาน: /rtfinding <engagement_id> reclass <finding_id> <classification>")
+        f = rtm.get_finding(int(args[2]))
+        if not f or f["engagement_id"] != eid:
+            return await update.message.reply_text("❌ ไม่พบ finding นี้ใน engagement นี้")
+        r = rtm.reclassify_finding(int(args[2]), args[3], operator_id=actor)
+        return await update.message.reply_text(
+            f"✅ {r.detail}" if r.ok else f"❌ {r.reason} {r.detail}".strip())
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_rtvector(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rtvector <engagement_id> new|list|review"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน:\n/rtvector <engagement_id> new <หัวข้อ...>\n"
+            "/rtvector <engagement_id> list\n"
+            "/rtvector <engagement_id> review <vector_id> <CONFIRMED|PROBABLE|POSSIBLE|"
+            "UNVERIFIED|REMEDIATED> [confidence]")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower()
+    if sub == "new":
+        if len(args) < 3:
+            return await update.message.reply_text("ใช้งาน: /rtvector <engagement_id> new <หัวข้อ...>")
+        r = rtm.create_vector(eid, " ".join(args[2:]), operator_id=actor)
+        return await update.message.reply_text(
+            f"✅ Vector #{r.id} (UNVERIFIED)" if r.ok else f"❌ {r.reason}")
+    if sub == "list":
+        vectors = rtm.list_vectors(eid)
+        if not vectors:
+            return await update.message.reply_text("ยังไม่มี vector")
+        lines = [f"V#{v['vector_id']} [{v['status']}/{v['confidence']}] {v['title']} "
+                 f"(impact {v['impact_score']})" for v in vectors]
+        return await _reply_chunked(update, "Vectors:\n" + "\n".join(lines))
+    if sub == "review":
+        if len(args) < 4 or not _rt_eid(args, 2):
+            return await update.message.reply_text(
+                "ใช้งาน: /rtvector <engagement_id> review <vector_id> <status> [confidence]")
+        v = rtm.get_vector(int(args[2]))
+        if not v or v["engagement_id"] != eid:
+            return await update.message.reply_text("❌ ไม่พบ vector นี้ใน engagement นี้")
+        conf = args[4] if len(args) > 4 else ""
+        r = rtm.review_vector(int(args[2]), args[3], operator_id=actor, confidence=conf)
+        return await update.message.reply_text(
+            f"✅ Vector → {r.detail}" if r.ok else f"❌ {r.reason} {r.detail}".strip())
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_rtevidence(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rtevidence <engagement_id> add|list|verify"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None or len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/rtevidence <engagement_id> add <kind> <finding_id|-> <summary...>\n"
+            "/rtevidence <engagement_id> list [finding_id]\n"
+            "/rtevidence <engagement_id> verify <evidence_id>\n"
+            "kind: " + ", ".join(sorted(rtm.VALID_EVIDENCE_KINDS)))
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower()
+    if sub == "add":
+        if len(args) < 5:
+            return await update.message.reply_text(
+                "ใช้งาน: /rtevidence <engagement_id> add <kind> <finding_id|-> <summary...>")
+        fid = int(args[3]) if args[3].lstrip("-").isdigit() else None
+        r = rtm.add_evidence(eid, args[2], operator_id=actor, finding_id=fid,
+                             summary=" ".join(args[4:]),
+                             raw_content=" ".join(args[4:]))
+        return await update.message.reply_text(
+            f"📎 Evidence #{r.id}\nSHA-256: {r.detail}" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+    if sub == "list":
+        fid = int(args[2]) if len(args) > 2 and args[2].lstrip("-").isdigit() else None
+        evidence = (rtm.list_evidence(finding_id=fid) if fid
+                    else rtm.list_evidence(engagement_id=eid))
+        if not evidence:
+            return await update.message.reply_text("ยังไม่มีหลักฐาน")
+        lines = [f"EV#{e['evidence_id']} [{e['kind']}] finding={e.get('finding_id') or '-'} "
+                 f"sha256={e['sha256'][:16]}… {e.get('last_verify_result') or 'ยังไม่ตรวจ'}"
+                 for e in evidence]
+        return await _reply_chunked(update, "Evidence:\n" + "\n".join(lines))
+    if sub == "verify":
+        if not _rt_eid(args, 2):
+            return await update.message.reply_text(
+                "ใช้งาน: /rtevidence <engagement_id> verify <evidence_id>")
+        ev = rtm.get_evidence(int(args[2]))
+        if not ev or ev["engagement_id"] != eid:
+            return await update.message.reply_text("❌ ไม่พบหลักฐานนี้ใน engagement นี้")
+        res = rtm.verify_evidence(int(args[2]), operator_id=actor)
+        if not res.ok:
+            return await update.message.reply_text(f"❌ {res.reason}")
+        if res.match:
+            return await update.message.reply_text(
+                f"✅ VERIFIED — หลักฐาน EV#{args[2]} ไม่ถูกแก้ไข\nsha256: {res.stored_sha256}")
+        return await update.message.reply_text(
+            f"❌ FAILED — หลักฐาน EV#{args[2]} ถูกแก้ไขหลังบันทึก\n"
+            f"stored: {res.stored_sha256}\nnow:    {res.recalculated_sha256}")
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_rtreview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rtreview <engagement_id> [queue|decide]"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None:
+        return await update.message.reply_text(
+            "ใช้งาน:\n/rtreview <engagement_id> queue [OPEN|IN_REVIEW|CONFIRMED|DISMISSED]\n"
+            "/rtreview <engagement_id> decide <item_id> <CONFIRMED|DISMISSED|IN_REVIEW> [หมายเหตุ]")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    sub = args[1].lower() if len(args) > 1 else "queue"
+    if sub == "queue":
+        status = args[2] if len(args) > 2 else None
+        items = rtm.list_review_queue(eid, status=status)
+        if not items:
+            return await update.message.reply_text("คิวตรวจสอบว่าง")
+        lines = [f"[{i['priority']}] item #{i['item_id']} ({i['status']}) "
+                 f"sev={i['severity']} — {i['summary']}" for i in items]
+        return await _reply_chunked(update, "Review queue:\n" + "\n".join(lines))
+    if sub == "decide":
+        if len(args) < 4 or not _rt_eid(args, 2):
+            return await update.message.reply_text(
+                "ใช้งาน: /rtreview <engagement_id> decide <item_id> <decision> [หมายเหตุ]")
+        r = rtm.decide_review(int(args[2]), args[3], operator_id=actor,
+                              note=" ".join(args[4:]))
+        return await update.message.reply_text(
+            f"✅ item #{args[2]} → {r.detail}" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+    await update.message.reply_text(f"ไม่รู้จักคำสั่งย่อย: {sub}")
+
+
+async def cmd_rttimeline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/rttimeline <engagement_id> [kind]"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    eid = _rt_eid(args, 0)
+    if eid is None:
+        return await update.message.reply_text("ใช้งาน: /rttimeline <engagement_id> [kind]")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    kind = args[1].upper() if len(args) > 1 else None
+    events = rtm.get_timeline(eid, kind=kind, limit=rtm.MAX_PAGE_LIMIT)
+    if not events:
+        return await update.message.reply_text("ไม่มีเหตุการณ์")
+    lines = []
+    for e in events:
+        when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(e["created_at"]))
+        actor = f" by {e['actor_id']}" if e.get("actor_id") is not None else ""
+        lines.append(f"{when} [{e['kind']}] {e['action']}{actor}"
+                     f"{(' — ' + e['detail']) if e.get('detail') else ''}")
+    await _reply_chunked(update, f"Timeline {engagement['code']}:\n" + "\n".join(lines))
+
+
+async def cmd_redteam_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/redteam_report <engagement_id> [json|csv|remediation]"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    eid = _rt_eid(args, 0)
+    if eid is None:
+        return await update.message.reply_text(
+            "ใช้งาน: /redteam_report <engagement_id> [json|csv|remediation]")
+    engagement = rtm.get_engagement(eid)
+    if not engagement or engagement["chat_id"] != update.effective_chat.id:
+        return await update.message.reply_text("❌ ไม่พบ Engagement นี้ในกลุ่มนี้")
+    fmt = args[1].lower() if len(args) > 1 else "text"
+    write_audit_log(update.effective_chat.id, actor, actor="user",
+                    action="RT_REPORT_VIEW", detail=f"engagement_id={eid} fmt={fmt}")
+    if fmt == "json":
+        payload = rtr.export_report_json(eid)
+        return await _send_member_export(update, payload, f"redteam_{engagement['code']}.json")
+    if fmt == "csv":
+        payload = rtr.export_findings_csv(eid)
+        return await _send_member_export(update, payload, f"redteam_{engagement['code']}.csv")
+    if fmt == "remediation":
+        pkg = rtr.build_remediation_package(eid)
+        return await _reply_chunked(update, rtr.format_remediation_package(pkg))
+    data = rtr.get_report_data(eid)
+    await _reply_chunked(update, rtr.format_report(data))
+
+
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -4111,6 +4568,13 @@ _REQUIRED_MODULE_API = {
     "bb_scan": ("bb_scan_db_init", "run_scan", "list_scans", "get_scan_bundle",
                 "promote_observation", "format_scan_result", "format_scan_report",
                 "format_scan_list", "format_promote_result", "SCAN_PROFILES"),
+    "redteam": ("redteam_db_init", "create_engagement", "authorize_engagement",
+                "check_roe", "trigger_kill_switch", "register_target", "create_finding",
+                "reclassify_finding", "add_evidence", "verify_evidence", "create_vector",
+                "record_defense_check", "decide_review", "get_engagement_stats"),
+    "redteam_report": ("get_report_data", "format_report", "build_remediation_package",
+                       "format_remediation_package", "export_report_json",
+                       "export_findings_csv"),
 }
 
 
@@ -4184,6 +4648,7 @@ def main():
     bb_case_db_init()
     security_testing_db_init()
     bb_scan_db_init()
+    rtm.redteam_db_init()
     # member_intel must init before member_incident: the incident layer's
     # foreign-key-by-convention columns and the risk engine's
     # CONFIRMED-incident signal both assume the registry's tables exist.
@@ -4236,6 +4701,16 @@ def main():
     app.add_handler(CommandHandler("scans", cmd_scans))
     app.add_handler(CommandHandler("scanview", cmd_scanview))
     app.add_handler(CommandHandler("scanpromote", cmd_scanpromote))
+    app.add_handler(CommandHandler("engagement", cmd_engagement))
+    app.add_handler(CommandHandler("scope", cmd_scope))
+    app.add_handler(CommandHandler("roe", cmd_roe))
+    app.add_handler(CommandHandler("rttarget", cmd_rttarget))
+    app.add_handler(CommandHandler("rtfinding", cmd_rtfinding))
+    app.add_handler(CommandHandler("rtvector", cmd_rtvector))
+    app.add_handler(CommandHandler("rtevidence", cmd_rtevidence))
+    app.add_handler(CommandHandler("rtreview", cmd_rtreview))
+    app.add_handler(CommandHandler("rttimeline", cmd_rttimeline))
+    app.add_handler(CommandHandler("redteam_report", cmd_redteam_report))
     # cmd_bbreport existed but was never registered, so /bbreport was
     # unreachable and bb_report.py was dead code. Registered here with
     # the rest of the reporting commands.
