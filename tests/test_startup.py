@@ -88,7 +88,9 @@ if booted is not None:
     for want in ("member", "memberhistory", "memberrisk", "timeline", "incidents",
                  "incident", "evidence", "verifyevidence", "memberreport",
                  "memberpatterns", "memberpurge", "bbreport",
-                 "scan", "scans", "scanview", "scanpromote"):
+                 "scan", "scans", "scanview", "scanpromote",
+                 "engagement", "scope", "roe", "rttarget", "rtfinding", "rtvector",
+                 "rtevidence", "rtreview", "rttimeline", "redteam_report"):
         check(f"/{want} ถูกลงทะเบียนตอนบูต", want in cmds, sorted(cmds))
 
     # ไม่มีคำสั่งชนกัน — ถ้าชน python-telegram-bot จะเรียกตัวแรกเงียบๆ
@@ -112,7 +114,10 @@ _conn.close()
 for _t in ("mi_members", "mi_identity_history", "mi_timeline", "mi_join_events",
            "mi_risk_snapshots", "mi_message_patterns", "mi_incidents",
            "mi_incident_notes", "mi_evidence", "mi_custody", "mi_admin_actions",
-           "bb_scans", "bb_scan_checks", "bb_scan_observations"):
+           "bb_scans", "bb_scan_checks", "bb_scan_observations",
+           "rt_engagements", "rt_operators", "rt_targets", "rt_findings", "rt_evidence",
+           "rt_custody", "rt_timeline", "rt_vectors", "rt_review_queue",
+           "rt_defense_checks", "rt_ai_analysis"):
     check(f"ตาราง {_t} ถูกสร้างตอนบูต", _t in _tables, sorted(_tables))
 
 # ตารางเดิมต้องยังอยู่ — init ใหม่ต้องไม่ไปแตะของเดิม
