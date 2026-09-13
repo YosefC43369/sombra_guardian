@@ -3,6 +3,7 @@ python-dotenv==1.2.2
 google-genai
 openai
 feedparser
+httpx
 beautifulsoup4
 requests
 urllib3

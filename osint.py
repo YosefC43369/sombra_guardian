@@ -49,6 +49,11 @@ _RE_CVE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _RE_HANDLE = re.compile(r"(?<![\w.])@([A-Za-z0-9_.]{3,32})\b")
 _RE_PHONE = re.compile(r"(?:\+\d{1,3}[\s\-]?\d{6,14}|\b0\d{1,2}[\s\-]?\d{3}[\s\-]?\d{4}\b)")
 _RE_QUOTED = re.compile(r"[\"“”']([^\"“”']{3,80})[\"“”']")
+# เลขบัตรประชาชนไทย 13 หลัก (คั่นด้วย - หรือเว้นวรรคได้ตามรูปแบบ X-XXXX-XXXXX-XX-X)
+# ใช้เฉพาะตอน "ปกปิด" ก่อนแสดงผล ไม่ใช่ตอนสกัด selector — เราไม่รวบรวมเลขบัตร
+_RE_THAI_ID = re.compile(r"(?<!\d)\d(?:[\s\-]?\d){12}(?!\d)")
+# เลขยาว 10-19 หลัก (บัญชี/บัตร) ที่ไม่ใช่บัตรประชาชนหรือเบอร์ — ปกปิดเหลือ 4 ท้าย
+_RE_LONG_DIGITS = re.compile(r"(?<!\d)\d(?:[\s\-]?\d){9,18}(?!\d)")
 _RE_LATIN_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9_\-]{2,}\b")
 
 # โปรไฟล์โซเชียล — ตัวเชื่อมตัวตนที่แข็งแรงที่สุดในงาน OSINT บุคคล
@@ -535,6 +540,31 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
     ผลที่ตรงเป้าที่สุดจึงมีสิทธิ์ถูกตัดทิ้งก่อนจะได้ scrape ด้วยซ้ำ
     """
     sel_values = [v.lower() for v in (selectors.all_values() if selectors else [])]
+    # น้ำหนักของ selector ตามชนิด: ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง (อีเมล/เบอร์/
+    # onion/คริปโต/แฮช) ควรดันอันดับแรงกว่าคำค้นทั่วไปมาก หน้าที่ตรงอีเมลเป้าหมาย
+    # ต้องมาก่อนหน้าที่บังเอิญมีคำ keyword โผล่ ของเดิมนับทุก selector เท่ากันหมด
+    weight_of: Dict[str, int] = {}
+
+    def _weigh(values, w):
+        for v in values or []:
+            key = str(v).lower().strip()
+            if key:
+                weight_of[key] = max(weight_of.get(key, 0), w)
+
+    if selectors:
+        _weigh(selectors.emails, 6)
+        _weigh(selectors.phones, 6)
+        _weigh(selectors.onions, 6)
+        _weigh(selectors.btc, 6)
+        _weigh(selectors.eth, 6)
+        _weigh(selectors.hashes, 6)
+        _weigh(selectors.cves, 6)
+        _weigh(selectors.ipv4, 5)
+        _weigh(selectors.names, 5)
+        _weigh(selectors.phrases, 5)
+        _weigh(selectors.domains, 4)
+        _weigh(selectors.handles, 4)
+        _weigh(selectors.keywords, 1)
     # โทเคนระดับคำ: ทำให้จัดอันดับละเอียดขึ้น — ผลที่ครอบคลุมคำในคำค้นได้มากกว่า
     # ควรมาก่อน ไม่ใช่แค่ "เจอ substring เต็มหรือไม่เจอ" อย่างเดียว
     sel_tokens = set()
@@ -573,8 +603,13 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
     for record in merged.values():
         title_snip = f"{record['title']} {record.get('snippet', '')}".lower()
         haystack = f"{title_snip} {record['link']}".lower()
-        # (1) เจอ selector value เต็มๆ = สัญญาณแรง
-        value_hits = sum(1 for value in sel_values if value and value in haystack)
+        # (1) เจอ selector value เต็มๆ = สัญญาณแรง — ถ่วงน้ำหนักตามชนิดของ selector
+        # (อีเมล/เบอร์เป้าหมายแรงกว่าคำค้นทั่วไป) ถ้าไม่มีตารางน้ำหนัก (ไม่ได้ส่ง
+        # selectors มา) ให้ถอยไปนับแบบเดิม value ละ 3
+        if weight_of:
+            value_score = sum(w for value, w in weight_of.items() if value in haystack)
+        else:
+            value_score = 3 * sum(1 for value in sel_values if value and value in haystack)
         # (2) ครอบคลุมโทเคนของคำค้นกี่คำ = จัดอันดับละเอียดขึ้นสำหรับคำค้นหลายคำ
         token_hits = sum(1 for tok in sel_tokens if tok in haystack)
         # (3) เจอในคำโปรยของเอนจิน = สัญญาณจริงก่อน scrape
@@ -582,7 +617,7 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
         snip_hits = sum(1 for value in sel_values if value and value in snip_low)
         # (4) เจอครบทั้งวลี (ชื่อ-นามสกุล) ในชื่อเรื่อง/คำโปรย = ตรงตัวที่สุด
         phrase_bonus = 4 * sum(1 for p in sel_phrases if p in title_snip)
-        real_signal = value_hits * 3 + token_hits + snip_hits + phrase_bonus
+        real_signal = value_score + token_hits + snip_hits + phrase_bonus
         # โบนัส "พบซ้ำหลาย query/engine" ให้ต่อเมื่อมีสัญญาณตรงเป้าจริงก่อน
         # ไม่งั้นผลขยะที่เอนจินคืนมาซ้ำๆ (เช่น lite.ip2location.com ที่ Marginalia
         # แถมมาทุก query) จะได้คะแนนจากการนับซ้ำล้วนๆ ทั้งที่ไม่เกี่ยวกับเป้าหมายเลย
@@ -822,6 +857,54 @@ def defang(value: str) -> str:
     out = re.sub(r"^https?://", lambda m: m.group(0).replace("http", "hxxp"), out, flags=re.I)
     out = out.replace("@", "[at]")
     return out.replace(".", "[.]")
+
+
+def mask_pii(text: str, mask_phones: bool = True, mask_long_digits: bool = True) -> str:
+    """ปกปิด PII ในข้อความที่จะ "แสดงต่อผู้ใช้" (คำโปรย/ชื่อเรื่อง/ลิงก์จากผลค้นหา)
+
+    /search แสดงผลดิบจาก search engine ตรงๆ คำโปรยเหล่านั้นอาจมีเบอร์โทร อีเมล
+    หรือเลขบัตรประชาชนติดมา เครื่องมือ OSINT เชิงตั้งรับต้องไม่กลายเป็นท่อส่ง PII
+    ดิบ จึงปกปิดก่อนแสดงเสมอ โดยเหลือเค้าโครงพอให้นักวิเคราะห์ยืนยันได้ว่า
+    "ตรงกับที่ค้น" โดยไม่เปิดเผยค่าเต็ม:
+      - เลขบัตรประชาชน 13 หลัก -> ปกปิดทั้งหมด (ไม่มีเหตุผลเชิงตั้งรับให้โชว์)
+      - เบอร์โทร -> เหลือ 2 ตัวหน้า + 2 ตัวท้าย
+      - อีเมล -> เหลือตัวแรกของชื่อผู้ใช้ คงโดเมนไว้ (โดเมนใช้ pivot ต่อได้ ไม่ใช่ PII)
+      - เลขยาว 10-19 หลัก (บัญชี/บัตร) -> เหลือ 4 ตัวท้าย
+
+    ปิด mask_phones / mask_long_digits ได้เมื่อปกปิดลิงก์ (URL) เพื่อไม่ให้เลข path
+    ที่เป็นรหัสบทความถูกกลบจนคลิกต่อไม่ได้ — แต่บัตรประชาชนกับอีเมลปกปิดเสมอ
+    """
+    if not text:
+        return ""
+    out = str(text)
+
+    # อีเมลก่อน: ปกปิดทั้ง token แล้วกฎเบอร์/เลขยาวจะไม่ไปแตะตัวเลขใน local part
+    def _mask_email(m):
+        local, _, domain = m.group(0).partition("@")
+        head = local[0] if local else ""
+        return f"{head}{'*' * max(2, len(local) - 1)}@{domain}"
+    out = _RE_EMAIL.sub(_mask_email, out)
+
+    # เลขบัตรประชาชน (13 หลัก) — ต้องมาก่อนกฎเบอร์/เลขยาว ไม่งั้นถูกจับด้วยกฎอื่น
+    out = _RE_THAI_ID.sub("[เลขบัตร ปกปิด]", out)
+
+    if mask_phones:
+        def _mask_phone(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) < 6:
+                return m.group(0)
+            return digits[:2] + "x" * (len(digits) - 4) + digits[-2:]
+        out = _RE_PHONE.sub(_mask_phone, out)
+
+    if mask_long_digits:
+        def _mask_long(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) < 10:
+                return m.group(0)
+            return "x" * (len(digits) - 4) + digits[-4:]
+        out = _RE_LONG_DIGITS.sub(_mask_long, out)
+
+    return out
 
 
 def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
@@ -1090,6 +1173,53 @@ def build_dossier(question: str, selectors: Selectors, queries: List[str],
     return _clamp(header_text + "\n" + "\n".join(body), max_chars)
 
 
+def corroborated_identifiers(display_records: List[dict], min_sources: int = 2,
+                             limit: int = 12) -> List[dict]:
+    """หาตัวระบุ (อีเมล/โดเมน/บัญชี/เบอร์/โปรไฟล์) ที่โผล่ในผลค้นหาหลายแหล่ง
+
+    ให้ /search มีสัญญาณ "ยืนยันข้ามแหล่ง" (corroboration) ตั้งแต่ก่อนดึงเนื้อหา
+    "อิสระต่อกัน" = คนละโฮสต์ปลายทาง จึงไม่นับหน้าหลายหน้าของเว็บเดียวกันเป็น
+    หลายแหล่ง (ไม่งั้นเว็บเดียวที่พ่นอีเมลเดิมทุกหน้าจะดูเหมือนถูกยืนยันหลายที่)
+
+    รับ "รายการที่กำลังจะแสดงจริง" (หลังกรอง/เรียงแล้ว) เพื่อให้เลข S ตรงกับที่โชว์
+    """
+    from urllib.parse import urlsplit
+
+    agg: Dict[Tuple[str, str], dict] = {}
+    for position, rec in enumerate(display_records or [], start=1):
+        ref = f"S{position}"
+        try:
+            host = urlsplit(str(rec.get("link") or "")).netloc.lower()
+        except ValueError:
+            host = ""
+        blob = f"{rec.get('title', '')} {rec.get('snippet', '')}"
+        found: Dict[Tuple[str, str], str] = {}
+        iocs = extract_iocs(blob)
+        for ioc_type in ("email", "domain", "handle", "phone"):
+            for value in iocs.get(ioc_type, []):
+                found[(ioc_type, value.lower())] = value
+        for profile in extract_profiles(blob):
+            found[("profile", profile.lower())] = profile
+        for key, value in found.items():
+            slot = agg.setdefault(key, {"type": key[0], "value": value,
+                                        "refs": [], "hosts": set()})
+            if ref not in slot["refs"]:
+                slot["refs"].append(ref)
+            if host:
+                slot["hosts"].add(host)
+
+    out: List[dict] = []
+    for slot in agg.values():
+        # ถ้าดึง host ไม่ได้เลย (ลิงก์เพี้ยน) ให้ถอยไปนับจำนวน ref แทน
+        independent = len(slot["hosts"]) if slot["hosts"] else len(slot["refs"])
+        if independent >= min_sources:
+            out.append({"type": slot["type"], "value": slot["value"],
+                        "refs": slot["refs"], "sources": independent})
+    out.sort(key=lambda d: (-d["sources"], IOC_ORDER.index(d["type"])
+                            if d["type"] in IOC_ORDER else 99))
+    return out[:limit]
+
+
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
                          ranked: List[dict], limit: int = 20,
                          health_note: str = "") -> str:
@@ -1133,21 +1263,42 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
         lines.append("⚠️ ผลด้านล่างความเกี่ยวข้องต่ำ (ไม่พบคำค้นในชื่อ/คำโปรย) "
                      "อาจไม่ตรงเป้า — ลองใส่ชื่อ-นามสกุลให้ครบ หรือรอ engine อื่นกลับมา")
     lines.append("")
-    for position, record in enumerate(ranked[:limit], start=1):
+    display = ranked[:limit]
+    for position, record in enumerate(display, start=1):
         marker = " *" if record.get("relevance", 0) > 0 else ""
         origin = record.get("origin") or "-"
         engine = record.get("engine") or "-"
-        lines.append(f"[S{position}]{marker} {str(record.get('title', 'Untitled'))[:120]}")
-        lines.append(f"      {record.get('link', '')}")
+        # ปกปิด PII ในทุกอย่างที่แสดงต่อผู้ใช้ — ชื่อเรื่อง/คำโปรยมาจากหน้าเว็บดิบ
+        # จึงอาจมีเบอร์/อีเมล/เลขบัตรติดมา ส่วนลิงก์ปกปิดเฉพาะบัตรประชาชนกับอีเมล
+        # (ไม่กลบเลข path อื่น เพื่อให้ยังคลิกต่อได้)
+        title = mask_pii(str(record.get("title", "Untitled")))[:120]
+        link = mask_pii(str(record.get("link", "")), mask_phones=False,
+                        mask_long_digits=False)
+        lines.append(f"[S{position}]{marker} {title}")
+        lines.append(f"      {link}")
         # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
-        snippet = str(record.get("snippet") or "").strip()
+        snippet = mask_pii(str(record.get("snippet") or "").strip())
         if snippet:
             lines.append(f"      คำโปรย: {snippet[:200]}")
         lines.append(
             f"      ฝั่ง={origin} | engine={engine} | "
             f"relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง"
         )
+
+    # ยืนยันข้ามแหล่ง: ตัวระบุที่โผล่ในหลายแหล่งอิสระ = สัญญาณว่า "น่าจะเป็นของ
+    # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว
+    corroborated = corroborated_identifiers(display, min_sources=IDENTITY_MIN_SOURCES)
+    if corroborated:
+        lines.append("")
+        lines.append(f"[ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ] (ปกปิด PII แล้ว)")
+        for item in corroborated:
+            label = IOC_LABELS.get(item["type"], item["type"])
+            lines.append(
+                f"- [{label}] {mask_pii(item['value'])} — "
+                f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
+            )
+
     lines.append("")
-    lines.append("นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์")
+    lines.append("นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
     lines.append("ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
     return "\n".join(lines)

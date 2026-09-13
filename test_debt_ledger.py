@@ -495,7 +495,7 @@ class DebtReportTestCase(unittest.TestCase):
         text = dr.format_sign_confirmation(entry)
         self.assertIn("สมชาย", text)
         self.assertIn("50 บาท", text)
-        self.assertIn("น้ำท่อม", text)
+        self.assertIn("ข้าวกล่อง", text)
         self.assertIn(f"#{r.entry_id}", text)
         self.assertIn("ยังไม่ชำระ", text)
 

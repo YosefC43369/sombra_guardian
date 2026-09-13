@@ -74,16 +74,20 @@ except ImportError: # pragma: no cover - resource is POSIX-only
 # Kill switch: operators can disable test execution entirely without a
 # code change/deploy, matching repository_tools.py's own docstring
 # ("gated by its own safety switch").
-TEST_EXECUTION_ENABLED = os.getenv("REPO_TEST_EXECUTION_ENABLED", "true").lower() == "true"
+# ใช้ตัวอ่าน env ที่ทนค่าว่าง — .env ที่ commit ไว้ตั้ง REPO_TEST_* เป็นค่าว่าง
+# ซึ่งเดิมทำให้ int("") ระเบิดตั้งแต่ import โมดูลนี้จึงโหลดไม่ได้เลย
+from envutil import env_int, env_bool
 
-MAX_CONCURRENT_TEST_RUNS = int(os.getenv("REPO_MAX_CONCURRENT_TEST_RUNS", "1"))
-TEST_RUN_TIMEOUT_SECONDS = int(os.getenv("REPO_TEST_TIMEOUT_SECONDS", "60"))
-MAX_TEST_OUTPUT_BYTES = int(os.getenv("REPO_TEST_MAX_OUTPUT_BYTES", str(200_000)))
+TEST_EXECUTION_ENABLED = env_bool("REPO_TEST_EXECUTION_ENABLED", "true")
+
+MAX_CONCURRENT_TEST_RUNS = env_int("REPO_MAX_CONCURRENT_TEST_RUNS", 1)
+TEST_RUN_TIMEOUT_SECONDS = env_int("REPO_TEST_TIMEOUT_SECONDS", 60)
+MAX_TEST_OUTPUT_BYTES = env_int("REPO_TEST_MAX_OUTPUT_BYTES", 200_000)
 
 # Resource limits applied to the test subprocess itself (POSIX only).
 TEST_CPU_TIME_LIMIT_SECONDS = TEST_RUN_TIMEOUT_SECONDS + 10
-TEST_MEMORY_LIMIT_BYTES = int(os.getenv("REPO_TEST_MEMORY_LIMIT_BYTES", str(512 * 1024 * 1024)))
-TEST_MAX_PROCESSES = int(os.getenv("REPO_TEST_MAX_PROCESSES", "64"))
+TEST_MEMORY_LIMIT_BYTES = env_int("REPO_TEST_MEMORY_LIMIT_BYTES", 512 * 1024 * 1024)
+TEST_MAX_PROCESSES = env_int("REPO_TEST_MAX_PROCESSES", 64)
 
 MAX_DETECT_FILES_SCANNED = 3000  # bound for the project-type detection walk
 
