@@ -55,6 +55,7 @@
 | 🚨 **Incident & Evidence** | เปิดเหตุการณ์ตาม lifecycle, คลังหลักฐานพร้อม snapshot, ตรวจความครบถ้วนด้วย SHA-256, chain of custody, audit log ผู้ดูแล |
 | 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์ |
 | 🐞 **Bug Bounty / Sec Testing** | จัดการ Program/Authorization/Scope, บันทึก Finding/Evidence/Case, สแกนความปลอดภัยเฉพาะเป้าหมายที่ได้รับอนุญาต |
+| 🛰️ **Scan Campaign** | รันชุด passive check รวดเดียว, ให้เกรดภาพรวมแบบอธิบายได้, เก็บประวัติสแกน, และยกข้อสังเกตขึ้นเป็น Finding ได้ด้วยคำสั่งเดียว |
 | 📊 **Reporting** | Dashboard สรุปกลุ่ม, รายงานแยก 4 ส่วน (ข้อเท็จจริง / การวิเคราะห์ / การดำเนินการ / ข้อจำกัด), ส่งออก JSON/CSV |
 | 💰 **Group Finance** | บันทึกหนี้ (`/sign`), กระเป๋าเงิน, ฝาก/ถอน/โอน, บิล, ประวัติธุรกรรม |
 | 📰 **News** | ดึงข่าวความปลอดภัยจาก RSS แล้วสรุปด้วย AI ส่งเข้ากลุ่มอัตโนมัติ |
@@ -187,7 +188,11 @@ docker run --env-file .env sombra-guardian
 | `/bbprogram` `/bbauth` `/bbscope` | จัดการ Program / Authorization / Scope |
 | `/bbcheck` `/bbfinding` `/bbevidence` | ตรวจ scope / บันทึก Finding / Evidence |
 | `/bbcase` `/bbreport` | จัดการ Case / รายงานสรุป Program |
-| `/bbscan <program_id> <check_type> <target>` | สแกน **เฉพาะเป้าหมายที่ได้รับอนุญาตแล้ว** |
+| `/bbscan <program_id> <check_type> <target>` | ตรวจทีละรายการ **เฉพาะเป้าหมายที่ได้รับอนุญาตแล้ว** |
+| `/scan <program_id> [quick\|full] <target>` | **สแกนแบบ campaign** — รันหลาย check รวดเดียว สรุปเกรด + เก็บประวัติ |
+| `/scans <program_id>` | ประวัติการสแกน |
+| `/scanview <scan_id>` | รายงานผลสแกนละเอียด + เลขลำดับข้อสังเกต |
+| `/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ]` | ยกข้อสังเกตขึ้นเป็น Finding จริง (re-check scope) |
 
 ### 💰 Finance &amp; 🗂️ GitHub
 
@@ -214,7 +219,8 @@ docker run --env-file .env sombra-guardian
 | `member_incident.py` | เหตุการณ์, คลังหลักฐาน, ความครบถ้วน (SHA-256), chain of custody, admin audit |
 | `member_report.py` | เรนเดอร์รายงานแยก 4 ส่วน + ส่งออก JSON/CSV (ไม่มีตารางเป็นของตัวเอง) |
 | `scope_policy.py` · `findings.py` · `bb_case.py` · `bb_report.py` | Bug bounty: authorization → finding → case → report |
-| `security_testing.py` | สแกนความปลอดภัยเฉพาะ scope ที่อนุญาต |
+| `security_testing.py` | passive check เฉพาะ scope ที่อนุญาต (headers/tls/cookies/redirects/cors/technology) |
+| `bb_scan.py` | Scan campaign — orchestrate หลาย check, ให้เกรด, เก็บประวัติ, bridge ข้อสังเกต → Finding |
 | `search.py` · `scrape.py` · `osint.py` · `coordinator.py` · `username_osint.py` · `nethealth.py` | ชุด OSINT / ค้นหา / Tor routing |
 | `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
 | `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |

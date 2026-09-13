@@ -73,6 +73,12 @@ from security_testing import(
   security_testing_db_init, run_security_check, format_check_result,
   VALID_CHECK_TYPES,
 )
+import bb_scan
+from bb_scan import (
+    bb_scan_db_init, run_scan, list_scans, get_scan_bundle, promote_observation,
+    format_scan_result, format_scan_report, format_scan_list, format_promote_result,
+    VALID_PROFILES, DEFAULT_PROFILE,
+)
 
 import debt_ledger as dl
 import debt_report as dr
@@ -489,7 +495,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/memberreport <เป้าหมาย> [json|csv] - รายงาน/ส่งออกข้อมูลสมาชิก\n"
         "/memberreport audit [ชม.] - รายงานการดำเนินการของผู้ดูแล\n"
         "/memberpatterns [นาที] [จำนวนบัญชี] - กิจกรรมที่สัมพันธ์กัน (ต้องตรวจสอบ)\n"
-        "/memberpurge [run|forget <เป้าหมาย>] - การเก็บ/ลบข้อมูลตามนโยบาย"
+        "/memberpurge [run|forget <เป้าหมาย>] - การเก็บ/ลบข้อมูลตามนโยบาย\n"
+        "\n— สแกนช่องโหว่ (Bug Bounty, Admin + ต้องอยู่ใน Scope ที่อนุญาต) —\n"
+        "/scan <program_id> [quick|full] <target> - สแกนแบบ passive หลายรายการรวดเดียว\n"
+        "/scans <program_id> - ประวัติการสแกน\n"
+        "/scanview <scan_id> - รายงานผลสแกนแบบละเอียด\n"
+        "/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ] - ยกข้อสังเกตเป็น Finding"
     )
     await update.message.reply_text(text)
     
@@ -1882,6 +1893,101 @@ async def cmd_bbscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
       check_type=check_type, actor=update.effective_user.id,
     )
     await _reply_chunked(update, format_check_result(result))
+
+
+# ---------------- Scan Campaigns (Phase 10, builds on Bug Bounty) ----------------
+#
+# Same authorization model as /bbscan: Admin is necessary but NOT
+# sufficient. run_scan()/promote_observation() have no is_admin input, so
+# chat-admin status never widens scope -- only the Program/Authorization/
+# Scope chain (via evaluate_target) authorizes a target, and every
+# individual check still runs through security_testing's SSRF guard,
+# rate limiter and audit log. These handlers only parse input and format
+# output; all decisions stay in bb_scan.py / security_testing.py /
+# scope_policy.py.
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scan <program_id> [quick|full] <target> — run a passive scan
+    campaign (a fixed profile of security_testing's checks) against one
+    authorized target, aggregate and persist the result."""
+    args = context.args or []
+    if len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน: /scan <program_id> [quick|full] <target>\n"
+            "โปรไฟล์: " + ", ".join(sorted(VALID_PROFILES)) + f" (ค่าเริ่มต้น: {DEFAULT_PROFILE})\n"
+            "ตัวอย่าง: /scan 1 full https://example.com\n\n"
+            "สแกนได้เฉพาะ target ที่ Program/Authorization/Scope อนุญาตไว้แล้วเท่านั้น"
+        )
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    if not args[0].isdigit():
+        return await update.message.reply_text("❌ program_id ต้องเป็นตัวเลข")
+    program_id = int(args[0])
+
+    # optional profile keyword between program_id and target
+    if args[1].lower() in VALID_PROFILES:
+        profile = args[1].lower()
+        target = " ".join(args[2:])
+    else:
+        profile = DEFAULT_PROFILE
+        target = " ".join(args[1:])
+    if not target.strip():
+        return await update.message.reply_text("❌ ต้องระบุ target")
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+    result = await run_scan(program_id, target, actor=update.effective_user.id,
+                            profile=profile)
+    await _reply_chunked(update, format_scan_result(result))
+
+
+async def cmd_scans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scans <program_id> — scan history for a Program."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        return await update.message.reply_text("ใช้งาน: /scans <program_id>")
+    program_id = int(args[0])
+    await _reply_chunked(update, format_scan_list(program_id, list_scans(program_id)))
+
+
+async def cmd_scanview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scanview <scan_id> — full report of one scan, including each
+    observation's index for /scanpromote."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        return await update.message.reply_text("ใช้งาน: /scanview <scan_id>")
+    bundle = get_scan_bundle(int(args[0]))
+    if bundle is None:
+        return await update.message.reply_text("❌ ไม่พบผลสแกนนี้")
+    await _reply_chunked(update, format_scan_report(bundle))
+
+
+async def cmd_scanpromote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scanpromote <scan_id> <idx> [severity] [หัวข้อ...] — promote one
+    scan observation into a real Finding. create_finding() re-checks the
+    current scope, so a lapsed authorization blocks the promotion."""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        return await update.message.reply_text(
+            "ใช้งาน: /scanpromote <scan_id> <ลำดับข้อสังเกต> [severity] [หัวข้อ...]\n"
+            "ดูลำดับข้อสังเกตได้จาก /scanview <scan_id>"
+        )
+    scan_id = int(args[0])
+    idx = int(args[1])
+    severity = None
+    title_parts = args[2:]
+    if title_parts and title_parts[0].upper() in {"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+        severity = title_parts[0].upper()
+        title_parts = title_parts[1:]
+    title = " ".join(title_parts) if title_parts else None
+    result = promote_observation(scan_id, idx, actor=update.effective_user.id,
+                                 severity=severity, title=title)
+    await update.message.reply_text(format_promote_result(result))
 
 
 # ---------------- Debt Ledger ("เซ็นของ") ----------------
@@ -4002,6 +4108,9 @@ _REQUIRED_MODULE_API = {
                       "format_incident_report", "format_evidence_report",
                       "format_integrity_result", "format_admin_audit_report",
                       "format_pattern_report", "export_member_json"),
+    "bb_scan": ("bb_scan_db_init", "run_scan", "list_scans", "get_scan_bundle",
+                "promote_observation", "format_scan_result", "format_scan_report",
+                "format_scan_list", "format_promote_result", "SCAN_PROFILES"),
 }
 
 
@@ -4074,6 +4183,7 @@ def main():
     findings_db_init()
     bb_case_db_init()
     security_testing_db_init()
+    bb_scan_db_init()
     # member_intel must init before member_incident: the incident layer's
     # foreign-key-by-convention columns and the risk engine's
     # CONFIRMED-incident signal both assume the registry's tables exist.
@@ -4122,6 +4232,10 @@ def main():
     app.add_handler(CommandHandler("bbevidence", cmd_bbevidence))
     app.add_handler(CommandHandler("bbcase", cmd_bbcase))
     app.add_handler(CommandHandler("bbscan", cmd_bbscan))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("scans", cmd_scans))
+    app.add_handler(CommandHandler("scanview", cmd_scanview))
+    app.add_handler(CommandHandler("scanpromote", cmd_scanpromote))
     # cmd_bbreport existed but was never registered, so /bbreport was
     # unreachable and bb_report.py was dead code. Registered here with
     # the rest of the reporting commands.

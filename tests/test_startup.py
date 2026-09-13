@@ -87,7 +87,8 @@ if booted is not None:
     # ---- 5. ระบบข้อมูลสมาชิก/เหตุการณ์/หลักฐาน ต่อเข้ากับบูตจริง ----
     for want in ("member", "memberhistory", "memberrisk", "timeline", "incidents",
                  "incident", "evidence", "verifyevidence", "memberreport",
-                 "memberpatterns", "memberpurge", "bbreport"):
+                 "memberpatterns", "memberpurge", "bbreport",
+                 "scan", "scans", "scanview", "scanpromote"):
         check(f"/{want} ถูกลงทะเบียนตอนบูต", want in cmds, sorted(cmds))
 
     # ไม่มีคำสั่งชนกัน — ถ้าชน python-telegram-bot จะเรียกตัวแรกเงียบๆ
@@ -110,7 +111,8 @@ _tables = {r[0] for r in _conn.execute("SELECT name FROM sqlite_master WHERE typ
 _conn.close()
 for _t in ("mi_members", "mi_identity_history", "mi_timeline", "mi_join_events",
            "mi_risk_snapshots", "mi_message_patterns", "mi_incidents",
-           "mi_incident_notes", "mi_evidence", "mi_custody", "mi_admin_actions"):
+           "mi_incident_notes", "mi_evidence", "mi_custody", "mi_admin_actions",
+           "bb_scans", "bb_scan_checks", "bb_scan_observations"):
     check(f"ตาราง {_t} ถูกสร้างตอนบูต", _t in _tables, sorted(_tables))
 
 # ตารางเดิมต้องยังอยู่ — init ใหม่ต้องไม่ไปแตะของเดิม
