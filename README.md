@@ -1,3 +1,7 @@
+<p align="center">
+   <img src="respurce/3E057594-85E9-4E92-9CE3-A6D0056FB495.png" alt="Sombra Guardian" width="400">
+</p>
+
 <h1 align="center">🛡️ Sombra Guardian</h1>
 
 <p align="center">
