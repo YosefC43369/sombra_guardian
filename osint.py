@@ -613,6 +613,49 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
     return queries[: max(1, int(max_queries))]
 
 
+def advanced_queries(question: str, selectors: Optional["Selectors"] = None,
+                     existing=None, max_extra: int = 8) -> List[str]:
+    """สร้าง query "ขั้นสูง/ซับซ้อน" เพิ่มเติมเพื่อความแม่นและกว้างขึ้น — ฟังก์ชันใหม่
+    ไม่แก้ plan_queries เดิม ผู้เรียกเอาไป "ต่อท้าย" ชุด query ปกติ
+
+    เทคนิคที่ใช้: วลีชื่อแบบ exact (เครื่องหมายคำพูด), ชื่อ×คีย์เวิร์ด, คีย์เวิร์ดคู่,
+    และ dork ที่ช่วยความแม่น (site: โซเชียล, filetype: เอกสาร) — ตัด query ที่มีอยู่แล้ว
+    """
+    sel = selectors if selectors is not None else extract_selectors(question)
+    have = {str(q).strip().lower() for q in (existing or [])}
+    out: List[str] = []
+
+    def _push(v: str):
+        v = " ".join(str(v or "").split())[:MAX_QUERY_CHARS]
+        if v and v.lower() not in have and v.lower() not in {o.lower() for o in out}:
+            out.append(v)
+
+    names = list(sel.names)
+    keywords = list(sel.keywords)
+
+    for name in names:
+        _push(f'"{name}"')
+        for kw in keywords[:4]:
+            _push(f'"{name}" {kw}')          # ชื่อ×คีย์เวิร์ด (คัดคนชื่อซ้ำ)
+        # dork: จำกัดเฉพาะโซเชียล/เอกสาร เพื่อความแม่น (เอนจินที่รองรับจะได้ผลตรงขึ้น)
+        _push(f'"{name}" (site:facebook.com OR site:linkedin.com OR '
+              f'site:instagram.com OR site:tiktok.com)')
+        _push(f'"{name}" (filetype:pdf OR filetype:doc OR filetype:xls)')
+
+    # คีย์เวิร์ดจับคู่กันเอง (บริบทซ้อน = แม่นขึ้น)
+    for i in range(len(keywords)):
+        for j in range(i + 1, len(keywords)):
+            _push(f"{keywords[i]} {keywords[j]}")
+
+    # ตัวระบุแข็งที่ผูกกับคนเดียว (ถ้ามี) — เพิ่มความแม่นสูงสุด
+    for email in sel.emails:
+        _push(f'"{email}"')
+    for handle in sel.handles:
+        _push(f'"{handle}"')
+
+    return out[: max(1, int(max_extra))]
+
+
 # ---------------- 1b. Site database (resource/data.json) ----------------
 # เชื่อมการค้นหากับฐานข้อมูลเว็บ resource/data.json (~4,990 ไซต์ แบบ maigret):
 # แต่ละไซต์มี url template ที่มี {username} — ใช้สร้าง "ลิงก์โปรไฟล์ผู้สมัคร" ของชื่อ

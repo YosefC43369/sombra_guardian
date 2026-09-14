@@ -32,6 +32,42 @@ try:
 finally:
     scrape.SCRAPE_READER_FALLBACK = _orig
 
+# ---------------- extract_content_and_files: เนื้อหาจริง ไม่เอาข้อความที่เป็นลิงก์ ----------------
+_HTML = """
+<html><head><title>Doc</title></head><body>
+<nav><a href="/home">Home</a><a href="/about">About</a></nav>
+<header>SiteName</header>
+<article>
+  <h1>Dr. Somchai Jaidee</h1>
+  <p>Cardiologist at Bangkok Hospital with 20 years experience.</p>
+  <p>Contact via <a href="/contact">this anchor text</a> for appointments.</p>
+  <ul><li>Published research in 2021</li></ul>
+  <a href="/files/cv.pdf">Download CV</a>
+  <img src="/img/photo.jpg">
+  <a href="/page.html">Related page</a>
+</article>
+<footer><a href="/privacy">Privacy Policy</a></footer>
+</body></html>
+"""
+_text, _files = scrape.extract_content_and_files(_HTML, "https://example.com/doc")
+check("extract: keeps real content", "Somchai" in _text and "Cardiologist" in _text, _text)
+check("extract: drops nav link text", "Home" not in _text and "About" not in _text, _text)
+check("extract: drops anchor text inside content", "this anchor text" not in _text, _text)
+check("extract: drops footer link text", "Privacy" not in _text, _text)
+check("extract: file link (pdf) detected", any(u.endswith("/files/cv.pdf") for u in _files), _files)
+check("extract: image file detected", any(u.endswith("/img/photo.jpg") for u in _files), _files)
+check("extract: non-file link (.html) NOT counted as file",
+      not any(u.endswith("/page.html") for u in _files), _files)
+check("extract: relative file url resolved against base",
+      all(u.startswith("https://example.com/") for u in _files), _files)
+check("extract: empty html safe",
+      scrape.extract_content_and_files("", "") == ("", []))
+check("extract: page without content tags falls back to text",
+      "hello world" in scrape.extract_content_and_files("<div>hello world</div>", "")[0])
+
+# ค่าคอนฟิก /search content-fetch เชื่อมกับ constants ที่มีจริง
+check("scrape: MAX_EXTRACTED_TEXT_CHARS is int", isinstance(scrape.MAX_EXTRACTED_TEXT_CHARS, int))
+
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:
     print("FAILED:", FAIL)

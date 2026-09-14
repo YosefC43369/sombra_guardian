@@ -125,6 +125,12 @@ SEARCH_PLAN_MAX_QUERIES = envutil.env_int("SEARCH_PLAN_MAX_QUERIES", 6)
 # /deepsearch: ดึงเนื้อหาจริงจากผลอันดับต้นๆ กี่หน้า เพื่อเก็บ "คำโปรย/เนื้อหา" มายืนยัน
 # ตัว (0 = ไม่ดึง) — ใช้ scrape.py (Tor สำหรับ .onion, reader proxy สำหรับ clearnet กันบอท)
 SEARCH_DEEP_SCRAPE_TOP = envutil.env_int("SEARCH_DEEP_SCRAPE_TOP", 8)
+# /search: เพิ่ม query ขั้นสูง/ซับซ้อน (ชื่อ×คีย์เวิร์ด, dork) เพื่อความแม่น + กว้าง
+SEARCH_ADVANCED_QUERIES = envutil.env_int("SEARCH_ADVANCED_QUERIES", 5)
+# /search: ดึง "เนื้อหา + ไฟล์" จริงจากผลอันดับต้นๆ กี่หน้า (0 = ไม่ดึง) และความยาว
+# ข้อความเนื้อหาที่แสดงต่อผลแต่ละอัน
+SEARCH_FETCH_CONTENT_TOP = envutil.env_int("SEARCH_FETCH_CONTENT_TOP", 5)
+SEARCH_FETCH_CONTENT_CHARS = envutil.env_int("SEARCH_FETCH_CONTENT_CHARS", 500)
 SEARCH_COMMAND_BUDGET_SECONDS = envutil.env_float("SEARCH_COMMAND_BUDGET_SECONDS", 40)
 
 logging.basicConfig(
@@ -981,6 +987,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queries = osint.plan_queries(
         query, selectors, max_queries=SEARCH_PLAN_MAX_QUERIES
     )
+    # ค้นให้กว้าง+ซับซ้อนขึ้นเพื่อความแม่น: เติม query ขั้นสูง (ชื่อ×คีย์เวิร์ด, dork)
+    if SEARCH_ADVANCED_QUERIES > 0:
+        queries = queries + osint.advanced_queries(
+            query, selectors, existing=queries, max_extra=SEARCH_ADVANCED_QUERIES)
     logger.info(
         f"OSINT SEARCH | Chat ID: {chat_id} | User ID: {user_id} | "
         f"Query: {query!r} | Plan: {queries}"
@@ -1072,6 +1082,44 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit=SEARCH_RESULTS_DISPLAY_CAP, health_note=health_note,
         ),
     )
+
+    # ดึง "เนื้อหา + ไฟล์" จริงจากผลอันดับต้นๆ (เฉพาะข้อความในหน้า/ไฟล์ ไม่เอาข้อความ
+    # ที่เป็นลิงก์) — clearnet ที่กันบอทใช้ reader proxy, .onion ใช้ Tor (จัดการใน scrape.py)
+    if SEARCH_FETCH_CONTENT_TOP > 0 and ranked:
+        top = ranked[:SEARCH_FETCH_CONTENT_TOP]
+        try:
+            await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+            fetched = await scrape.fetch_content_and_files_multi_async(
+                top, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS,
+                max_urls=SEARCH_FETCH_CONTENT_TOP)
+            by_url = {f.get("url"): f for f in (fetched or [])}
+            lines = ["📄 เนื้อหา + ไฟล์ในหน้า (ดึงจากผลอันดับต้นๆ — เฉพาะข้อความ/ไฟล์ ไม่เอาลิงก์)"]
+            any_content = False
+            for idx, rec in enumerate(top, start=1):
+                data = by_url.get(rec.get("link")) or {}
+                body = (data.get("text") or "").strip()
+                files = data.get("files") or []
+                if not body and not files:
+                    continue
+                any_content = True
+                lines.append("")
+                lines.append(f"[S{idx}] {rec.get('link')}")
+                if body:
+                    snippet = osint.mask_pii(body[:SEARCH_FETCH_CONTENT_CHARS])
+                    lines.append(f"เนื้อหา: {snippet}")
+                if files:
+                    shown = files[:8]
+                    lines.append(f"ไฟล์ ({len(files)}): "
+                                 + " | ".join(osint.mask_pii(u) for u in shown))
+            if any_content:
+                await _reply_chunked(update, "\n".join(lines))
+            else:
+                await update.message.reply_text(
+                    "📄 ดึงเนื้อหา/ไฟล์จากผลอันดับต้นๆ ไม่สำเร็จ "
+                    "(เว็บกันบอท/Tor ไม่พร้อม/ไม่มีเนื้อหาข้อความ)")
+        except Exception:
+            logger.exception("OSINT SEARCH CONTENT FETCH ERROR")
+
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ค้นแบบ 'ไม่ยอมแพ้': ค้นเป็นรอบๆ pivot จากตัวระบุที่เจอ (อีเมล/บัญชี/โดเมน)
@@ -5072,12 +5120,13 @@ _REQUIRED_MODULE_API = {
                "get_combined_results", "get_combined_results_async",
                "get_clearnet_results"),
     "scrape": ("scrape_multiple", "scrape_single", "scrape_multiple_async",
-               "CONTENT_UNAVAILABLE_MARKER"),
+               "fetch_content_and_files", "fetch_content_and_files_multi_async",
+               "extract_content_and_files", "CONTENT_UNAVAILABLE_MARKER"),
     "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
               "pivot_queries", "build_dossier", "format_search_report",
               "load_site_db", "profile_url_candidates", "build_profile_results",
-              "assess_identity_confidence", "expand_queries"),
+              "assess_identity_confidence", "expand_queries", "advanced_queries"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
