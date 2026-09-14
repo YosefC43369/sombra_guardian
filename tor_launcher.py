@@ -25,6 +25,7 @@ tor_launcher.py — ทำให้บอตมี Tor SOCKS proxy ใช้เ�
   TOR_BOOTSTRAP_TIMEOUT=30 วินาทีที่รอให้พอร์ต SOCKS เปิด
 """
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -43,7 +44,7 @@ _tor_process = None
 
 # เวอร์ชันดีฟอลต์ของ Tor Expert Bundle (override ได้ด้วย env) — ถ้าเวอร์ชันนี้
 # ไม่มีแล้วจะ 404 แล้วตกไป fallback พร้อม log บอกวิธีตั้ง TOR_EXPERT_VERSION/URL
-_DEFAULT_EXPERT_VERSION = "13.5.7"
+_DEFAULT_EXPERT_VERSION = "14.0.1"
 _ARCH_MAP = {
     "x86_64": "linux-x86_64", "amd64": "linux-x86_64",
     "aarch64": "linux-aarch64", "arm64": "linux-aarch64",
@@ -74,28 +75,90 @@ def _find_tor_binary():
     return None
 
 
-def _download_url() -> str:
+_TOR_DIST_INDEX = "https://dist.torproject.org/torbrowser/"
+
+
+def _discover_versions():
+    """ดึงรายการเวอร์ชันจากดัชนีทางการของ Tor แล้วเรียงใหม่ล่าสุดก่อน
+    (เฉพาะ stable — ข้ามที่มีตัวอักษร เช่น 13.5a1) — คืน [] ถ้าดึงไม่ได้"""
+    req = urllib.request.Request(_TOR_DIST_INDEX, headers={"User-Agent": "sombra-guardian/1.0"})
+    with urllib.request.urlopen(req, timeout=float(os.getenv("TOR_INDEX_TIMEOUT", "20"))) as resp:
+        html = resp.read().decode("utf-8", "replace")
+    versions = set(re.findall(r'href="(\d+\.\d+(?:\.\d+)?)/"', html))
+
+    def _key(v):
+        parts = v.split(".")
+        return tuple(int(p) for p in parts) + (0,) * (3 - len(parts))
+
+    return sorted(versions, key=_key, reverse=True)[:8]
+
+
+def _candidate_urls():
+    """คืน URL ผู้สมัคร (generator) ให้ลองทีละตัวจนกว่าจะโหลดสำเร็จ
+    ลำดับ: TOR_DOWNLOAD_URL -> TOR_EXPERT_VERSION -> เวอร์ชันล่าสุดจากดัชนี -> สำรอง"""
     override = os.getenv("TOR_DOWNLOAD_URL", "").strip()
     if override:
-        return override
-    version = os.getenv("TOR_EXPERT_VERSION", "").strip() or _DEFAULT_EXPERT_VERSION
+        yield override
+        return
+
     arch = _ARCH_MAP.get(platform.machine().lower(), "linux-x86_64")
-    return (f"https://dist.torproject.org/torbrowser/{version}/"
-            f"tor-expert-bundle-{arch}-{version}.tar.gz")
+    legacy = {"linux-x86_64": "linux64", "linux-i686": "linux32"}.get(arch)
+
+    versions = []
+    pinned = os.getenv("TOR_EXPERT_VERSION", "").strip()
+    if pinned:
+        versions.append(pinned)
+    try:
+        versions.extend(_discover_versions())
+    except Exception as exc:
+        logger.debug("TOR: ดึงรายการเวอร์ชันจากดัชนีไม่ได้ (%s)", exc)
+    # เวอร์ชันสำรองเผื่อดัชนีล่ม (จะถูกข้ามถ้าไม่มีจริงด้วย 404)
+    versions.extend([_DEFAULT_EXPERT_VERSION, "14.0.1", "13.5.6", "13.0.16"])
+
+    seen = set()
+    for ver in versions:
+        if not ver or ver in seen:
+            continue
+        seen.add(ver)
+        base = f"https://dist.torproject.org/torbrowser/{ver}/"
+        yield f"{base}tor-expert-bundle-{arch}-{ver}.tar.gz"
+        if legacy:
+            yield f"{base}tor-expert-bundle-{legacy}-{ver}.tar.gz"
 
 
 def _download_tor(dest_dir: str):
     """ดาวน์โหลด+แตก Tor Expert Bundle คืน (binary_path, lib_dir) หรือ (None, None)
 
-    โครงสร้าง tarball: มีโฟลเดอร์ tor/ ที่บรรจุไบนารี tor และไลบรารี .so ร่วม —
-    ต้องตั้ง LD_LIBRARY_PATH ให้ชี้โฟลเดอร์นั้นตอนรัน"""
-    url = _download_url()
+    ลองหลาย URL (เวอร์ชันล่าสุดจากดัชนีก่อน) จนกว่าจะได้ตัวที่โหลดได้จริง —
+    ไม่ผูกกับเวอร์ชันเดียวที่อาจหายไป (404) โครงสร้าง tarball มีโฟลเดอร์ที่บรรจุ
+    ไบนารี tor และไลบรารี .so ร่วม ต้องตั้ง LD_LIBRARY_PATH ชี้โฟลเดอร์นั้นตอนรัน"""
     os.makedirs(dest_dir, exist_ok=True)
     tarball = os.path.join(dest_dir, "tor-expert-bundle.tar.gz")
-    logger.info("TOR: กำลังดาวน์โหลด Tor Expert Bundle จาก %s", url)
-    req = urllib.request.Request(url, headers={"User-Agent": "sombra-guardian/1.0"})
-    with urllib.request.urlopen(req, timeout=float(os.getenv("TOR_DOWNLOAD_TIMEOUT", "60"))) as resp:
-        data = resp.read()
+    timeout = float(os.getenv("TOR_DOWNLOAD_TIMEOUT", "60"))
+
+    data = None
+    last_err = None
+    for url in _candidate_urls():
+        try:
+            logger.info("TOR: กำลังลองดาวน์โหลด Tor Expert Bundle จาก %s", url)
+            req = urllib.request.Request(url, headers={"User-Agent": "sombra-guardian/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                blob = resp.read()
+            # ตรวจ magic ของ gzip กันได้หน้า error/HTML มาแทนไฟล์จริง
+            if len(blob) < 1000 or blob[:2] != b"\x1f\x8b":
+                logger.debug("TOR: ข้าม (ไม่ใช่ไฟล์ gzip) %s", url)
+                continue
+            data = blob
+            logger.info("TOR: ดาวน์โหลดสำเร็จ (%d bytes) จาก %s", len(data), url)
+            break
+        except Exception as exc:
+            last_err = exc
+            logger.debug("TOR: โหลดไม่ได้ %s (%s)", url, exc)
+            continue
+
+    if data is None:
+        raise RuntimeError(f"ทุก URL ที่ลองล้มเหลว (ล่าสุด: {last_err})")
+
     with open(tarball, "wb") as f:
         f.write(data)
     # แตกอย่างปลอดภัย: กันไฟล์ที่ path หลุดออกนอก dest_dir (tar path traversal)

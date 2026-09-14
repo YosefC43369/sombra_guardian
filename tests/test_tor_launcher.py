@@ -25,15 +25,28 @@ check("is_local: 127.0.0.1/localhost", t._is_local_host("127.0.0.1") and t._is_l
 check("is_local: external = False", not t._is_local_host("tor.example.com"))
 check("_truthy", t._truthy("X_ON", "1") and not t._truthy("X_OFF", "0"))
 
-# _download_url: version default vs full override
-_clear_env("TOR_DOWNLOAD_URL")
-os.environ["TOR_EXPERT_VERSION"] = "13.5.7"
-url = t._download_url()
-check("download_url: มีเวอร์ชันและโดเมนทางการ",
-      "13.5.7" in url and url.startswith("https://dist.torproject.org/"), url)
+# _candidate_urls: full override ชนะทุกอย่าง
+_clear_env("TOR_EXPERT_VERSION")
 os.environ["TOR_DOWNLOAD_URL"] = "https://example.test/tor.tar.gz"
-check("download_url: full override ชนะ", t._download_url() == "https://example.test/tor.tar.gz")
-_clear_env("TOR_DOWNLOAD_URL", "TOR_EXPERT_VERSION")
+cands = list(t._candidate_urls())
+check("candidate_urls: full override ชนะและเป็นตัวเดียว",
+      cands == ["https://example.test/tor.tar.gz"], cands)
+_clear_env("TOR_DOWNLOAD_URL")
+
+# pinned version ต้องอยู่ในผู้สมัคร และ URL ชี้โดเมนทางการ
+# (ปิด discovery ที่แตะเน็ตไว้ เพื่อให้เทสไม่พึ่งเครือข่ายและเร็ว)
+_orig_disc = t._discover_versions
+t._discover_versions = lambda: []
+os.environ["TOR_EXPERT_VERSION"] = "13.5.6"
+try:
+    cands = list(t._candidate_urls())
+finally:
+    t._discover_versions = _orig_disc
+    _clear_env("TOR_EXPERT_VERSION")
+check("candidate_urls: มี pinned version", any("13.5.6" in u for u in cands), cands[:3])
+check("candidate_urls: ชี้โดเมน Tor ทางการ",
+      all(u.startswith("https://dist.torproject.org/") for u in cands), cands[:3])
+check("candidate_urls: มี fallback เวอร์ชันเริ่มต้น", any("14.0.1" in u for u in cands))
 
 # _find_tor_binary: เคารพ TOR_BINARY เมื่อรันได้
 fd, fake = tempfile.mkstemp(prefix="tor-fake-")
