@@ -22,7 +22,9 @@ osint.py — OSINT / CTI tradecraft layer for /search, /identity, /corporate
     อักขระซ่อน และถูกครอบด้วยรั้วก่อนส่งให้โมเดลเสมอ (กัน prompt injection)
 """
 
+import os
 import re
+import json
 import html
 import logging
 import unicodedata
@@ -603,6 +605,97 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
         push(fallback or question)
 
     return queries[: max(1, int(max_queries))]
+
+
+# ---------------- 1b. Site database (resource/data.json) ----------------
+# เชื่อมการค้นหากับฐานข้อมูลเว็บ resource/data.json (~4,990 ไซต์ แบบ maigret):
+# แต่ละไซต์มี url template ที่มี {username} — ใช้สร้าง "ลิงก์โปรไฟล์ผู้สมัคร" ของชื่อ
+# บัญชีได้ทันที โดยไม่ต้องยิงเครือข่าย จึงทำให้ /search มีผลชี้เป้าเสมอ แม้ Tor หรือ
+# search engine จะล่ม (การยืนยันว่าโปรไฟล์มีจริงยังเป็นหน้าที่ของ username_osint ที่ยิงจริง)
+
+# ที่อยู่ data.json — override ได้ด้วย env OSINT_SITE_DB
+_SITE_DB_PATH = os.getenv("OSINT_SITE_DB", "").strip() or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "resource", "data.json")
+_site_db_cache = {"path": None, "mtime": None, "sites": None}
+# ชื่อบัญชีที่ "สมเหตุผล" พอจะยิงใส่ template ได้ (ไม่ใช่ประโยค/ชื่อไทยมีเว้นวรรค)
+_RE_DB_HANDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$")
+
+
+def load_site_db(path: Optional[str] = None) -> Dict[str, dict]:
+    """โหลด mapping ชื่อไซต์ -> ระเบียน จาก data.json (แคชตาม mtime) — คืน {} ถ้าอ่านไม่ได้
+    ไม่พึ่ง dependency ภายนอก (json มาตรฐาน) จึง import osint ได้โดยไม่ต้องมี requests"""
+    target = path or _SITE_DB_PATH
+    try:
+        mtime = os.path.getmtime(target)
+    except OSError:
+        return {}
+    if _site_db_cache["path"] == target and _site_db_cache["mtime"] == mtime:
+        return _site_db_cache["sites"] or {}
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        logger.warning("SITE DB | อ่าน data.json ไม่ได้: %s", target)
+        return {}
+    sites = raw.get("sites", raw) if isinstance(raw, dict) else {}
+    if not isinstance(sites, dict):
+        sites = {}
+    _site_db_cache.update({"path": target, "mtime": mtime, "sites": sites})
+    logger.info("SITE DB | โหลด %d ไซต์จาก %s", len(sites), target)
+    return sites
+
+
+def site_db_size() -> int:
+    return len(load_site_db())
+
+
+def profile_url_candidates(username: str, limit: int = 25,
+                           tags: Optional[List[str]] = None) -> List[dict]:
+    """สร้างลิงก์โปรไฟล์ผู้สมัครของ username จาก data.json (ไม่ยิงเครือข่าย)
+    คืน [{site, url, urlMain, tags}] — ข้ามไซต์ที่ url ไม่มี {username}
+    กรองตาม tags ได้ (เช่น ['coding','social']) — ค่าว่าง = ทุกไซต์"""
+    handle = str(username or "").strip().lstrip("@")
+    if not _RE_DB_HANDLE.match(handle):
+        return []
+    want = {t.lower() for t in (tags or [])}
+    out = []
+    for name, rec in load_site_db().items():
+        if not isinstance(rec, dict):
+            continue
+        template = rec.get("url") or ""
+        if "{username}" not in template:
+            continue
+        if want and not (want & {str(t).lower() for t in rec.get("tags", [])}):
+            continue
+        try:
+            url = template.replace("{username}", handle)
+        except Exception:
+            continue
+        out.append({
+            "site": name,
+            "url": url,
+            "urlMain": rec.get("urlMain") or "",
+            "tags": list(rec.get("tags", [])),
+        })
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+def build_profile_results(username: str, limit: int = 25,
+                          tags: Optional[List[str]] = None) -> List[dict]:
+    """เหมือน profile_url_candidates แต่คืนในรูปแบบผลค้นหา (title/link/origin/engine)
+    เพื่อให้ไหลเข้า merge_and_rank ได้เหมือนผลจาก search engine/username_osint"""
+    handle = str(username or "").strip().lstrip("@")
+    rows = []
+    for cand in profile_url_candidates(handle, limit=limit, tags=tags):
+        rows.append({
+            "title": f"{cand['site']}: โปรไฟล์ผู้สมัคร {handle}",
+            "link": cand["url"],
+            "origin": "profile-db",
+            "engine": cand["site"],
+        })
+    return rows
 
 
 # ---------------- 2. Processing ----------------

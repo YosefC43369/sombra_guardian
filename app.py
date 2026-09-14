@@ -1006,8 +1006,20 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # คำค้นที่เป็นชื่อบัญชี (เช่น /search thana_p) ให้ค้นข้ามเว็บจากฐานข้อมูล
     # เว็บไซต์ใน resource/data.json ด้วย — ชื่อคนไทยจะไม่เข้าเงื่อนไขนี้
     username_hits = []
+    profile_db_hits = []
     handle = query.strip()
     if username_osint.is_plausible_username(handle):
+        # (1) ลิงก์โปรไฟล์ผู้สมัครจาก resource/data.json — ได้ทันที ไม่ยิงเครือข่าย
+        #     จึงมีผลชี้เป้าเสมอ แม้ Tor/engine ล่ม
+        try:
+            profile_db_hits = osint.build_profile_results(
+                handle, limit=SEARCH_RESULTS_DISPLAY_CAP
+            )
+        except Exception as e:
+            logger.warning(f"OSINT PROFILE-DB FAILED | handle={handle!r}: {e}")
+        if profile_db_hits:
+            clean_groups.append(profile_db_hits)
+        # (2) ยืนยันบัญชีจริงด้วยการยิงเว็บจริง (best-effort ตาม budget)
         try:
             username_hits = await username_osint.check_username_as_results_async(
                 handle, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
@@ -1030,6 +1042,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     health_bits = [f"Tor: {'ใช้งานได้' if nethealth.tor_reachable() else 'ไม่พร้อมใช้งาน'}"]
     if username_hits:
         health_bits.append(f"พบบัญชีชื่อเดียวกัน {len(username_hits)} เว็บ")
+    if profile_db_hits:
+        health_bits.append(f"ลิงก์โปรไฟล์จากฐานข้อมูลเว็บ {len(profile_db_hits)} รายการ")
     if cooling:
         health_bits.append(f"เส้นทางที่พักอยู่: {', '.join(cooling)}")
     health_note = "สถานะการเก็บข้อมูล — " + " | ".join(health_bits)
@@ -4866,7 +4880,8 @@ _REQUIRED_MODULE_API = {
     "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
     "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
-              "pivot_queries", "build_dossier", "format_search_report"),
+              "pivot_queries", "build_dossier", "format_search_report",
+              "load_site_db", "profile_url_candidates", "build_profile_results"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),

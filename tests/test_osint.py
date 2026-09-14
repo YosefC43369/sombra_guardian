@@ -36,6 +36,17 @@ thai = osint.plan_queries("ช่วยตรวจสอบข้อมูล�
 check("plan: thai sentence stripped to content words",
       thai[:2] == ['"สมบูรณ์ จำกัด"', "สมบูรณ์ จำกัด"], thai)
 check("plan: never returns empty", osint.plan_queries("???") != [])
+
+# ---------- site DB (resource/data.json) linkage ----------
+check("sitedb: โหลดได้ (>1000 ไซต์)", osint.site_db_size() > 1000, osint.site_db_size())
+_cands = osint.profile_url_candidates("thana_p", limit=5)
+check("sitedb: สร้างลิงก์โปรไฟล์จาก username", len(_cands) == 5 and all("thana_p" in c["url"] for c in _cands), _cands[:2])
+check("sitedb: ปฏิเสธชื่อไทย/มีเว้นวรรค", osint.profile_url_candidates("ธนา ธรณ์") == [])
+_pres = osint.build_profile_results("thana_p", limit=3)
+check("sitedb: ผลลัพธ์ shape เข้ากับ merge_and_rank",
+      len(_pres) == 3 and all(set(("title", "link", "origin", "engine")) <= set(r) for r in _pres),
+      _pres[:1])
+check("sitedb: origin ระบุว่ามาจากฐานข้อมูลเว็บ", all(r["origin"] == "profile-db" for r in _pres))
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
 

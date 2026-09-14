@@ -169,18 +169,81 @@ def _download_tor(dest_dir: str):
             if not (target == base or target.startswith(base + os.sep)):
                 raise ValueError(f"unsafe path in tarball: {member.name}")
         tf.extractall(dest_dir)
-    # หา binary ชื่อ 'tor' ที่แตกออกมา
+    # เลือก binary ที่ใช้ได้จริง — สำคัญ! expert bundle มีทั้ง tor/tor (ตัวรันจริง มี .so
+    # อยู่ข้างๆ) และ debug/tor (ตัวมี debug symbols ที่รันเดี่ยวไม่ได้ ขาด .so) การเผลอ
+    # เลือก debug/tor ทำให้เกิด 'Exec format error' — จึงต้องคัดด้วย ELF + arch + มี .so
+    return _pick_tor_binary(dest_dir)
+
+
+# e_machine (ELF) -> ชื่อสถาปัตยกรรม; ใช้ยืนยันว่าไบนารีตรงกับเครื่องที่รันจริง
+_ELF_MACHINES = {0x3E: "x86_64", 0xB7: "aarch64", 0x03: "i686", 0x28: "arm"}
+
+
+def _host_machines() -> set:
+    m = platform.machine().lower()
+    if m in ("x86_64", "amd64"):
+        return {"x86_64"}
+    if m in ("aarch64", "arm64"):
+        return {"aarch64"}
+    if m in ("i686", "i386", "x86"):
+        return {"i686"}
+    if m.startswith("arm"):
+        return {"arm"}
+    return {"x86_64", "aarch64", "i686", "arm"}  # ไม่รู้จัก -> ไม่กรอง
+
+
+def _elf_machine(path: str):
+    """คืนชื่อสถาปัตยกรรมของไฟล์ ELF หรือ None ถ้าไม่ใช่ ELF"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    little = head[5] != 2  # EI_DATA: 2=big-endian
+    e_machine = int.from_bytes(head[18:20], "little" if little else "big")
+    return _ELF_MACHINES.get(e_machine, f"0x{e_machine:x}")
+
+
+def _pick_tor_binary(dest_dir: str):
+    """เลือกไบนารี tor ที่รันได้จริง คืน (binary_path, lib_dir) หรือ (None, None)
+    เกณฑ์: เป็น ELF ที่ arch ตรงกับเครื่อง, ให้คะแนนสูงถ้าโฟลเดอร์มี .so (runtime)
+    และหักคะแนนถ้าอยู่ใต้ debug/"""
+    host = _host_machines()
+    candidates = []
     for root, _dirs, files in os.walk(dest_dir):
-        for name in files:
-            if name == "tor":
-                binary = os.path.join(root, name)
-                try:
-                    os.chmod(binary, 0o755)
-                except OSError:
-                    pass
-                if os.access(binary, os.X_OK):
-                    return binary, root
-    return None, None
+        if "tor" not in files:
+            continue
+        binary = os.path.join(root, "tor")
+        mach = _elf_machine(binary)
+        if mach is None:
+            continue  # ไม่ใช่ ELF (อาจเป็นสคริปต์/โฟลเดอร์อื่น)
+        arch_ok = mach in host
+        has_libs = any(n.startswith(("libssl", "libcrypto", "libevent")) for n in files)
+        is_debug = (os.sep + "debug") in (os.sep + os.path.relpath(root, dest_dir))
+        score = (2 if arch_ok else 0) + (2 if has_libs else 0) + (-3 if is_debug else 0)
+        candidates.append((score, arch_ok, binary, root, mach))
+
+    if not candidates:
+        logger.warning("TOR: ไม่พบไบนารี tor ที่เป็น ELF ในแพ็กเกจที่ดาวน์โหลด")
+        return None, None
+
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    score, arch_ok, binary, root, mach = candidates[0]
+    if not arch_ok:
+        logger.warning("TOR: ไบนารีที่โหลดมาเป็นสถาปัตยกรรม %s แต่เครื่องเป็น %s — "
+                       "ตั้ง TOR_DOWNLOAD_URL ให้ตรงสถาปัตยกรรม หรืออัปโหลด tor เองผ่าน "
+                       "TOR_BINARY", mach, platform.machine())
+        return None, None
+    try:
+        os.chmod(binary, 0o755)
+    except OSError:
+        pass
+    if not os.access(binary, os.X_OK):
+        return None, None
+    logger.info("TOR: เลือกไบนารี %s (arch=%s)", binary, mach)
+    return binary, root
 
 
 def _launch(binary: str, port: int, lib_dir=None):

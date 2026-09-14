@@ -101,6 +101,35 @@ finally:
     _clear_env("TOR_AUTO_DOWNLOAD", "TOR_STARTUP_GRACE")
 
 
+# ---------- เลือกไบนารี: ต้องเลือก tor/tor (runtime) ไม่ใช่ debug/tor ----------
+def _elf(mach_code):
+    b = bytearray(20); b[0:4] = b"\x7fELF"; b[4] = 2; b[5] = 1
+    b[18:20] = mach_code.to_bytes(2, "little")
+    return bytes(b) + b"\x00" * 200
+
+_host = t._host_machines()
+_code = {"x86_64": 0x3E, "aarch64": 0xB7, "i686": 0x03, "arm": 0x28}
+_mach = _code[list(_host)[0]] if len(_host) == 1 else 0x3E
+import tempfile as _tf, shutil as _sh
+_d = _tf.mkdtemp()
+os.makedirs(os.path.join(_d, "debug")); os.makedirs(os.path.join(_d, "tor"))
+open(os.path.join(_d, "debug", "tor"), "wb").write(_elf(_mach))
+open(os.path.join(_d, "tor", "tor"), "wb").write(_elf(_mach))
+open(os.path.join(_d, "tor", "libssl.so.3"), "wb").write(b"x")
+_bin, _lib = t._pick_tor_binary(_d)
+check("pick_binary: เลือก tor/tor ไม่ใช่ debug/tor",
+      _bin == os.path.join(_d, "tor", "tor"), _bin)
+check("pick_binary: lib_dir มี .so", _lib == os.path.join(_d, "tor"), _lib)
+
+# arch ไม่ตรง -> ไม่เลือก (กัน Exec format error)
+_d2 = _tf.mkdtemp(); os.makedirs(os.path.join(_d2, "tor"))
+_wrong = 0xB7 if _mach != 0xB7 else 0x3E
+open(os.path.join(_d2, "tor", "tor"), "wb").write(_elf(_wrong))
+_b2, _l2 = t._pick_tor_binary(_d2)
+check("pick_binary: arch ไม่ตรง -> (None, None)", _b2 is None and _l2 is None, (_b2, _l2))
+_sh.rmtree(_d); _sh.rmtree(_d2)
+
+
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:
     print("FAILED:", FAIL)
