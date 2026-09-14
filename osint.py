@@ -722,12 +722,47 @@ def _dedup_key(link: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, query, "")) or link.lower()
 
 
+# หัวข้อ "หน้าหมวดหมู่/ดัชนี" ของ onion directory (เช่น Amnesia) ที่ไม่ใช่ผลค้นจริง
+# เป็นแค่เมนูของไดเรกทอรีเอง — เมื่อไม่มีสัญญาณตรงเป้า ให้กดจมล่างสุด ไม่ให้ท่วมผลลัพธ์
+_DIR_CHROME_TITLES = frozenset((
+    "marketplaces", "market", "markets", "marketplace", "hosting", "directories",
+    "directory", "hacking", "hacked", "porn", "adult", "cryptocurrency", "crypto",
+    "search engines", "search engine", "email services", "email", "forums", "forum",
+    "social media", "social", "wiki", "wikis", "news", "blog", "blogs", "chat",
+    "chats", "drugs", "carding", "fraud", "weapons", "counterfeit", "other",
+    "others", "home", "index", "categories", "category", "links", "link list",
+    "onion links", "untitled", "communication", "financial services", "libraries",
+    "whistleblowing", "hacktivism", "scams", "gambling",
+))
+
+
+def _is_directory_chrome(record: dict) -> bool:
+    """หน้าหมวดหมู่/ดัชนีของ onion directory ที่ไม่ตรงเป้า — ชื่อเป็นคำหมวดกว้างๆ
+    และลิงก์เป็นหน้าแรก/หน้าหมวด (path สั้น หรือมี ?cat=)"""
+    title = str(record.get("title") or "").strip().lower()
+    if title not in _DIR_CHROME_TITLES:
+        return False
+    link = str(record.get("link") or "").lower()
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(link)
+        short_path = len(parts.path.strip("/")) <= 1
+        cat_like = ("cat=" in parts.query or "category" in parts.query
+                    or "?a=" in link or short_path)
+    except ValueError:
+        cat_like = True
+    return cat_like
+
+
 def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
-                   limit: int = DEFAULT_MAX_SOURCES) -> List[dict]:
+                   limit: int = DEFAULT_MAX_SOURCES, per_host_cap: int = 0) -> List[dict]:
     """รวมผลจากหลาย query, dedupe, แล้วจัดอันดับตามความเกี่ยวข้อง
 
     ของเดิมตัดเอา 20 อันแรกตามลำดับที่ thread คืนมา ซึ่งเป็นลำดับแบบสุ่มล้วน
     ผลที่ตรงเป้าที่สุดจึงมีสิทธิ์ถูกตัดทิ้งก่อนจะได้ scrape ด้วยซ้ำ
+
+    per_host_cap > 0 = จำกัดจำนวนผลต่อ 1 โฮสต์ในลำดับต้นๆ เพื่อ "กระจาย" ให้เห็น
+    หลายเว็บ (กันไดเรกทอรีเดียวยึดผลทั้งหน้า) — ผลส่วนเกินไม่ถูกทิ้ง แต่ถูกดันลงท้าย
     """
     sel_values = [v.lower() for v in (selectors.all_values() if selectors else [])]
     # น้ำหนักของ selector ตามชนิด: ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง (อีเมล/เบอร์/
@@ -813,12 +848,34 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
         # แถมมาทุก query) จะได้คะแนนจากการนับซ้ำล้วนๆ ทั้งที่ไม่เกี่ยวกับเป้าหมายเลย
         repeat_bonus = (record["engines"] - 1) if real_signal > 0 else 0
         record["relevance"] = real_signal + repeat_bonus
+        # หน้าหมวดหมู่/ดัชนีของ onion directory ที่ไม่มีสัญญาณตรงเป้า = noise ล้วน
+        # กดให้ต่ำกว่าผล relevance 0 ทั่วไป (ที่ยังอาจตรงในเนื้อหาที่ยังไม่ scrape)
+        if real_signal == 0 and _is_directory_chrome(record):
+            record["relevance"] = -1
 
     # ไม่ตัดผล relevance 0 ที่นี่ — เก็บ recall ไว้ให้เส้นทาง scrape ของ /identity
     # (บางแหล่งคำค้นอยู่ในเนื้อหาที่ยังไม่ได้ดึง จึงยัง relevance 0 ก่อน scrape)
     # ผลขยะจะจมอยู่ล่างสุดจากคะแนน แล้ว verify_sources กรองด้วยเนื้อหาอีกชั้น
     # ส่วนการ"ซ่อนผลไม่ตรงเป้า" ทำที่ชั้นแสดงผลของ /search แทน (คนละงานกับ recall)
     ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], -r["engines"], r["link"]))
+
+    cap = max(0, int(per_host_cap or 0))
+    if cap:
+        from urllib.parse import urlsplit
+        picked, overflow, host_count = [], [], {}
+        for record in ranked:
+            try:
+                host = (urlsplit(record["link"]).netloc or "").lower()
+            except ValueError:
+                host = record["link"].lower()
+            if host_count.get(host, 0) < cap:
+                host_count[host] = host_count.get(host, 0) + 1
+                picked.append(record)
+            else:
+                overflow.append(record)
+        # เติมโฮสต์หลากหลายก่อน แล้วค่อยเติมส่วนเกินถ้ายังมีที่ว่าง (ไม่ทิ้ง recall)
+        ranked = picked + overflow
+
     return ranked[: max(1, int(limit))]
 
 

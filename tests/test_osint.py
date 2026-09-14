@@ -47,6 +47,28 @@ check("sitedb: ผลลัพธ์ shape เข้ากับ merge_and_rank"
       len(_pres) == 3 and all(set(("title", "link", "origin", "engine")) <= set(r) for r in _pres),
       _pres[:1])
 check("sitedb: origin ระบุว่ามาจากฐานข้อมูลเว็บ", all(r["origin"] == "profile-db" for r in _pres))
+
+# ---------- ranking: directory-chrome demotion + per-host diversification ----------
+_host = "http://amndir7jfxnt5glt2tsevwjlnwdvknttxygubw27ulq5c433en75piyd.onion"
+_cats = ["Marketplaces", "Hosting", "Directories", "Hacking", "Forums", "Social Media"]
+_grp = [{"title": t, "link": f"{_host}/?cat={i}", "engine": "Amnesia", "origin": "darkweb"}
+        for i, t in enumerate(_cats)]
+_grp.append({"title": "ธนาธรณ์ ปัญญาสาร", "link": "https://ex.com/p/thana",
+             "snippet": "ธนาธรณ์ ปัญญาสาร", "engine": "Bing", "origin": "clearnet"})
+_sel = osint.extract_selectors("ธนาธรณ์ ปัญญาสาร")
+_ranked = osint.merge_and_rank([_grp], _sel, limit=8)
+check("rank: หน้า directory-chrome โดนกดเป็น relevance ติดลบ",
+      all(r["relevance"] == -1 for r in _ranked if r["engine"] == "Amnesia"),
+      [(r["engine"], r["relevance"]) for r in _ranked])
+check("rank: ผลที่ตรงชื่อขึ้นอันดับ 1", _ranked[0]["link"] == "https://ex.com/p/thana", _ranked[0]["link"])
+
+# per-host cap: โฮสต์เดียวไม่ยึดผลทั้งหมด
+_flood = [{"title": f"p{i}", "link": f"http://big.onion/{i}", "engine": "X"} for i in range(5)]
+_flood += [{"title": "A", "link": "http://a.onion/", "engine": "Y"},
+           {"title": "B", "link": "http://b.onion/", "engine": "Y"}]
+_capped = osint.merge_and_rank([_flood], None, limit=5, per_host_cap=2)
+_big = sum(1 for r in _capped[:3] if "big.onion" in r["link"])
+check("rank: per_host_cap กระจายโฮสต์ (big.onion <=2 ใน 3 อันแรก)", _big <= 2, _big)
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
 

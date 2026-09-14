@@ -110,6 +110,9 @@ TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_p
 GITHUB_FILES_DISPLAY_CAP = 200  # /github files: max rows shown even after _reply_chunked splitting
 GITHUB_INTERVAL_SECONDS = 3600  # how often the TTL sweep background task runs
 SEARCH_RESULTS_DISPLAY_CAP = 20  # /search: max sources listed in the reply
+# /search: จำกัดผลต่อ 1 โฮสต์ในลำดับต้นๆ เพื่อกระจายให้เห็นหลายเว็บ (กันไดเรกทอรี
+# เดียวยึดผลทั้งหน้า) — 0 = ไม่จำกัด
+SEARCH_PER_HOST_CAP = envutil.env_int("SEARCH_PER_HOST_CAP", 3)
 SEARCH_COMMAND_BUDGET_SECONDS = envutil.env_float("SEARCH_COMMAND_BUDGET_SECONDS", 40)
 
 logging.basicConfig(
@@ -1030,7 +1033,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_groups.append(username_hits)
 
     ranked = osint.merge_and_rank(
-        clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP
+        clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP,
+        per_host_cap=SEARCH_PER_HOST_CAP,
     )
 
     if status_msg is not None:
