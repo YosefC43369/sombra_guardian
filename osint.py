@@ -122,6 +122,13 @@ _STOPWORDS_TH = (
     "ขอ", "ดู", "ทำ", "อะไร", "ยังไง", "อย่างไร", "ทั้งหมด", "หมด", "ด้วย", "นี้", "นั้น",
     "รั่วไหล", "ข่าวกรอง", "รายงาน", "สรุป",
 )
+# คำระบุ "ประเภทองค์กร" ในภาษาไทย — เป็นคำกว้างที่พบทั่วไปจนไม่ช่วยแยกแยะเวลา
+# ค้นหา (ยิง "บริษัท" เดี่ยวๆ ได้แต่ noise) จึงกรองออกจาก keyword ภาษาไทย
+# แยกจาก _STOPWORDS_TH โดยเจตนา เพราะ _STOPWORDS_TH ถูกใช้ตัดวลี "ชื่อบุคคล/องค์กร"
+# ด้วย ถ้าใส่ "จำกัด" ลงไปที่นั่น ชื่อ "สมบูรณ์ จำกัด" จะถูกตัดขาดผิด
+_GENERIC_TH = frozenset((
+    "บริษัท", "จำกัด", "มหาชน", "หจก", "ห้างหุ้นส่วน", "ห้างหุ้นส่วนจำกัด",
+))
 _STOPWORDS_EN = frozenset((
     "the", "and", "for", "with", "from", "about", "into", "please", "find", "search",
     "check", "analyze", "analyse", "report", "data", "info", "information", "any",
@@ -305,6 +312,9 @@ def extract_selectors(text: str) -> Selectors:
     if not text:
         return sel
 
+    # ทำความสะอาดคำค้นก่อน (สำคัญกับภาษาไทย): NFC + ตัดอักขระล่องหน +
+    # ยุบวรรณยุกต์ซ้ำ ทำให้ทั้ง regex สกัด selector และการตัดคำไทยแม่นขึ้น
+    text = normalize_thai_query(text)
     working = str(text)
 
     sel.emails = _dedupe(_RE_EMAIL.findall(working))
@@ -350,7 +360,11 @@ def extract_selectors(text: str) -> Selectors:
         t for t in _RE_LATIN_TOKEN.findall(working)
         if t.lower() not in _STOPWORDS_EN and t.lower() not in consumed and len(t) > 2
     ]
-    sel.keywords = _dedupe(tokens)[:6]
+    # คำค้นภาษาไทย: ของเดิมเก็บเฉพาะ token ละติน คำไทยที่ไม่ใช่ชื่อคนจึงหายไป
+    # ทั้งหมดเมื่อมี selector อื่นอยู่ ตอนนี้ตัดคำไทยที่มีความหมายมาเป็น keyword
+    # ด้วย (ข้ามคำที่เป็นส่วนของชื่อ/วลีที่จับไปแล้ว) เพื่อให้พิมพ์ไทยแล้วค้นเจอ
+    thai_kw = [kw for kw in thai_keywords(working) if kw not in consumed]
+    sel.keywords = _dedupe(tokens + thai_kw)[:6]
     return sel
 
 
@@ -457,6 +471,84 @@ def _strip_thai_stopwords(text: str) -> str:
     return " ".join(out.split())
 
 
+# ---- ค้นหาที่รองรับตัวอักษรภาษาไทย (Thai-aware search) ----
+# ภาษาไทยไม่เว้นวรรคระหว่างคำ และผู้ใช้มักพิมพ์บนคีย์บอร์ดมือถือซึ่งแทรกอักขระ
+# ล่องหน (zero-width) หรือวางวรรณยุกต์/สระซ้ำโดยไม่ตั้งใจ ทำให้ keyword match พลาด
+# กลุ่มฟังก์ชันนี้ทำให้ "พิมพ์ภาษาไทยแล้วค้นเจอ" มีประสิทธิภาพขึ้น: ทำความสะอาด
+# คำค้นก่อน แล้วตัดเป็น token ที่มีความหมายพอจะยิงเข้า search engine (ซึ่ง match
+# แบบ keyword ล้วน ไม่เข้าใจภาษาธรรมชาติ)
+
+_RE_THAI_CHAR = re.compile(r"[฀-๿]")
+_RE_THAI_RUN = re.compile(r"[฀-๿]+")
+# วรรณยุกต์ + ไม้ไต่คู้/ทัณฑฆาต/นิคหิต + สระบน-ล่าง (combining marks) ที่พิมพ์ซ้ำ
+# ติดกันได้จากการกดค้างบนมือถือ — เก็บชุด code point ไว้ยุบตัวซ้ำ
+_THAI_COMBINING = (
+    "ัิีึืฺุู"
+    "็่้๊๋์ํ๎"
+)
+_RE_THAI_DUP_COMBINING = re.compile("([" + _THAI_COMBINING + "])\\1+")
+
+
+def contains_thai(text: Optional[str]) -> bool:
+    """มีตัวอักษรไทยอย่างน้อยหนึ่งตัวหรือไม่ — ใช้ตัดสินใจว่าจะเดินเส้นทางไทย"""
+    return bool(text) and bool(_RE_THAI_CHAR.search(str(text)))
+
+
+def normalize_thai_query(text: Optional[str]) -> str:
+    """ทำความสะอาดคำค้น (โดยเฉพาะภาษาไทย) ก่อนนำไปสกัด selector และยิง query
+
+    รวมสาเหตุที่ทำให้ "พิมพ์ไทยแล้วค้นไม่เจอ" ไว้ที่จุดเดียว:
+      - NFC (ไม่ใช่ NFKC): จัดพยัญชนะ+สระ/วรรณยุกต์ให้เป็นรูปมาตรฐานเดียว
+        แต่คงสระอำ (U+0E33) ไว้ ไม่ให้ NFKC แตกออกจนคำเพี้ยน
+      - ตัดอักขระล่องหน / zero-width / bidi ที่คีย์บอร์ดหรือการ copy แปะแทรกมา
+      - ยุบวรรณยุกต์/สระที่พิมพ์ซ้ำติดกัน (เช่น กดวรรณยุกต์ค้างจนซ้อนสองตัว)
+      - ยุบช่องว่างซ้ำและตัดหัวท้าย
+
+    ปลอดภัยกับข้อความอังกฤษ (แทบไม่เปลี่ยน) จึงเรียกกับคำค้นทุกภาษาได้
+    """
+    if not text:
+        return ""
+    out = unicodedata.normalize("NFC", str(text))
+    out = _RE_INVISIBLE.sub("", out)
+    out = _RE_THAI_DUP_COMBINING.sub(r"\1", out)
+    return " ".join(out.split())
+
+
+def thai_tokens(text: Optional[str]) -> List[str]:
+    """ตัดข้อความไทยเป็น token คำค้นแบบเบา โดยไม่พึ่ง dictionary ภายนอก
+
+    ไทยไม่มีตัวตัดคำ จึงใช้ stopword เป็น "รอยต่อ": normalize ก่อน แล้วตัดคำ
+    ฟุ่มเฟือย (ช่วย/หา/ข้อมูล/เกี่ยวกับ ...) ออกจากช่วงอักษรไทยแต่ละช่วง สิ่งที่
+    เหลือมักเป็นคำเนื้อหา (ชื่อองค์กร/หัวข้อ/คำเฉพาะ) ที่ search engine แบบ
+    keyword จับได้ เก็บเฉพาะชิ้นยาว ≥ 2 อักษร (อักษรไทยเดี่ยวไม่พอเป็นคำค้น)
+    """
+    if not text:
+        return []
+    tokens: List[str] = []
+    for run in _RE_THAI_RUN.findall(normalize_thai_query(text)):
+        # ถ้าทั้ง run เป็นคำ generic/ป้ายกำกับอยู่แล้ว ข้ามก่อนตัด stopword —
+        # กันกรณี stopword ที่เป็น substring (เช่น "หา" ใน "มหาชน") ตัดคำจนเพี้ยน
+        if run in _GENERIC_TH or run in _NAME_LABELS:
+            continue
+        chunk = run
+        for word in _STOPWORDS_TH:
+            chunk = chunk.replace(word, " ")
+        for piece in chunk.split():
+            # ข้ามคำ "ป้ายกำกับ" (เบอร์/โทร/ชื่อ/ที่อยู่ ...) ที่ผู้ใช้พิมพ์นำหน้าค่า
+            # และคำระบุประเภทองค์กรกว้างๆ (บริษัท/จำกัด/มหาชน) — ทั้งคู่ไม่ใช่คำค้น
+            # เนื้อหาและไม่ควรกลายเป็น query เดี่ยวๆ
+            if (len(piece) >= 2 and piece not in _NAME_LABELS
+                    and piece not in _GENERIC_TH):
+                tokens.append(piece)
+    return tokens
+
+
+def thai_keywords(text: Optional[str], limit: int = 6) -> List[str]:
+    """คำค้นไทยที่คัดแล้ว: normalize → ตัด token → ตัดซ้ำ → จำกัดจำนวน
+    ใช้ป้อนตัววางแผน query เพื่อให้คำค้นภาษาไทยกลายเป็น query จริงที่ยิงได้"""
+    return _dedupe(thai_tokens(text))[: max(1, int(limit))]
+
+
 def plan_queries(question: str, selectors: Optional[Selectors] = None,
                  max_queries: int = DEFAULT_MAX_QUERIES) -> List[str]:
     """สร้าง 'แผนการเก็บข้อมูล' — ชุด query ที่จะยิงจริง เรียงตามคุณค่าเชิงข่าวกรอง
@@ -464,6 +556,8 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
     ของเดิมยิงคำถามภาษาไทยทั้งประโยคเข้า onion search engine ซึ่งแทบไม่มีทางเจอ
     อะไร เพราะ engine พวกนี้ทำ keyword match ล้วนๆ ไม่เข้าใจภาษาธรรมชาติ
     """
+    # normalize ก่อน (คงเดิมสำหรับอังกฤษ) เพื่อให้ fallback ภาษาไทยด้านล่างสะอาด
+    question = normalize_thai_query(question)
     sel = selectors if selectors is not None else extract_selectors(question)
     queries: List[str] = []
 
@@ -501,7 +595,10 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
             push(keyword)
 
     if not queries:
-        # ไม่มี selector เลย (คำถามไทยล้วน) — ตัดคำฟุ่มเฟือยแล้วใช้ที่เหลือ
+        # ไม่มี selector เลย (มักเป็นคำถามภาษาไทยล้วน) — ยิงคำค้นไทยที่คัดแล้ว
+        # ทีละคำเพื่อเพิ่มโอกาส match แล้วตามด้วยทั้งวลีที่ตัด stopword ออก
+        for kw in thai_keywords(question, limit=max_queries):
+            push(kw)
         fallback = _strip_thai_stopwords(question)
         push(fallback or question)
 

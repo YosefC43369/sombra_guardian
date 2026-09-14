@@ -933,7 +933,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ OSINT Search ใช้ได้เฉพาะ Admin")
 
-    query = " ".join(context.args).strip()
+    # normalize คำค้นก่อน — โดยเฉพาะภาษาไทยจากคีย์บอร์ดมือถือ (NFC, ตัดอักขระ
+    # ล่องหน/zero-width, ยุบวรรณยุกต์ซ้ำ) เพื่อให้ทุกขั้นถัดไป (quota/audit/
+    # สกัด selector/วางแผน query) ทำงานกับข้อความที่สะอาดเหมือนกัน
+    query = osint.normalize_thai_query(" ".join(context.args))
     if not query:
         return await update.message.reply_text(
             "ใช้งาน: /search <คำค้น | อีเมล | โดเมน | @username | BTC address | CVE>\n"

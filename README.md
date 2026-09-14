@@ -80,7 +80,7 @@ EXECUTE → VERIFY → REPORT
 | 🤖 **AI (Gemini/GPT)** | แท็กบอทเพื่อถามคำถาม, วิเคราะห์รูป/PDF/ไฟล์, สร้างรูปด้วย `/imagine`, คัดกรองสแปมด้วย AI (มีระบบโควตารายวัน) |
 | 👤 **Member Intelligence** | ทะเบียนสมาชิก, ประวัติชื่อ/username, ไทม์ไลน์กิจกรรม, คะแนนความเสี่ยงแบบอธิบายได้, วิเคราะห์รูปแบบที่สัมพันธ์กัน |
 | 🚨 **Incident & Evidence** | เปิดเหตุการณ์ตาม lifecycle, คลังหลักฐานพร้อม snapshot, ตรวจความครบถ้วนด้วย SHA-256, chain of custody, audit log ผู้ดูแล |
-| 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์ |
+| 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์, **ค้นหารองรับภาษาไทย** (normalize + ตัดคำ keyword) |
 | 🐞 **Bug Bounty / Sec Testing** | จัดการ Program/Authorization/Scope, บันทึก Finding/Evidence/Case, สแกนความปลอดภัยเฉพาะเป้าหมายที่ได้รับอนุญาต |
 | 🛰️ **Scan Campaign** | รันชุด passive check รวดเดียว, ให้เกรดภาพรวมแบบอธิบายได้, เก็บประวัติสแกน, และยกข้อสังเกตขึ้นเป็น Finding ได้ด้วยคำสั่งเดียว |
 | 🎯 **Red Team Assessment** | จัดการ Engagement + Rules of Engagement (RoE gate), ทะเบียนเป้าหมายในขอบเขต, จัดระดับข้อค้นพบ (VERIFIED_RISK/EXPOSURE/LEAD/UNKNOWN แบบ human-in-the-loop), เส้นทางโจมตี, คลังหลักฐาน SHA-256, ตรวจช่องว่างการป้องกัน, ไทม์ไลน์, และรายงาน/ส่งมอบ |
@@ -206,7 +206,7 @@ docker run --env-file .env sombra-guardian
 
 | คำสั่ง | คำอธิบาย |
 |---|---|
-| `/search <คำค้น\|อีเมล\|โดเมน\|@user\|BTC>` | ค้น OSINT เว็บเปิด + dark web |
+| `/search <คำค้น\|อีเมล\|โดเมน\|@user\|BTC>` | ค้น OSINT เว็บเปิด + dark web — **รองรับคำค้นภาษาไทย**: normalize คำค้น (NFC, ตัดอักขระล่องหน/zero-width, ยุบวรรณยุกต์ซ้ำจากคีย์บอร์ดมือถือ) แล้วตัดคำไทยเป็น keyword (ตัด stopword/ป้ายกำกับ/คำระบุประเภทองค์กร) ให้ยิง query ได้ตรงขึ้น |
 | `/identity <เป้าหมาย>` | วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล |
 | `/corporate <เป้าหมาย>` | วิเคราะห์ข้อมูลองค์กรที่รั่วไหล |
 
