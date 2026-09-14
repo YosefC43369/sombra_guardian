@@ -28,6 +28,7 @@ import detection
 import search
 import osint
 import nethealth
+import tor_launcher
 import username_osint
 import envutil
 from security import security_db_init, write_audit_log
@@ -4868,6 +4869,7 @@ _REQUIRED_MODULE_API = {
               "pivot_queries", "build_dossier", "format_search_report"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
+    "tor_launcher": ("ensure_tor",),
     "username_osint": ("load_sites", "check_username", "check_username_as_results",
                        "check_username_as_results_async", "is_plausible_username"),
     "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
@@ -4947,8 +4949,10 @@ def log_tor_status() -> bool:
         return True
     logger.warning(
         "TOR: เชื่อมต่อ %s:%s ไม่ได้ — /identity, /corporate, /search จะค้นได้เฉพาะ "
-        "เว็บเปิดไปก่อน วิธีเปิด dark web: รัน Tor ในคอนเทนเนอร์ (Dockerfile ติดตั้งไว้แล้ว "
-        "ผ่าน docker-entrypoint.sh) หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
+        "เว็บเปิดไปก่อน วิธีเปิด dark web: (ก) Docker: Tor สตาร์ทให้เองผ่าน "
+        "docker-entrypoint.sh; (ข) โฮสต์ไม่มี root เช่น FPS.ms: บอตจะดาวน์โหลด+สตาร์ท Tor "
+        "เองถ้า TOR_AUTO_DOWNLOAD=1 (ดีฟอลต์) — ถ้ายังไม่ได้ให้ตั้ง TOR_BINARY ไปที่ tor "
+        "ที่อัปโหลด หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
         host, port,
     )
     return False
@@ -4960,6 +4964,12 @@ def main():
         
     logger.info("BOT STARTING")
     check_module_integrity()
+    # สตาร์ท/ค้นหา Tor ให้พร้อมก่อน (สำคัญบนโฮสต์ที่รัน python app.py ตรง ๆ โดยไม่ผ่าน
+    # docker-entrypoint.sh เช่น FPS.ms) — best-effort, ล้มก็ค้นเฉพาะเว็บเปิด
+    try:
+        tor_launcher.ensure_tor()
+    except Exception:
+        logger.exception("TOR: ensure_tor ล้มเหลวแบบไม่คาดคิด — ค้นเฉพาะเว็บเปิด")
     log_tor_status()
     # Names and model ids only -- never a key or any fragment of one.
     config.log_startup_summary()

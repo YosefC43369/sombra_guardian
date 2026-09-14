@@ -281,6 +281,7 @@ docker run --env-file .env sombra-guardian
 | `purpleteam.py` | Purple Team: exercises ผูกกับ engagement (authorization ผ่าน RoE ของ Red Team), ATT&CK emulation planning, detect–tune–validate loop (append-only rounds), gap→tuning อัตโนมัติ, validate ต้องมีมนุษย์ยืนยัน, coverage + MTTD (คำนวณสด) |
 | `purpleteam_report.py` | Purple Team coverage/effectiveness report, JSON/coverage-CSV/ATT&CK Navigator layer export (owns no tables) |
 | `search.py` · `scrape.py` · `osint.py` · `coordinator.py` · `username_osint.py` · `nethealth.py` | ชุด OSINT / ค้นหา / Tor routing |
+| `tor_launcher.py` | สตาร์ท Tor เองตอนบูต — ใช้ tor binary ที่มี หรือดาวน์โหลด Tor Expert Bundle มาเอง สำหรับโฮสต์ไม่มี root ที่ไม่รัน docker-entrypoint.sh (เช่น FPS.ms) |
 | `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
 | `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |
 | `gemini.py` · `quota.py` · `news.py` · `config.py` · `envutil.py` | AI, โควตา, ข่าว, config |
