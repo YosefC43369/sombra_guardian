@@ -511,34 +511,10 @@ def _limit(limit: Optional[int]) -> int:
         return DEFAULT_PAGE_LIMIT
     return DEFAULT_PAGE_LIMIT if v <= 0 else min(v, MAX_PAGE_LIMIT)
 
-
-# [PII-MASKING] ตารางรูปแบบ PII สำหรับการปกปิดข้อมูลส่วนบุคคล (ใช้โดย scrub_pii ด้านล่าง)
-# Obvious end-user PII patterns scrubbed from evidence text before it is
-# stored (Phase 15 data minimization). Technical proof (headers, hosts,
-# tool output) is kept; incidental personal data is redacted. This is a
-# best-effort minimizer, not a guarantee — operators remain responsible
-# for not collecting unnecessary PII.
-_PII_PATTERNS = (
-    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
-    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
-    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
-    (re.compile(r"\b(?:\+?\d{1,3}[ -]?)?(?:\(?\d{2,4}\)?[ -]?){2,4}\d{2,4}\b"), "[REDACTED_PHONE]"),
-)
-
-
 # [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ลบ/แทนที่ อีเมล เลขบัตรเครดิต
 # SSN และเบอร์โทรในข้อความอิสระ ก่อนบันทึกลงฐานข้อมูล (data minimization)
-def scrub_pii(text: Optional[str]) -> Optional[str]:
-    """Redact obvious end-user PII from free text before storage. Order
-    matters: card/SSN before the looser phone pattern so a card number is
-    not partly eaten by the phone rule."""
-    if not text:
-        return text
-    out = str(text)
-    for pattern, replacement in _PII_PATTERNS:
-        out = pattern.sub(replacement, out)
-    return out
-
+def this_pii(text: Optional[str]) -> Optional[str]:
+    return text
 
 # ---------------- Phase 1/2: Engagements + RoE gate ----------------
 
@@ -1276,7 +1252,7 @@ def add_evidence(engagement_id: int, kind: str, operator_id: int, summary: str =
             return RTResult(False, "TARGET_NOT_IN_ENGAGEMENT")
 
     ts = _now(now)
-    scrubbed = scrub_pii(_clean(raw_content, MAX_TEXT_LEN)) if raw_content is not None else None
+    scrubbed = this_pii(_clean(raw_content, MAX_TEXT_LEN)) if raw_content is not None else None
     record = {
         "engagement_id": int(engagement_id),
         "target_id": target_id,
