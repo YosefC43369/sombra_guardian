@@ -81,6 +81,8 @@ from bb_scan import (
 )
 import redteam as rtm
 import redteam_report as rtr
+import purpleteam as ptm
+import purpleteam_report as ptr
 
 import debt_ledger as dl
 import debt_report as dr
@@ -513,7 +515,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/rtevidence <engagement_id> add|list|verify - คลังหลักฐาน + ตรวจความครบถ้วน\n"
         "/rtreview <engagement_id> [queue|decide] - คิวตรวจสอบโดยมนุษย์\n"
         "/rttimeline <engagement_id> - ไทม์ไลน์การปฏิบัติงาน\n"
-        "/redteam_report <engagement_id> [json|csv|remediation] - รายงาน/ส่งมอบ"
+        "/redteam_report <engagement_id> [json|csv|remediation] - รายงาน/ส่งมอบ\n"
+        "\n— Purple Team (Detect–Tune–Validate, ผูกกับ Engagement ที่ AUTHORIZED) —\n"
+        "/exercise new|list|show|start|complete|cancel - จัดการแบบฝึก Purple Team\n"
+        "/ptemulate <exercise_id> add|list - วางแผนจำลอง (MITRE ATT&CK)\n"
+        "/ptdetect <exercise_id> <emulation_id> <ผล> - บันทึกผลการตรวจจับ + MTTD\n"
+        "/pttune <exercise_id> list|propose|status|validate - คิวปรับจูนการตรวจจับ\n"
+        "/ptcoverage <exercise_id> - ความครอบคลุมการตรวจจับ + เมตริก\n"
+        "/purple_report <exercise_id> [json|csv|navigator] - รายงาน/ส่งมอบ"
     )
     await update.message.reply_text(text)
     
@@ -924,7 +933,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ OSINT Search ใช้ได้เฉพาะ Admin")
 
-    query = " ".join(context.args).strip()
+    # normalize คำค้นก่อน — โดยเฉพาะภาษาไทยจากคีย์บอร์ดมือถือ (NFC, ตัดอักขระ
+    # ล่องหน/zero-width, ยุบวรรณยุกต์ซ้ำ) เพื่อให้ทุกขั้นถัดไป (quota/audit/
+    # สกัด selector/วางแผน query) ทำงานกับข้อความที่สะอาดเหมือนกัน
+    query = osint.normalize_thai_query(" ".join(context.args))
     if not query:
         return await update.message.reply_text(
             "ใช้งาน: /search <คำค้น | อีเมล | โดเมน | @username | BTC address | CVE>\n"
@@ -4236,6 +4248,314 @@ async def cmd_redteam_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _reply_chunked(update, rtr.format_report(data))
 
 
+# ---------------- Purple Team (Phase 12, engagement-gated) ----------------
+#
+# Every command is Telegram-Admin gated (necessary, not sufficient) via
+# _rt_guard, exactly like the Red Team commands. Authorization to actually
+# run an exercise is decided by the backing Red Team engagement's RoE
+# (operational status + not kill-switched), enforced inside purpleteam.py;
+# chat-admin status never widens it.
+
+def _pt_id(args, index=0):
+    """Parse an integer id from args[index]; None if not an int."""
+    if len(args) <= index or not str(args[index]).lstrip("-").isdigit():
+        return None
+    return int(args[index])
+
+
+def _pt_exercise_in_chat(exercise_id, chat_id):
+    """Fetch an exercise and confirm it belongs to this chat; else None."""
+    exercise = ptm.get_exercise(exercise_id)
+    if not exercise or exercise["chat_id"] != chat_id:
+        return None
+    return exercise
+
+
+async def cmd_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/exercise new|list|show|start|complete|cancel"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if not args:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/exercise new <engagement_id> <ชื่อแบบฝึก...>\n"
+            "/exercise list\n"
+            "/exercise show <exercise_id>\n"
+            "/exercise start <exercise_id>\n"
+            "/exercise complete <exercise_id>\n"
+            "/exercise cancel <exercise_id> [เหตุผล...]")
+    sub = args[0].lower()
+
+    if sub == "new":
+        engagement_id = _pt_id(args, 1)
+        name = " ".join(args[2:])
+        if engagement_id is None or not name:
+            return await update.message.reply_text(
+                "ใช้งาน: /exercise new <engagement_id> <ชื่อแบบฝึก...>")
+        r = ptm.create_exercise(chat_id, engagement_id, name, created_by=actor)
+        if not r.ok:
+            return await update.message.reply_text(f"❌ {r.reason} {r.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ สร้างแบบฝึก {r.detail} (#{r.id}) ผูกกับ Engagement #{engagement_id} "
+            f"สถานะ PLANNED\nต่อไป: /ptemulate {r.id} add <ATT&CK id> แล้ว "
+            f"/exercise start {r.id}")
+
+    if sub == "list":
+        items = ptm.list_exercises(chat_id)
+        if not items:
+            return await update.message.reply_text("ยังไม่มีแบบฝึก Purple Team ในกลุ่มนี้")
+        lines = [f"#{x['exercise_id']} {x['code']} [{x['status']}] {x['name']} "
+                 f"(eng #{x['engagement_id']})" for x in items]
+        return await _reply_chunked(update, "Purple Team exercises:\n" + "\n".join(lines))
+
+    xid = _pt_id(args, 1)
+    if xid is None:
+        return await update.message.reply_text("❌ ต้องระบุ exercise_id เป็นตัวเลข")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+
+    if sub == "show":
+        m = ptm.get_exercise_metrics(xid)
+        text = (f"Exercise {exercise['code']} (#{xid})\n"
+                f"ชื่อ: {exercise['name']}\nสถานะ: {exercise['status']}\n"
+                f"Engagement: #{exercise['engagement_id']} | Framework: {exercise['framework']}\n"
+                f"เทคนิค: {m['techniques']} (ตรวจจับเต็ม {m['techniques_with_detection']}) | "
+                f"รอบตรวจจับ: {m['detection_rounds']} | gaps: {m['gaps']}\n"
+                f"อัตราตรวจจับ: {m['detection_rate']*100:.1f}% | "
+                f"MTTD เฉลี่ย: {m['mttd_mean'] if m['mttd_mean'] is not None else 'N/A'}s")
+        return await update.message.reply_text(text)
+
+    if sub == "start":
+        r = ptm.start_exercise(xid, actor_id=actor)
+        return await update.message.reply_text(
+            f"✅ แบบฝึก {exercise['code']} → RUNNING" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+
+    if sub == "complete":
+        r = ptm.complete_exercise(xid, actor_id=actor)
+        return await update.message.reply_text(
+            f"✅ แบบฝึก {exercise['code']} → COMPLETED" if r.ok
+            else f"❌ {r.reason}")
+
+    if sub == "cancel":
+        reason = " ".join(args[2:])
+        r = ptm.cancel_exercise(xid, actor_id=actor, reason=reason)
+        return await update.message.reply_text(
+            f"✅ แบบฝึก {exercise['code']} → CANCELLED" if r.ok
+            else f"❌ {r.reason}")
+
+    return await update.message.reply_text("❌ คำสั่งย่อยไม่ถูกต้อง")
+
+
+async def cmd_ptemulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ptemulate <exercise_id> add <ATT&CK id> [tactic] [ชื่อเทคนิค...] | list"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    xid = _pt_id(args, 0)
+    if xid is None:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/ptemulate <exercise_id> add <ATT&CK id> [tactic] [ชื่อเทคนิค...]\n"
+            "/ptemulate <exercise_id> list")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+    sub = args[1].lower() if len(args) > 1 else "list"
+
+    if sub == "add":
+        if len(args) < 3:
+            return await update.message.reply_text(
+                "ใช้งาน: /ptemulate <exercise_id> add <ATT&CK id> [tactic] [ชื่อเทคนิค...]")
+        technique = args[2]
+        tactic = args[3] if len(args) > 3 else ""
+        name = " ".join(args[4:]) if len(args) > 4 else ""
+        r = ptm.add_emulation(xid, technique, planned_by=actor, tactic=tactic,
+                              technique_name=name)
+        if not r.ok:
+            return await update.message.reply_text(f"❌ {r.reason} {r.detail}".strip())
+        return await update.message.reply_text(
+            f"✅ เพิ่มการจำลอง {r.detail} (emulation #{r.id})")
+
+    if sub == "list":
+        items = ptm.list_emulations(xid)
+        if not items:
+            return await update.message.reply_text("ยังไม่มีการจำลองในแบบฝึกนี้")
+        lines = [f"#{e['emulation_id']} {e['technique_id']} [{e['status']}] "
+                 f"{e['tactic'] or '-'} {e['technique_name'] or ''}".rstrip()
+                 for e in items]
+        return await _reply_chunked(update, "Emulations:\n" + "\n".join(lines))
+
+    return await update.message.reply_text("❌ คำสั่งย่อยไม่ถูกต้อง (add|list)")
+
+
+async def cmd_ptdetect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ptdetect <exercise_id> <emulation_id> <PREVENTED|DETECTED|ALERTED|LOGGED_ONLY|MISSED>
+    [source] [telemetry...]"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    xid = _pt_id(args, 0)
+    emu_id = _pt_id(args, 1)
+    if xid is None or emu_id is None or len(args) < 3:
+        return await update.message.reply_text(
+            "ใช้งาน: /ptdetect <exercise_id> <emulation_id> "
+            "<PREVENTED|DETECTED|ALERTED|LOGGED_ONLY|MISSED> [source] [telemetry...]")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+    outcome = args[2]
+    data_source = args[3] if len(args) > 3 else ""
+    telemetry = " ".join(args[4:]) if len(args) > 4 else ""
+    r = ptm.record_detection(xid, emu_id, outcome, recorded_by=actor,
+                             data_source=data_source, telemetry=telemetry)
+    if not r.ok:
+        return await update.message.reply_text(f"❌ {r.reason} {r.detail}".strip())
+    if r.detail == "GAP":
+        return await update.message.reply_text(
+            f"⚠️ บันทึกผลแล้ว (detection #{r.id}) — เป็นช่องโหว่การตรวจจับ "
+            f"เปิด tuning ticket อัตโนมัติ ดูที่ /pttune {xid} list")
+    return await update.message.reply_text(
+        f"✅ บันทึกผลแล้ว (detection #{r.id}) outcome={r.detail}")
+
+
+async def cmd_pttune(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/pttune <exercise_id> list|propose|status|validate ..."""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    xid = _pt_id(args, 0)
+    if xid is None:
+        return await update.message.reply_text(
+            "ใช้งาน:\n"
+            "/pttune <exercise_id> list [สถานะ]\n"
+            "/pttune <exercise_id> propose <ATT&CK id> <หัวข้อ...>\n"
+            "/pttune <exercise_id> status <tuning_id> <IN_PROGRESS|IMPLEMENTED|REJECTED> [หมายเหตุ...]\n"
+            "/pttune <exercise_id> validate <tuning_id> <detection_id> [หมายเหตุ...]")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+    sub = args[1].lower() if len(args) > 1 else "list"
+
+    if sub == "list":
+        status = args[2].upper() if len(args) > 2 else None
+        items = ptm.list_tuning(xid, status=status)
+        if not items:
+            return await update.message.reply_text("ยังไม่มี tuning ticket")
+        lines = [f"#{t['tuning_id']} [{t['status']}] {t.get('technique_id') or '-'} "
+                 f"{t['title']}" for t in items]
+        return await _reply_chunked(update, "Tuning tickets:\n" + "\n".join(lines))
+
+    if sub == "propose":
+        technique = args[2] if len(args) > 2 else ""
+        title = " ".join(args[3:])
+        if not title:
+            return await update.message.reply_text(
+                "ใช้งาน: /pttune <exercise_id> propose <ATT&CK id> <หัวข้อ...>")
+        r = ptm.propose_tuning(xid, title, proposed_by=actor, technique_id=technique)
+        return await update.message.reply_text(
+            f"✅ เปิด tuning #{r.id} (PROPOSED)" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+
+    if sub == "status":
+        tuning_id = _pt_id(args, 2)
+        if tuning_id is None or len(args) < 4:
+            return await update.message.reply_text(
+                "ใช้งาน: /pttune <exercise_id> status <tuning_id> "
+                "<IN_PROGRESS|IMPLEMENTED|REJECTED> [หมายเหตุ...]")
+        new_status = args[3]
+        note = " ".join(args[4:])
+        r = ptm.set_tuning_status(tuning_id, new_status, actor_id=actor, note=note)
+        return await update.message.reply_text(
+            f"✅ tuning #{tuning_id} → {r.detail}" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+
+    if sub == "validate":
+        tuning_id = _pt_id(args, 2)
+        detection_id = _pt_id(args, 3)
+        if tuning_id is None or detection_id is None:
+            return await update.message.reply_text(
+                "ใช้งาน: /pttune <exercise_id> validate <tuning_id> <detection_id> [หมายเหตุ...]\n"
+                "(detection_id ต้องเป็นรอบที่ตรวจจับได้จริงหลังปรับจูน)")
+        note = " ".join(args[4:])
+        r = ptm.validate_tuning(tuning_id, detection_id, actor_id=actor, note=note)
+        return await update.message.reply_text(
+            f"✅ tuning #{tuning_id} → VALIDATED (อ้างอิง detection #{detection_id})" if r.ok
+            else f"❌ {r.reason} {r.detail}".strip())
+
+    return await update.message.reply_text("❌ คำสั่งย่อยไม่ถูกต้อง (list|propose|status|validate)")
+
+
+async def cmd_ptcoverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ptcoverage <exercise_id> — ATT&CK coverage matrix + metrics."""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    chat_id = update.effective_chat.id
+    xid = _pt_id(args, 0)
+    if xid is None:
+        return await update.message.reply_text("ใช้งาน: /ptcoverage <exercise_id>")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+    m = ptm.get_exercise_metrics(xid)
+    coverage = ptm.get_technique_coverage(xid)
+    lines = [f"🟣 Coverage — {exercise['code']} ({exercise['name']})",
+             f"เทคนิค: {m['techniques']} | ตรวจจับเต็ม: {m['techniques_with_detection']} "
+             f"({m['coverage_ratio']*100:.1f}%) | gaps: {m['gaps']}",
+             f"อัตราตรวจจับ: {m['detection_rate']*100:.1f}% | "
+             f"MTTD เฉลี่ย: {m['mttd_mean'] if m['mttd_mean'] is not None else 'N/A'}s "
+             f"(n={m['mttd_samples']})", ""]
+    if not coverage:
+        lines.append("(ยังไม่มีเทคนิคที่จำลอง)")
+    else:
+        for c in coverage:
+            lines.append(f"• {c['technique_id']} [{c['coverage']}] "
+                         f"{c['tactic'] or '-'} best={c['best_outcome'] or 'N/A'} "
+                         f"rounds={c['rounds']}")
+    await _reply_chunked(update, "\n".join(lines))
+
+
+async def cmd_purple_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/purple_report <exercise_id> [json|csv|navigator]"""
+    if not await _rt_guard(update, context):
+        return
+    args = context.args or []
+    actor = update.effective_user.id
+    chat_id = update.effective_chat.id
+    xid = _pt_id(args, 0)
+    if xid is None:
+        return await update.message.reply_text(
+            "ใช้งาน: /purple_report <exercise_id> [json|csv|navigator]")
+    exercise = _pt_exercise_in_chat(xid, chat_id)
+    if not exercise:
+        return await update.message.reply_text("❌ ไม่พบแบบฝึกนี้ในกลุ่มนี้")
+    fmt = args[1].lower() if len(args) > 1 else "text"
+    write_audit_log(chat_id, actor, actor="user", action="PT_REPORT_VIEW",
+                    detail=f"exercise_id={xid} fmt={fmt}")
+    if fmt == "json":
+        payload = ptr.export_report_json(xid)
+        return await _send_member_export(update, payload, f"purple_{exercise['code']}.json")
+    if fmt == "csv":
+        payload = ptr.export_coverage_csv(xid)
+        return await _send_member_export(update, payload, f"purple_{exercise['code']}_coverage.csv")
+    if fmt == "navigator":
+        payload = ptr.export_attack_navigator_layer(xid)
+        return await _send_member_export(update, payload, f"purple_{exercise['code']}_navigator.json")
+    data = ptr.get_report_data(xid)
+    await _reply_chunked(update, ptr.format_report(data))
+
+
 # ---------------- Message Handler ----------------
 
 async def check_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -4575,6 +4895,12 @@ _REQUIRED_MODULE_API = {
     "redteam_report": ("get_report_data", "format_report", "build_remediation_package",
                        "format_remediation_package", "export_report_json",
                        "export_findings_csv"),
+    "purpleteam": ("purpleteam_db_init", "create_exercise", "start_exercise",
+                   "complete_exercise", "cancel_exercise", "add_emulation",
+                   "record_detection", "propose_tuning", "set_tuning_status",
+                   "validate_tuning", "get_technique_coverage", "get_exercise_metrics"),
+    "purpleteam_report": ("get_report_data", "format_report", "export_report_json",
+                          "export_coverage_csv", "export_attack_navigator_layer"),
 }
 
 
@@ -4649,6 +4975,9 @@ def main():
     security_testing_db_init()
     bb_scan_db_init()
     rtm.redteam_db_init()
+    # purpleteam builds on redteam's engagement records, so it inits after
+    # redteam. It owns only pt_* tables; purpleteam_report.py owns none.
+    ptm.purpleteam_db_init()
     # member_intel must init before member_incident: the incident layer's
     # foreign-key-by-convention columns and the risk engine's
     # CONFIRMED-incident signal both assume the registry's tables exist.
@@ -4711,6 +5040,12 @@ def main():
     app.add_handler(CommandHandler("rtreview", cmd_rtreview))
     app.add_handler(CommandHandler("rttimeline", cmd_rttimeline))
     app.add_handler(CommandHandler("redteam_report", cmd_redteam_report))
+    app.add_handler(CommandHandler("exercise", cmd_exercise))
+    app.add_handler(CommandHandler("ptemulate", cmd_ptemulate))
+    app.add_handler(CommandHandler("ptdetect", cmd_ptdetect))
+    app.add_handler(CommandHandler("pttune", cmd_pttune))
+    app.add_handler(CommandHandler("ptcoverage", cmd_ptcoverage))
+    app.add_handler(CommandHandler("purple_report", cmd_purple_report))
     # cmd_bbreport existed but was never registered, so /bbreport was
     # unreachable and bb_report.py was dead code. Registered here with
     # the rest of the reporting commands.

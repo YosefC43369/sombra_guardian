@@ -84,10 +84,11 @@ EXECUTE → VERIFY → REPORT
 | 🤖 **AI (Gemini/GPT)** | แท็กบอทเพื่อถามคำถาม, วิเคราะห์รูป/PDF/ไฟล์, สร้างรูปด้วย `/imagine`, คัดกรองสแปมด้วย AI (มีระบบโควตารายวัน) |
 | 👤 **Member Intelligence** | ทะเบียนสมาชิก, ประวัติชื่อ/username, ไทม์ไลน์กิจกรรม, คะแนนความเสี่ยงแบบอธิบายได้, วิเคราะห์รูปแบบที่สัมพันธ์กัน |
 | 🚨 **Incident & Evidence** | เปิดเหตุการณ์ตาม lifecycle, คลังหลักฐานพร้อม snapshot, ตรวจความครบถ้วนด้วย SHA-256, chain of custody, audit log ผู้ดูแล |
-| 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์ |
+| 🔎 **OSINT** | ค้นหาข้อมูลบนเว็บเปิดและ dark web (ผ่าน Tor), เชื่อมโยงตัวตนข้ามเว็บ, ค้น username ข้ามหลายพันเว็บไซต์, **ค้นหารองรับภาษาไทย** (normalize + ตัดคำ keyword) |
 | 🐞 **Bug Bounty / Sec Testing** | จัดการ Program/Authorization/Scope, บันทึก Finding/Evidence/Case, สแกนความปลอดภัยเฉพาะเป้าหมายที่ได้รับอนุญาต |
 | 🛰️ **Scan Campaign** | รันชุด passive check รวดเดียว, ให้เกรดภาพรวมแบบอธิบายได้, เก็บประวัติสแกน, และยกข้อสังเกตขึ้นเป็น Finding ได้ด้วยคำสั่งเดียว |
 | 🎯 **Red Team Assessment** | จัดการ Engagement + Rules of Engagement (RoE gate), ทะเบียนเป้าหมายในขอบเขต, จัดระดับข้อค้นพบ (VERIFIED_RISK/EXPOSURE/LEAD/UNKNOWN แบบ human-in-the-loop), เส้นทางโจมตี, คลังหลักฐาน SHA-256, ตรวจช่องว่างการป้องกัน, ไทม์ไลน์, และรายงาน/ส่งมอบ |
+| 🟣 **Purple Team** | แบบฝึก detect–tune–validate ผูกกับ Engagement ที่ AUTHORIZED, วางแผนจำลองตาม MITRE ATT&CK, บันทึกผลการตรวจจับ + MTTD, คำนวณความครอบคลุมการตรวจจับ (DeTT&CT-style), ช่องโหว่เปิด tuning ticket อัตโนมัติ, ยืนยันผลด้วยมนุษย์ (ไม่มี auto-validate), ส่งออก ATT&CK Navigator layer |
 | 📊 **Reporting** | Dashboard สรุปกลุ่ม, รายงานแยก 4 ส่วน (ข้อเท็จจริง / การวิเคราะห์ / การดำเนินการ / ข้อจำกัด), ส่งออก JSON/CSV |
 | 💰 **Group Finance** | บันทึกหนี้ (`/sign`), กระเป๋าเงิน, ฝาก/ถอน/โอน, บิล, ประวัติธุรกรรม |
 | 📰 **News** | ดึงข่าวความปลอดภัยจาก RSS แล้วสรุปด้วย AI ส่งเข้ากลุ่มอัตโนมัติ |
@@ -209,7 +210,7 @@ docker run --env-file .env sombra-guardian
 
 | คำสั่ง | คำอธิบาย |
 |---|---|
-| `/search <คำค้น\|อีเมล\|โดเมน\|@user\|BTC>` | ค้น OSINT เว็บเปิด + dark web |
+| `/search <คำค้น\|อีเมล\|โดเมน\|@user\|BTC>` | ค้น OSINT เว็บเปิด + dark web — **รองรับคำค้นภาษาไทย**: normalize คำค้น (NFC, ตัดอักขระล่องหน/zero-width, ยุบวรรณยุกต์ซ้ำจากคีย์บอร์ดมือถือ) แล้วตัดคำไทยเป็น keyword (ตัด stopword/ป้ายกำกับ/คำระบุประเภทองค์กร) ให้ยิง query ได้ตรงขึ้น |
 | `/identity <เป้าหมาย>` | วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล |
 | `/corporate <เป้าหมาย>` | วิเคราะห์ข้อมูลองค์กรที่รั่วไหล |
 
@@ -241,6 +242,17 @@ docker run --env-file .env sombra-guardian
 | `/rttimeline <eid>` | ไทม์ไลน์ (แยก OBSERVED/OPERATOR/ADMIN) |
 | `/redteam_report <eid> [json\|csv\|remediation]` | รายงาน/ส่งออก/แพ็กเกจส่งมอบ Blue Team |
 
+### 🟣 Purple Team *(Admin + Engagement ที่ AUTHORIZED)*
+
+| คำสั่ง | คำอธิบาย |
+|---|---|
+| `/exercise new\|list\|show\|start\|complete\|cancel` | จัดการแบบฝึก — `start` ได้เฉพาะเมื่อ Engagement ยัง operational (ไม่ถูก kill-switch) |
+| `/ptemulate <xid> add\|list` | วางแผนการจำลองตาม MITRE ATT&CK (ตรวจรูปแบบ technique id เช่น T1059.001) |
+| `/ptdetect <xid> <emu_id> <ผล>` | บันทึกผลการตรวจจับ (PREVENTED/DETECTED/ALERTED/LOGGED_ONLY/MISSED) + คำนวณ MTTD; ช่องโหว่เปิด tuning ticket ให้อัตโนมัติ |
+| `/pttune <xid> list\|propose\|status\|validate` | คิวปรับจูนการตรวจจับ — `validate` ต้องอ้างอิงรอบที่ตรวจจับได้จริงหลัง IMPLEMENTED (ไม่มี auto-validate) |
+| `/ptcoverage <xid>` | ตารางความครอบคลุมการตรวจจับต่อ technique + เมตริก (detection rate / MTTD) |
+| `/purple_report <xid> [json\|csv\|navigator]` | รายงาน/ส่งออก coverage CSV/ATT&CK Navigator layer |
+
 ### 💰 Finance &amp; 🗂️ GitHub
 
 | คำสั่ง | คำอธิบาย |
@@ -270,6 +282,8 @@ docker run --env-file .env sombra-guardian
 | `bb_scan.py` | Scan campaign — orchestrate หลาย check, ให้เกรด, เก็บประวัติ, bridge ข้อสังเกต → Finding |
 | `redteam.py` | Red Team: engagement + RoE gate (reuse `scope_policy.evaluate_target`), targets, findings classification, vectors, evidence (SHA-256 + append-only custody), timeline, review queue, defensive-gap, retention |
 | `redteam_report.py` | Red Team executive/technical report, remediation hand-off, JSON/CSV export (แยก RAW/OBSERVATION/AI/HUMAN) |
+| `purpleteam.py` | Purple Team: exercises ผูกกับ engagement (authorization ผ่าน RoE ของ Red Team), ATT&CK emulation planning, detect–tune–validate loop (append-only rounds), gap→tuning อัตโนมัติ, validate ต้องมีมนุษย์ยืนยัน, coverage + MTTD (คำนวณสด) |
+| `purpleteam_report.py` | Purple Team coverage/effectiveness report, JSON/coverage-CSV/ATT&CK Navigator layer export (owns no tables) |
 | `search.py` · `scrape.py` · `osint.py` · `coordinator.py` · `username_osint.py` · `nethealth.py` | ชุด OSINT / ค้นหา / Tor routing |
 | `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
 | `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |
@@ -312,6 +326,7 @@ python test_member_intel.py
 python test_member_incident.py
 python test_mute_regression.py
 python -m unittest test_bb_report
+python -m unittest test_redteam test_purpleteam
 
 # ชุด OSINT / search / scrape ทั้งหมด
 python tests/run_all.py
