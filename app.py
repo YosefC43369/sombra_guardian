@@ -26,6 +26,7 @@ from telegram.error import TelegramError
 
 import detection
 import search
+import scrape
 import osint
 import nethealth
 import tor_launcher
@@ -110,6 +111,20 @@ TELEGRAM_CAPTION_LIMIT = 1024  # Telegram Bot API: caption max length for send_p
 GITHUB_FILES_DISPLAY_CAP = 200  # /github files: max rows shown even after _reply_chunked splitting
 GITHUB_INTERVAL_SECONDS = 3600  # how often the TTL sweep background task runs
 SEARCH_RESULTS_DISPLAY_CAP = 20  # /search: max sources listed in the reply
+# /search: จำกัดผลต่อ 1 โฮสต์ในลำดับต้นๆ เพื่อกระจายให้เห็นหลายเว็บ (กันไดเรกทอรี
+# เดียวยึดผลทั้งหน้า) — 0 = ไม่จำกัด
+SEARCH_PER_HOST_CAP = envutil.env_int("SEARCH_PER_HOST_CAP", 3)
+# /deepsearch: ค้นซ้ำเป็นรอบๆ (pivot จากสิ่งที่เจอ) จนกว่าจะ "มั่นใจว่าคนเดียวกัน"
+# 0 = ไม่จำกัด (รอบ/เวลา) — แต่จะหยุดเองเมื่อไม่มีเบาะแสใหม่ต่อเนื่อง (stall guard)
+SEARCH_DEEP_MAX_ROUNDS = envutil.env_int("SEARCH_DEEP_MAX_ROUNDS", 0)
+SEARCH_DEEP_MAX_SECONDS = envutil.env_float("SEARCH_DEEP_MAX_SECONDS", 0)
+SEARCH_DEEP_STALL_ROUNDS = envutil.env_int("SEARCH_DEEP_STALL_ROUNDS", 3)
+SEARCH_DEEP_ROUND_QUERIES = envutil.env_int("SEARCH_DEEP_ROUND_QUERIES", 6)
+# จำนวน query ที่ /search และ /deepsearch วางแผนต่อรอบ (กว้างกว่าค่าของ /identity)
+SEARCH_PLAN_MAX_QUERIES = envutil.env_int("SEARCH_PLAN_MAX_QUERIES", 6)
+# /deepsearch: ดึงเนื้อหาจริงจากผลอันดับต้นๆ กี่หน้า เพื่อเก็บ "คำโปรย/เนื้อหา" มายืนยัน
+# ตัว (0 = ไม่ดึง) — ใช้ scrape.py (Tor สำหรับ .onion, reader proxy สำหรับ clearnet กันบอท)
+SEARCH_DEEP_SCRAPE_TOP = envutil.env_int("SEARCH_DEEP_SCRAPE_TOP", 8)
 SEARCH_COMMAND_BUDGET_SECONDS = envutil.env_float("SEARCH_COMMAND_BUDGET_SECONDS", 40)
 
 logging.basicConfig(
@@ -481,6 +496,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์\n"
         "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท\n"
         "/search <คำค้น|อีเมล|โดเมน|@user|BTC> - ค้นหา OSINT บน dark web (Admin)\n"
+        "/deepsearch <เป้าหมาย> - ค้นแบบไม่ยอมแพ้ ค้นซ้ำจนมั่นใจว่าเป็นคนเดียวกัน (Admin)\n"
         "/identity <เป้าหมาย> - วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล (Admin)\n"
         "/corporate <เป้าหมาย> - วิเคราะห์ข้อมูลองค์กรรั่วไหล (Admin)\n"
         "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
@@ -963,7 +979,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     selectors = osint.extract_selectors(query)
     queries = osint.plan_queries(
-        query, selectors, max_queries=coordinator.OSINT_MAX_QUERIES
+        query, selectors, max_queries=SEARCH_PLAN_MAX_QUERIES
     )
     logger.info(
         f"OSINT SEARCH | Chat ID: {chat_id} | User ID: {user_id} | "
@@ -1030,7 +1046,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_groups.append(username_hits)
 
     ranked = osint.merge_and_rank(
-        clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP
+        clean_groups, selectors, limit=SEARCH_RESULTS_DISPLAY_CAP,
+        per_host_cap=SEARCH_PER_HOST_CAP,
     )
 
     if status_msg is not None:
@@ -1055,6 +1072,183 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit=SEARCH_RESULTS_DISPLAY_CAP, health_note=health_note,
         ),
     )
+
+async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ค้นแบบ 'ไม่ยอมแพ้': ค้นเป็นรอบๆ pivot จากตัวระบุที่เจอ (อีเมล/บัญชี/โดเมน)
+    แล้วค้นต่อไปเรื่อยๆ จนกว่าจะได้ข้อมูลดิบพอและยืนยันข้ามแหล่งว่าเป็น 'คนเดียวกัน'
+    หยุดเมื่อ: มั่นใจแล้ว | ไม่มีเบาะแสใหม่ต่อเนื่อง (stall) | ครบเพดานที่ตั้งไว้ (ถ้ามี)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ OSINT Search ใช้ได้เฉพาะ Admin")
+
+    query = osint.normalize_thai_query(" ".join(context.args))
+    if not query:
+        return await update.message.reply_text(
+            "ใช้งาน: /deepsearch <คำค้น | ชื่อ-นามสกุล | อีเมล | @username | โดเมน>\n"
+            "บอตจะค้นซ้ำหลายรอบ ตามเบาะแสที่เจอ จนกว่าจะมั่นใจว่าเป็นคนเดียวกัน\n"
+            "ตัวอย่าง: /deepsearch \"ธนาธรณ์ ปัญญาสาร\" อาร์ม"
+        )
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)")
+    write_audit_log(chat_id, user_id, actor="admin", action="OSINT_DEEPSEARCH",
+                    detail=query[:500])
+
+    selectors = osint.extract_selectors(query)
+    search_one = getattr(search, "get_combined_results_async", None) \
+        or search.get_search_results_async
+
+    seen_queries: set = set()
+    pending = osint.plan_queries(query, selectors, max_queries=SEARCH_PLAN_MAX_QUERIES)
+    all_groups: list = []
+
+    # ตัวระบุที่ผูกกับคนเดียว: profile จาก data.json + ตรวจบัญชีจริง (รอบแรกครั้งเดียว)
+    handle = query.strip()
+    if username_osint.is_plausible_username(handle):
+        try:
+            pdb = osint.build_profile_results(handle, limit=SEARCH_RESULTS_DISPLAY_CAP)
+            if pdb:
+                all_groups.append(pdb)
+        except Exception as e:
+            logger.warning(f"DEEPSEARCH PROFILE-DB FAILED | {handle!r}: {e}")
+        try:
+            uh = await username_osint.check_username_as_results_async(
+                handle, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS)
+            if uh:
+                all_groups.append(uh)
+        except Exception as e:
+            logger.warning(f"DEEPSEARCH USERNAME FAILED | {handle!r}: {e}")
+
+    status_msg = None
+    try:
+        status_msg = await update.message.reply_text(
+            "🔁 ค้นแบบไม่ยอมแพ้ — จะค้นต่อจนกว่าจะมั่นใจว่าเป็นคนเดียวกัน...")
+    except TelegramError:
+        pass
+
+    started = time.monotonic()
+    round_no = 0
+    stall = 0
+    ranked: list = []
+    conf = {"confident": False, "relevant": 0, "corroborated": []}
+
+    try:
+        while pending:
+            round_no += 1
+            batch = [q for q in pending if q.lower() not in seen_queries][:SEARCH_DEEP_ROUND_QUERIES]
+            for q in batch:
+                seen_queries.add(q.lower())
+            if not batch:
+                break
+
+            await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+            groups = await asyncio.gather(
+                *[search_one(q, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS) for q in batch],
+                return_exceptions=True,
+            )
+            new_count = 0
+            for q, g in zip(batch, groups):
+                if isinstance(g, BaseException):
+                    logger.warning(f"DEEPSEARCH FAILED | query={q!r}: {g}")
+                    continue
+                if g:
+                    all_groups.append(g)
+                    new_count += len(g)
+
+            ranked = osint.merge_and_rank(all_groups, selectors,
+                                          limit=SEARCH_RESULTS_DISPLAY_CAP,
+                                          per_host_cap=SEARCH_PER_HOST_CAP)
+            conf = osint.assess_identity_confidence(ranked)
+
+            if status_msg is not None:
+                try:
+                    await status_msg.edit_text(
+                        f"🔁 รอบ {round_no} — พบ {conf['total']} แหล่ง "
+                        f"(ตรงเป้า {conf['relevant']}) | ยืนยันข้ามแหล่ง "
+                        f"{len(conf['corroborated'])} ตัวระบุ\n"
+                        f"{'✅ มั่นใจว่าเป็นคนเดียวกันแล้ว' if conf['confident'] else 'กำลังค้นเบาะแสเพิ่ม...'}")
+                except TelegramError:
+                    pass
+
+            if conf["confident"]:
+                break
+
+            new_q = [q for q in osint.expand_queries(seen_queries, ranked, selectors,
+                                                     max_new=SEARCH_DEEP_ROUND_QUERIES)
+                     if q.lower() not in seen_queries]
+            # stall guard: ไม่มีผลใหม่ "และ" ไม่มี query ใหม่ = ไม่มีเบาะแสให้ค้นต่อ
+            stall = stall + 1 if (new_count == 0 and not new_q) else 0
+            pending = new_q
+
+            if SEARCH_DEEP_MAX_ROUNDS and round_no >= SEARCH_DEEP_MAX_ROUNDS:
+                break
+            if SEARCH_DEEP_MAX_SECONDS and (time.monotonic() - started) >= SEARCH_DEEP_MAX_SECONDS:
+                break
+            if stall >= max(1, SEARCH_DEEP_STALL_ROUNDS):
+                logger.info("DEEPSEARCH STALL | ไม่มีเบาะแสใหม่ %d รอบติด — หยุด", stall)
+                break
+    except Exception:
+        logger.exception("DEEPSEARCH LOOP ERROR")
+    finally:
+        if status_msg is not None:
+            await safe_delete(status_msg, chat_id, context)
+
+    # ดึงเนื้อหาจริงจากผลอันดับต้นๆ (ต่อยอดจากการค้น) เพื่อเก็บ "คำโปรย/เนื้อหา" มายืนยัน
+    # ตัวตน — clearnet ที่กันบอทใช้ reader proxy, .onion ใช้ Tor (จัดการใน scrape.py)
+    scraped_ok = 0
+    if SEARCH_DEEP_SCRAPE_TOP > 0 and all_groups:
+        prelim = osint.merge_and_rank(all_groups, selectors,
+                                      limit=SEARCH_DEEP_SCRAPE_TOP,
+                                      per_host_cap=SEARCH_PER_HOST_CAP)
+        urls = [(r["link"], r.get("title", "")) for r in prelim if r.get("link")]
+        try:
+            scraped = await scrape.scrape_multiple_async(
+                urls, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS)
+            content_by_url = {u: txt for u, txt in (scraped or [])}
+            enriched = []
+            for rec in prelim:
+                raw = content_by_url.get(rec["link"], "")
+                body = raw.split(" - ", 1)[1] if " - " in raw else raw
+                if body and "[content unavailable]" not in body:
+                    enriched.append({**rec, "snippet": body[:1500]})
+            if enriched:
+                all_groups.append(enriched)
+                scraped_ok = len(enriched)
+        except Exception:
+            logger.exception("DEEPSEARCH SCRAPE ERROR")
+
+    # จัดอันดับ + ประเมินความมั่นใจใหม่หลังได้เนื้อหาจริง (snippet มีน้ำหนักสูงในการจัดอันดับ)
+    ranked = osint.merge_and_rank(all_groups, selectors,
+                                  limit=SEARCH_RESULTS_DISPLAY_CAP,
+                                  per_host_cap=SEARCH_PER_HOST_CAP)
+    conf = osint.assess_identity_confidence(ranked)
+
+    elapsed = int(time.monotonic() - started)
+    if conf["confident"]:
+        verdict = (f"✅ มั่นใจว่าเป็นคนเดียวกัน — ยืนยันข้ามแหล่ง "
+                   f"{len(conf['corroborated'])} ตัวระบุ")
+    else:
+        verdict = ("⚠️ ยังยืนยันไม่ได้ว่าเป็นคนเดียวกัน (ไม่มีตัวระบุที่ปรากฏซ้ำข้าม "
+                   "แหล่งอิสระเพียงพอ) — ค้นจนไม่มีเบาะแสใหม่แล้ว")
+    corr_line = ""
+    if conf["corroborated"]:
+        corr_line = "\nตัวระบุที่ยืนยันข้ามแหล่ง: " + " | ".join(
+            f"{c['type']}={osint.mask_pii(str(c['value']))} (×{c['sources']})"
+            for c in conf["corroborated"][:6])
+    health_note = (f"ค้นเชิงลึก {round_no} รอบ | ดึงเนื้อหาจริง {scraped_ok} หน้า | "
+                   f"ใช้เวลา ~{elapsed}s | {verdict}{corr_line}")
+
+    await _reply_chunked(
+        update,
+        osint.format_search_report(
+            query, selectors, sorted(seen_queries), ranked,
+            limit=SEARCH_RESULTS_DISPLAY_CAP, health_note=health_note,
+        ),
+    )
+
 
 async def chat_id_command(update, context):
     thread_id = update.effective_message.message_thread_id
@@ -4877,11 +5071,13 @@ _REQUIRED_MODULE_API = {
     "search": ("get_search_results", "get_search_results_async",
                "get_combined_results", "get_combined_results_async",
                "get_clearnet_results"),
-    "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
+    "scrape": ("scrape_multiple", "scrape_single", "scrape_multiple_async",
+               "CONTENT_UNAVAILABLE_MARKER"),
     "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
               "pivot_queries", "build_dossier", "format_search_report",
-              "load_site_db", "profile_url_candidates", "build_profile_results"),
+              "load_site_db", "profile_url_candidates", "build_profile_results",
+              "assess_identity_confidence", "expand_queries"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
@@ -5043,6 +5239,7 @@ def main():
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
     app.add_handler(CommandHandler("bbscope", cmd_bbscope))

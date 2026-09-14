@@ -47,6 +47,62 @@ check("sitedb: ผลลัพธ์ shape เข้ากับ merge_and_rank"
       len(_pres) == 3 and all(set(("title", "link", "origin", "engine")) <= set(r) for r in _pres),
       _pres[:1])
 check("sitedb: origin ระบุว่ามาจากฐานข้อมูลเว็บ", all(r["origin"] == "profile-db" for r in _pres))
+
+# ---------- ranking: directory-chrome demotion + per-host diversification ----------
+_host = "http://amndir7jfxnt5glt2tsevwjlnwdvknttxygubw27ulq5c433en75piyd.onion"
+_cats = ["Marketplaces", "Hosting", "Directories", "Hacking", "Forums", "Social Media"]
+_grp = [{"title": t, "link": f"{_host}/?cat={i}", "engine": "Amnesia", "origin": "darkweb"}
+        for i, t in enumerate(_cats)]
+_grp.append({"title": "ธนาธรณ์ ปัญญาสาร", "link": "https://ex.com/p/thana",
+             "snippet": "ธนาธรณ์ ปัญญาสาร", "engine": "Bing", "origin": "clearnet"})
+_sel = osint.extract_selectors("ธนาธรณ์ ปัญญาสาร")
+_ranked = osint.merge_and_rank([_grp], _sel, limit=8)
+check("rank: หน้า directory-chrome โดนกดเป็น relevance ติดลบ",
+      all(r["relevance"] == -1 for r in _ranked if r["engine"] == "Amnesia"),
+      [(r["engine"], r["relevance"]) for r in _ranked])
+check("rank: ผลที่ตรงชื่อขึ้นอันดับ 1", _ranked[0]["link"] == "https://ex.com/p/thana", _ranked[0]["link"])
+
+# per-host cap: โฮสต์เดียวไม่ยึดผลทั้งหมด
+_flood = [{"title": f"p{i}", "link": f"http://big.onion/{i}", "engine": "X"} for i in range(5)]
+_flood += [{"title": "A", "link": "http://a.onion/", "engine": "Y"},
+           {"title": "B", "link": "http://b.onion/", "engine": "Y"}]
+_capped = osint.merge_and_rank([_flood], None, limit=5, per_host_cap=2)
+_big = sum(1 for r in _capped[:3] if "big.onion" in r["link"])
+check("rank: per_host_cap กระจายโฮสต์ (big.onion <=2 ใน 3 อันแรก)", _big <= 2, _big)
+
+# ---------- persistent deep search: confidence + query expansion ----------
+_dr = [
+    {"title": "ธนาธรณ์ ปัญญาสาร", "snippet": "ติดต่อ thana@ex.com", "link": "https://a.com/1", "relevance": 5},
+    {"title": "profile", "snippet": "thana@ex.com @thana_p", "link": "https://b.net/2", "relevance": 3},
+]
+_c = osint.assess_identity_confidence(_dr, min_relevant=2)
+check("deep: มั่นใจเมื่อตัวระบุยืนยันข้าม >=2 โฮสต์", _c["confident"] is True, _c)
+check("deep: ระบุตัวยืนยันข้ามแหล่งได้", any(x["value"] == "thana@ex.com" for x in _c["corroborated"]), _c["corroborated"])
+# แหล่งเดียว/ไม่มีตัวระบุซ้ำข้ามโฮสต์ = ยังไม่มั่นใจ
+_c2 = osint.assess_identity_confidence(
+    [{"title": "x", "snippet": "no ids here", "link": "https://a.com/1", "relevance": 5}], min_relevant=1)
+check("deep: ไม่มีตัวระบุยืนยัน = ยังไม่มั่นใจ", _c2["confident"] is False, _c2)
+# expand: pivot จากอีเมล/บัญชี/โดเมนที่เจอ และไม่ซ้ำ query เดิม
+_ex = osint.expand_queries(["ธนาธรณ์ ปัญญาสาร"], _dr, osint.extract_selectors("ธนาธรณ์ ปัญญาสาร"), max_new=6)
+check("deep: expand pivot อีเมลที่เจอ", "thana@ex.com" in _ex, _ex)
+check("deep: expand ไม่ยิงซ้ำ query เดิม", "ธนาธรณ์ ปัญญาสาร" not in [q.lower() for q in _ex], _ex)
+
+# ---------- ranking: เน้นคำโปรย (snippet) มากกว่าเจอแค่ในชื่อเรื่อง ----------
+_sel_s = osint.extract_selectors("acme leak")
+_g = [
+    {"title": "acme", "snippet": "", "link": "https://only-title.com/"},          # เจอแค่ชื่อเรื่อง
+    {"title": "result", "snippet": "acme leak database", "link": "https://in-snippet.com/"},  # เจอในคำโปรย
+]
+_rk = osint.merge_and_rank([_g], _sel_s, limit=2)
+check("rank: ผลที่คำค้นอยู่ใน 'คำโปรย' ได้คะแนนสูงกว่าอยู่แค่ในชื่อเรื่อง",
+      _rk[0]["link"] == "https://in-snippet.com/", [(r["link"], r["relevance"]) for r in _rk])
+
+# ---------- plan: กว้างขึ้น (ชื่อ + คีย์เวิร์ด ผสมกัน) ----------
+_selp = osint.Selectors()
+_selp.names = ["สมชาย ใจดี"]
+_selp.keywords = ["hacker"]
+_pq = osint.plan_queries("", _selp, max_queries=8)
+check("plan: มี query ผสมชื่อ+คีย์เวิร์ด", any("สมชาย ใจดี" in q and "hacker" in q for q in _pq), _pq)
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
 

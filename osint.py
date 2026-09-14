@@ -592,6 +592,12 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
     for phrase in sel.phrases:
         push(phrase)
 
+    # ค้นให้ "กว้างและเจาะจงคน" ขึ้น: ผสมชื่อกับคำคีย์เวิร์ด (เช่น ชื่อ+ฉายา/องค์กร)
+    # เพื่อคัดคนที่ใช่ออกจากคนชื่อซ้ำ — จับคู่ทั้งวลีชื่อในเครื่องหมายคำพูด + คีย์เวิร์ด
+    for name in sel.names:
+        for keyword in sel.keywords[:3]:
+            push(f'"{name}" {keyword}')
+
     if len(queries) < max_queries:
         for keyword in sel.keywords:
             push(keyword)
@@ -722,12 +728,47 @@ def _dedup_key(link: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, query, "")) or link.lower()
 
 
+# หัวข้อ "หน้าหมวดหมู่/ดัชนี" ของ onion directory (เช่น Amnesia) ที่ไม่ใช่ผลค้นจริง
+# เป็นแค่เมนูของไดเรกทอรีเอง — เมื่อไม่มีสัญญาณตรงเป้า ให้กดจมล่างสุด ไม่ให้ท่วมผลลัพธ์
+_DIR_CHROME_TITLES = frozenset((
+    "marketplaces", "market", "markets", "marketplace", "hosting", "directories",
+    "directory", "hacking", "hacked", "porn", "adult", "cryptocurrency", "crypto",
+    "search engines", "search engine", "email services", "email", "forums", "forum",
+    "social media", "social", "wiki", "wikis", "news", "blog", "blogs", "chat",
+    "chats", "drugs", "carding", "fraud", "weapons", "counterfeit", "other",
+    "others", "home", "index", "categories", "category", "links", "link list",
+    "onion links", "untitled", "communication", "financial services", "libraries",
+    "whistleblowing", "hacktivism", "scams", "gambling",
+))
+
+
+def _is_directory_chrome(record: dict) -> bool:
+    """หน้าหมวดหมู่/ดัชนีของ onion directory ที่ไม่ตรงเป้า — ชื่อเป็นคำหมวดกว้างๆ
+    และลิงก์เป็นหน้าแรก/หน้าหมวด (path สั้น หรือมี ?cat=)"""
+    title = str(record.get("title") or "").strip().lower()
+    if title not in _DIR_CHROME_TITLES:
+        return False
+    link = str(record.get("link") or "").lower()
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(link)
+        short_path = len(parts.path.strip("/")) <= 1
+        cat_like = ("cat=" in parts.query or "category" in parts.query
+                    or "?a=" in link or short_path)
+    except ValueError:
+        cat_like = True
+    return cat_like
+
+
 def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
-                   limit: int = DEFAULT_MAX_SOURCES) -> List[dict]:
+                   limit: int = DEFAULT_MAX_SOURCES, per_host_cap: int = 0) -> List[dict]:
     """รวมผลจากหลาย query, dedupe, แล้วจัดอันดับตามความเกี่ยวข้อง
 
     ของเดิมตัดเอา 20 อันแรกตามลำดับที่ thread คืนมา ซึ่งเป็นลำดับแบบสุ่มล้วน
     ผลที่ตรงเป้าที่สุดจึงมีสิทธิ์ถูกตัดทิ้งก่อนจะได้ scrape ด้วยซ้ำ
+
+    per_host_cap > 0 = จำกัดจำนวนผลต่อ 1 โฮสต์ในลำดับต้นๆ เพื่อ "กระจาย" ให้เห็น
+    หลายเว็บ (กันไดเรกทอรีเดียวยึดผลทั้งหน้า) — ผลส่วนเกินไม่ถูกทิ้ง แต่ถูกดันลงท้าย
     """
     sel_values = [v.lower() for v in (selectors.all_values() if selectors else [])]
     # น้ำหนักของ selector ตามชนิด: ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง (อีเมล/เบอร์/
@@ -802,23 +843,51 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
             value_score = 3 * sum(1 for value in sel_values if value and value in haystack)
         # (2) ครอบคลุมโทเคนของคำค้นกี่คำ = จัดอันดับละเอียดขึ้นสำหรับคำค้นหลายคำ
         token_hits = sum(1 for tok in sel_tokens if tok in haystack)
-        # (3) เจอในคำโปรยของเอนจิน = สัญญาณจริงก่อน scrape
+        # (3) เจอในคำโปรย (snippet) ของเอนจิน = สัญญาณจริงก่อน scrape — เน้นหนักขึ้น
+        # เพราะคำโปรยคือเนื้อหาจริงย่อๆ ของหน้า (ตรงเป้ากว่าชื่อเรื่อง/URL) จึงถ่วง x3
+        # ทั้งการเจอ selector เต็มและการครอบคลุมโทเคนในคำโปรย
         snip_low = record.get("snippet", "").lower()
         snip_hits = sum(1 for value in sel_values if value and value in snip_low)
+        snip_token_hits = sum(1 for tok in sel_tokens if tok in snip_low)
+        snippet_signal = 3 * snip_hits + 2 * snip_token_hits
         # (4) เจอครบทั้งวลี (ชื่อ-นามสกุล) ในชื่อเรื่อง/คำโปรย = ตรงตัวที่สุด
         phrase_bonus = 4 * sum(1 for p in sel_phrases if p in title_snip)
-        real_signal = value_score + token_hits + snip_hits + phrase_bonus
+        # วลีเต็มอยู่ในคำโปรยโดยเฉพาะ = ยืนยันเนื้อหาจริง โบนัสเพิ่ม
+        phrase_bonus += 3 * sum(1 for p in sel_phrases if p in snip_low)
+        real_signal = value_score + token_hits + snippet_signal + phrase_bonus
         # โบนัส "พบซ้ำหลาย query/engine" ให้ต่อเมื่อมีสัญญาณตรงเป้าจริงก่อน
         # ไม่งั้นผลขยะที่เอนจินคืนมาซ้ำๆ (เช่น lite.ip2location.com ที่ Marginalia
         # แถมมาทุก query) จะได้คะแนนจากการนับซ้ำล้วนๆ ทั้งที่ไม่เกี่ยวกับเป้าหมายเลย
         repeat_bonus = (record["engines"] - 1) if real_signal > 0 else 0
         record["relevance"] = real_signal + repeat_bonus
+        # หน้าหมวดหมู่/ดัชนีของ onion directory ที่ไม่มีสัญญาณตรงเป้า = noise ล้วน
+        # กดให้ต่ำกว่าผล relevance 0 ทั่วไป (ที่ยังอาจตรงในเนื้อหาที่ยังไม่ scrape)
+        if real_signal == 0 and _is_directory_chrome(record):
+            record["relevance"] = -1
 
     # ไม่ตัดผล relevance 0 ที่นี่ — เก็บ recall ไว้ให้เส้นทาง scrape ของ /identity
     # (บางแหล่งคำค้นอยู่ในเนื้อหาที่ยังไม่ได้ดึง จึงยัง relevance 0 ก่อน scrape)
     # ผลขยะจะจมอยู่ล่างสุดจากคะแนน แล้ว verify_sources กรองด้วยเนื้อหาอีกชั้น
     # ส่วนการ"ซ่อนผลไม่ตรงเป้า" ทำที่ชั้นแสดงผลของ /search แทน (คนละงานกับ recall)
     ranked = sorted(merged.values(), key=lambda r: (-r["relevance"], -r["engines"], r["link"]))
+
+    cap = max(0, int(per_host_cap or 0))
+    if cap:
+        from urllib.parse import urlsplit
+        picked, overflow, host_count = [], [], {}
+        for record in ranked:
+            try:
+                host = (urlsplit(record["link"]).netloc or "").lower()
+            except ValueError:
+                host = record["link"].lower()
+            if host_count.get(host, 0) < cap:
+                host_count[host] = host_count.get(host, 0) + 1
+                picked.append(record)
+            else:
+                overflow.append(record)
+        # เติมโฮสต์หลากหลายก่อน แล้วค่อยเติมส่วนเกินถ้ายังมีที่ว่าง (ไม่ทิ้ง recall)
+        ranked = picked + overflow
+
     return ranked[: max(1, int(limit))]
 
 
@@ -1426,6 +1495,77 @@ def corroborated_identifiers(display_records: List[dict], min_sources: int = 2,
     out.sort(key=lambda d: (-d["sources"], IOC_ORDER.index(d["type"])
                             if d["type"] in IOC_ORDER else 99))
     return out[:limit]
+
+
+# ---------------- Persistent / deepening search ("ค้นจนกว่าจะมั่นใจว่าคนเดียว") ----------------
+
+def assess_identity_confidence(ranked: List[dict], min_sources: int = IDENTITY_MIN_SOURCES,
+                               min_relevant: int = 3) -> dict:
+    """ประเมินว่าข้อมูลที่ได้ "เยอะพอและมั่นใจว่าเป็นคนเดียวกัน" หรือยัง
+
+    มั่นใจ = (1) มีผลที่ตรงเป้าจริง (relevance>0) อย่างน้อย min_relevant แหล่ง และ
+             (2) มีตัวระบุ (อีเมล/บัญชี/เบอร์/โปรไฟล์) อย่างน้อย 1 ตัวที่ปรากฏข้าม
+                 แหล่งอิสระ >= min_sources โฮสต์ — นี่คือสัญญาณ "คนเดียวกันจริง"
+    ถ้าไม่มีตัวระบุยืนยันข้ามแหล่งเลย ก็ยังสรุปไม่ได้ว่าเป็นคนเดียว (ชื่อซ้ำกันได้)
+    """
+    relevant = [r for r in (ranked or []) if r.get("relevance", 0) > 0]
+    corroborated = corroborated_identifiers(ranked or [], min_sources=min_sources)
+    confident = len(relevant) >= max(1, int(min_relevant)) and len(corroborated) >= 1
+    return {
+        "confident": confident,
+        "relevant": len(relevant),
+        "total": len(ranked or []),
+        "corroborated": corroborated,
+        "min_relevant": int(min_relevant),
+        "min_sources": int(min_sources),
+    }
+
+
+def expand_queries(seen_queries, ranked: List[dict], selectors: Optional[Selectors] = None,
+                   max_new: int = 6) -> List[str]:
+    """สร้าง query ชุดใหม่จาก "สิ่งที่เพิ่งเจอ" เพื่อค้นต่อให้ลึกและยืนยันตัวตน (pivot)
+
+    ดึงตัวระบุ (อีเมล/โดเมน/บัญชี/onion/เบอร์) จากชื่อเรื่อง+คำโปรย+ลิงก์ของผลที่ได้
+    แล้วตั้งเป็นคำค้นรอบถัดไป — ตัวระบุพวกนี้ "ผูกกับคนคนเดียว" จึงช่วยยืนยันข้ามแหล่ง
+    ตัด query ที่เคยยิงไปแล้วออก (seen_queries, เทียบแบบ case-insensitive)
+    """
+    seen = {str(q).strip().lower() for q in (seen_queries or [])}
+    out: List[str] = []
+
+    def _push(value: str):
+        value = " ".join(str(value or "").split())[:MAX_QUERY_CHARS]
+        if value and value.lower() not in seen and value.lower() not in {o.lower() for o in out}:
+            out.append(value)
+
+    blob_parts = []
+    for rec in (ranked or [])[:20]:
+        blob_parts.append(str(rec.get("title") or ""))
+        blob_parts.append(str(rec.get("snippet") or ""))
+        blob_parts.append(str(rec.get("link") or ""))
+    found = extract_selectors(" ".join(blob_parts))
+
+    # ตัวระบุที่ผูกกับคนคนเดียว มาก่อน (ช่วยยืนยัน "คนเดียวกัน")
+    for email in found.emails:
+        _push(email)
+        local, _, domain = email.partition("@")
+        if domain:
+            _push(domain)
+    for value in found.onions + found.btc + found.eth + found.hashes:
+        _push(value)
+    for value in found.handles + found.phones:
+        _push(value)
+    for value in found.domains:
+        _push(value)
+
+    # ผสมชื่อเป้าหมายกับ keyword ที่ผู้ใช้ให้มา เพื่อขยายมุมค้น
+    if selectors:
+        for name in selectors.names:
+            for kw in selectors.keywords[:3]:
+                _push(f'"{name}" {kw}')
+        for kw in selectors.keywords:
+            _push(kw)
+
+    return out[: max(1, int(max_new))]
 
 
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
