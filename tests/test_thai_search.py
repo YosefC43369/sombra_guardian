@@ -44,10 +44,10 @@ check("normalize: None -> ''", osint.normalize_thai_query(None) == "")
 
 
 # ---------- thai_tokens / thai_keywords ----------
-# ตัด stopword ออก เหลือคำเนื้อหา
+# ตัด stopword ออก เหลือคำเนื้อหา (ใช้ stopword ที่คงที่ ไม่ยึดคำที่ปรับได้อย่าง "รั่วไหล")
 check("keywords: ตัด stopword เหลือคำเนื้อหา",
-      osint.thai_keywords("ช่วยหาข้อมูลบริษัท เอบีซี รั่วไหล") == ["เอบีซี"],
-      osint.thai_keywords("ช่วยหาข้อมูลบริษัท เอบีซี รั่วไหล"))
+      osint.thai_keywords("ช่วยหาข้อมูลเกี่ยวกับ เอบีซี") == ["เอบีซี"],
+      osint.thai_keywords("ช่วยหาข้อมูลเกี่ยวกับ เอบีซี"))
 # คำ generic (บริษัท/จำกัด/มหาชน) ถูกกรองออก
 check("keywords: กรองคำ generic",
       osint.thai_keywords("บริษัท จำกัด มหาชน") == [],

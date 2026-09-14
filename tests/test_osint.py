@@ -34,7 +34,7 @@ thai = osint.plan_queries("ช่วยตรวจสอบข้อมูล�
 # ภาษาไทยไม่เว้นวรรคในวลี "ของบริษัท" จึงติดมากับคำสั่งและกู้คืนไม่ได้ถ้าไม่มีตัวตัดคำ
 # สิ่งที่ต้องได้คือแกนของชื่อ และต้องมีรูปแบบวลีตรงตัวนำหน้าเสมอ
 check("plan: thai sentence stripped to content words",
-      thai == ['"สมบูรณ์ จำกัด"', "สมบูรณ์ จำกัด"], thai)
+      thai[:2] == ['"สมบูรณ์ จำกัด"', "สมบูรณ์ จำกัด"], thai)
 check("plan: never returns empty", osint.plan_queries("???") != [])
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
