@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import random
@@ -68,6 +69,60 @@ TOR_PROBE_TTL_SECONDS = nethealth.TOR_PROBE_TTL_SECONDS
 # บอกโมเดลให้ชัดว่าแหล่งนี้ดึงเนื้อหาไม่ได้ ไม่งั้น coordinator จะส่งแค่ "ชื่อเรื่อง"
 # เข้าไปใน [SCRAPED EVIDENCE] แล้วโมเดลเข้าใจผิดว่านั่นคือเนื้อหาที่ยืนยันได้
 CONTENT_UNAVAILABLE_MARKER = "[content unavailable]"
+
+# Reader proxy — ดึงเนื้อหาจากเว็บ clearnet ที่ "กันบอท" (Cloudflare/challenge/JS-only/
+# soft paywall) เมื่อดึง HTML ตรงๆ แล้วโดนบล็อกหรือได้หน้า challenge — reader จะ
+# render ฝั่งเซิร์ฟเวอร์แล้วคืนข้อความสะอาดให้ (ฟรี ไม่ต้องใช้คีย์)
+# หมายเหตุ: .onion ยังใช้ Tor/gateway เหมือนเดิม (reader เข้า .onion ไม่ได้)
+SCRAPE_READER_FALLBACK = nethealth.env_bool("SCRAPE_READER_FALLBACK", "true")
+SCRAPE_READER_PROXY = os.getenv("SCRAPE_READER_PROXY", "https://r.jina.ai/").strip()
+SCRAPE_READER_TIMEOUT = _env_float("SCRAPE_READER_TIMEOUT", 25)
+
+# หน้า "กันบอท/challenge/ต้อง JS" — ถ้าเจอในเนื้อหาที่ดึงมา ให้ถือว่ายังไม่ได้เนื้อจริง
+_ANTIBOT_RE = re.compile(
+    r"(just a moment|checking your browser|attention required|cloudflare|"
+    r"enable javascript|javascript is (?:disabled|required)|verify you are human|"
+    r"are you a human|unusual traffic|access denied|captcha|ddos-guard|"
+    r"please turn on javascript|bot detection|security check)",
+    re.I,
+)
+
+
+def _looks_blocked(text: str) -> bool:
+    """เนื้อหาที่ดึงมาเป็นหน้า anti-bot/challenge (หรือว่างเปล่า) หรือไม่
+    ไม่ตัดสินจาก "ความสั้น" อย่างเดียว — หน้าจริงบางหน้าก็สั้นได้ ให้ดูที่สัญญาณ
+    challenge จริงหรือความว่างเท่านั้น เพื่อไม่ทิ้งเนื้อหาจริง"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    return bool(_ANTIBOT_RE.search(stripped[:2000]))
+
+
+def _fetch_via_reader(url, deadline=None):
+    """ดึงเนื้อหาผ่าน reader proxy สำหรับเว็บ clearnet ที่กันบอท — คืนข้อความหรือ None"""
+    if not (SCRAPE_READER_FALLBACK and SCRAPE_READER_PROXY):
+        return None
+    remaining = _remaining(deadline)
+    if remaining is not None and remaining <= 1:
+        return None
+    timeout = SCRAPE_READER_TIMEOUT if remaining is None else min(SCRAPE_READER_TIMEOUT, max(remaining, 1.0))
+    try:
+        resp = _get_session(use_tor=False).get(
+            SCRAPE_READER_PROXY + url,
+            headers={"Accept": "text/plain", "X-Return-Format": "text",
+                     "User-Agent": random.choice(USER_AGENTS)},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        # ตัดหัว metadata ของ jina (Title:/URL Source:/Markdown Content:) ถ้ามี
+        body = re.sub(r"(?is)^.*?markdown\s+content\s*:\s*", "", resp.text or "", count=1)
+        text = " ".join(body.split())
+        if text and not _looks_blocked(text):
+            return text[:MAX_EXTRACTED_TEXT_CHARS]
+    except Exception as exc:
+        _logger.debug("SCRAPE READER FAILED | url=%s: %s", url, exc)
+    return None
 
 # get_text() ทิ้ง href ทั้งหมด ลิงก์โปรไฟล์โซเชียลจึงหายไปก่อนถึงตัวสกัด IOC
 # ทั้งที่เป็นตัวเชื่อมตัวตนข้ามเว็บที่แข็งแรงที่สุดในงาน OSINT บุคคล
@@ -310,7 +365,16 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
                 return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
 
             text = _extract_text(response)
-            return url, (f"{title} - {text}" if text else f"{title} - {CONTENT_UNAVAILABLE_MARKER}")
+            # เว็บ clearnet ที่กันบอท: 200 แต่เนื้อหาเป็นหน้า challenge/ว่าง — อย่าเพิ่ง
+            # ยอมแพ้ ออกจากลูปไปลอง reader proxy ด้านล่าง (onion ปล่อยผ่านตามเดิม)
+            if not is_onion and _looks_blocked(text):
+                _logger.debug("SCRAPE BLOCKED/THIN (clearnet) | url=%s -> reader fallback", url)
+                break
+            if text:
+                return url, f"{title} - {text}"
+            if not is_onion:
+                break  # ว่างเปล่า -> ลอง reader
+            return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
         except requests.exceptions.InvalidSchema as exc:
             # socks5h ต้องมี PySocks (มีอยู่ใน requirements.txt) — ถ้าหายให้ตกไป gateway
             _logger.warning("SCRAPE TOR UNAVAILABLE | url=%s: %s", url, exc)
@@ -325,6 +389,13 @@ def scrape_single(url_data, rotate=False, rotate_interval=5, control_port=9051,
         finally:
             if response is not None:
                 response.close()
+
+    # ทางออกสุดท้ายสำหรับ clearnet ที่กันบอท: ดึงผ่าน reader proxy (.onion เข้าไม่ได้)
+    if not is_onion:
+        reader_text = _fetch_via_reader(url, deadline=deadline)
+        if reader_text:
+            _logger.debug("SCRAPE READER OK | url=%s | chars=%d", url, len(reader_text))
+            return url, f"{title} - {reader_text}"
 
     return url, f"{title} - {CONTENT_UNAVAILABLE_MARKER}"
 

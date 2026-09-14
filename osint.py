@@ -592,6 +592,12 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
     for phrase in sel.phrases:
         push(phrase)
 
+    # ค้นให้ "กว้างและเจาะจงคน" ขึ้น: ผสมชื่อกับคำคีย์เวิร์ด (เช่น ชื่อ+ฉายา/องค์กร)
+    # เพื่อคัดคนที่ใช่ออกจากคนชื่อซ้ำ — จับคู่ทั้งวลีชื่อในเครื่องหมายคำพูด + คีย์เวิร์ด
+    for name in sel.names:
+        for keyword in sel.keywords[:3]:
+            push(f'"{name}" {keyword}')
+
     if len(queries) < max_queries:
         for keyword in sel.keywords:
             push(keyword)
@@ -837,12 +843,18 @@ def merge_and_rank(result_groups, selectors: Optional[Selectors] = None,
             value_score = 3 * sum(1 for value in sel_values if value and value in haystack)
         # (2) ครอบคลุมโทเคนของคำค้นกี่คำ = จัดอันดับละเอียดขึ้นสำหรับคำค้นหลายคำ
         token_hits = sum(1 for tok in sel_tokens if tok in haystack)
-        # (3) เจอในคำโปรยของเอนจิน = สัญญาณจริงก่อน scrape
+        # (3) เจอในคำโปรย (snippet) ของเอนจิน = สัญญาณจริงก่อน scrape — เน้นหนักขึ้น
+        # เพราะคำโปรยคือเนื้อหาจริงย่อๆ ของหน้า (ตรงเป้ากว่าชื่อเรื่อง/URL) จึงถ่วง x3
+        # ทั้งการเจอ selector เต็มและการครอบคลุมโทเคนในคำโปรย
         snip_low = record.get("snippet", "").lower()
         snip_hits = sum(1 for value in sel_values if value and value in snip_low)
+        snip_token_hits = sum(1 for tok in sel_tokens if tok in snip_low)
+        snippet_signal = 3 * snip_hits + 2 * snip_token_hits
         # (4) เจอครบทั้งวลี (ชื่อ-นามสกุล) ในชื่อเรื่อง/คำโปรย = ตรงตัวที่สุด
         phrase_bonus = 4 * sum(1 for p in sel_phrases if p in title_snip)
-        real_signal = value_score + token_hits + snip_hits + phrase_bonus
+        # วลีเต็มอยู่ในคำโปรยโดยเฉพาะ = ยืนยันเนื้อหาจริง โบนัสเพิ่ม
+        phrase_bonus += 3 * sum(1 for p in sel_phrases if p in snip_low)
+        real_signal = value_score + token_hits + snippet_signal + phrase_bonus
         # โบนัส "พบซ้ำหลาย query/engine" ให้ต่อเมื่อมีสัญญาณตรงเป้าจริงก่อน
         # ไม่งั้นผลขยะที่เอนจินคืนมาซ้ำๆ (เช่น lite.ip2location.com ที่ Marginalia
         # แถมมาทุก query) จะได้คะแนนจากการนับซ้ำล้วนๆ ทั้งที่ไม่เกี่ยวกับเป้าหมายเลย

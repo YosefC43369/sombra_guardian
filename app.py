@@ -26,6 +26,7 @@ from telegram.error import TelegramError
 
 import detection
 import search
+import scrape
 import osint
 import nethealth
 import tor_launcher
@@ -119,6 +120,11 @@ SEARCH_DEEP_MAX_ROUNDS = envutil.env_int("SEARCH_DEEP_MAX_ROUNDS", 0)
 SEARCH_DEEP_MAX_SECONDS = envutil.env_float("SEARCH_DEEP_MAX_SECONDS", 0)
 SEARCH_DEEP_STALL_ROUNDS = envutil.env_int("SEARCH_DEEP_STALL_ROUNDS", 3)
 SEARCH_DEEP_ROUND_QUERIES = envutil.env_int("SEARCH_DEEP_ROUND_QUERIES", 6)
+# จำนวน query ที่ /search และ /deepsearch วางแผนต่อรอบ (กว้างกว่าค่าของ /identity)
+SEARCH_PLAN_MAX_QUERIES = envutil.env_int("SEARCH_PLAN_MAX_QUERIES", 6)
+# /deepsearch: ดึงเนื้อหาจริงจากผลอันดับต้นๆ กี่หน้า เพื่อเก็บ "คำโปรย/เนื้อหา" มายืนยัน
+# ตัว (0 = ไม่ดึง) — ใช้ scrape.py (Tor สำหรับ .onion, reader proxy สำหรับ clearnet กันบอท)
+SEARCH_DEEP_SCRAPE_TOP = envutil.env_int("SEARCH_DEEP_SCRAPE_TOP", 8)
 SEARCH_COMMAND_BUDGET_SECONDS = envutil.env_float("SEARCH_COMMAND_BUDGET_SECONDS", 40)
 
 logging.basicConfig(
@@ -973,7 +979,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     selectors = osint.extract_selectors(query)
     queries = osint.plan_queries(
-        query, selectors, max_queries=coordinator.OSINT_MAX_QUERIES
+        query, selectors, max_queries=SEARCH_PLAN_MAX_QUERIES
     )
     logger.info(
         f"OSINT SEARCH | Chat ID: {chat_id} | User ID: {user_id} | "
@@ -1096,7 +1102,7 @@ async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         or search.get_search_results_async
 
     seen_queries: set = set()
-    pending = osint.plan_queries(query, selectors, max_queries=coordinator.OSINT_MAX_QUERIES)
+    pending = osint.plan_queries(query, selectors, max_queries=SEARCH_PLAN_MAX_QUERIES)
     all_groups: list = []
 
     # ตัวระบุที่ผูกกับคนเดียว: profile จาก data.json + ตรวจบัญชีจริง (รอบแรกครั้งเดียว)
@@ -1190,11 +1196,35 @@ async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if status_msg is not None:
             await safe_delete(status_msg, chat_id, context)
 
-    if not ranked:
-        ranked = osint.merge_and_rank(all_groups, selectors,
-                                      limit=SEARCH_RESULTS_DISPLAY_CAP,
+    # ดึงเนื้อหาจริงจากผลอันดับต้นๆ (ต่อยอดจากการค้น) เพื่อเก็บ "คำโปรย/เนื้อหา" มายืนยัน
+    # ตัวตน — clearnet ที่กันบอทใช้ reader proxy, .onion ใช้ Tor (จัดการใน scrape.py)
+    scraped_ok = 0
+    if SEARCH_DEEP_SCRAPE_TOP > 0 and all_groups:
+        prelim = osint.merge_and_rank(all_groups, selectors,
+                                      limit=SEARCH_DEEP_SCRAPE_TOP,
                                       per_host_cap=SEARCH_PER_HOST_CAP)
-        conf = osint.assess_identity_confidence(ranked)
+        urls = [(r["link"], r.get("title", "")) for r in prelim if r.get("link")]
+        try:
+            scraped = await scrape.scrape_multiple_async(
+                urls, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS)
+            content_by_url = {u: txt for u, txt in (scraped or [])}
+            enriched = []
+            for rec in prelim:
+                raw = content_by_url.get(rec["link"], "")
+                body = raw.split(" - ", 1)[1] if " - " in raw else raw
+                if body and "[content unavailable]" not in body:
+                    enriched.append({**rec, "snippet": body[:1500]})
+            if enriched:
+                all_groups.append(enriched)
+                scraped_ok = len(enriched)
+        except Exception:
+            logger.exception("DEEPSEARCH SCRAPE ERROR")
+
+    # จัดอันดับ + ประเมินความมั่นใจใหม่หลังได้เนื้อหาจริง (snippet มีน้ำหนักสูงในการจัดอันดับ)
+    ranked = osint.merge_and_rank(all_groups, selectors,
+                                  limit=SEARCH_RESULTS_DISPLAY_CAP,
+                                  per_host_cap=SEARCH_PER_HOST_CAP)
+    conf = osint.assess_identity_confidence(ranked)
 
     elapsed = int(time.monotonic() - started)
     if conf["confident"]:
@@ -1208,7 +1238,8 @@ async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         corr_line = "\nตัวระบุที่ยืนยันข้ามแหล่ง: " + " | ".join(
             f"{c['type']}={osint.mask_pii(str(c['value']))} (×{c['sources']})"
             for c in conf["corroborated"][:6])
-    health_note = (f"ค้นเชิงลึก {round_no} รอบ ใช้เวลา ~{elapsed}s | {verdict}{corr_line}")
+    health_note = (f"ค้นเชิงลึก {round_no} รอบ | ดึงเนื้อหาจริง {scraped_ok} หน้า | "
+                   f"ใช้เวลา ~{elapsed}s | {verdict}{corr_line}")
 
     await _reply_chunked(
         update,
@@ -5040,7 +5071,8 @@ _REQUIRED_MODULE_API = {
     "search": ("get_search_results", "get_search_results_async",
                "get_combined_results", "get_combined_results_async",
                "get_clearnet_results"),
-    "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
+    "scrape": ("scrape_multiple", "scrape_single", "scrape_multiple_async",
+               "CONTENT_UNAVAILABLE_MARKER"),
     "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
               "pivot_queries", "build_dossier", "format_search_report",

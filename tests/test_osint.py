@@ -86,6 +86,23 @@ check("deep: ไม่มีตัวระบุยืนยัน = ยัง�
 _ex = osint.expand_queries(["ธนาธรณ์ ปัญญาสาร"], _dr, osint.extract_selectors("ธนาธรณ์ ปัญญาสาร"), max_new=6)
 check("deep: expand pivot อีเมลที่เจอ", "thana@ex.com" in _ex, _ex)
 check("deep: expand ไม่ยิงซ้ำ query เดิม", "ธนาธรณ์ ปัญญาสาร" not in [q.lower() for q in _ex], _ex)
+
+# ---------- ranking: เน้นคำโปรย (snippet) มากกว่าเจอแค่ในชื่อเรื่อง ----------
+_sel_s = osint.extract_selectors("acme leak")
+_g = [
+    {"title": "acme", "snippet": "", "link": "https://only-title.com/"},          # เจอแค่ชื่อเรื่อง
+    {"title": "result", "snippet": "acme leak database", "link": "https://in-snippet.com/"},  # เจอในคำโปรย
+]
+_rk = osint.merge_and_rank([_g], _sel_s, limit=2)
+check("rank: ผลที่คำค้นอยู่ใน 'คำโปรย' ได้คะแนนสูงกว่าอยู่แค่ในชื่อเรื่อง",
+      _rk[0]["link"] == "https://in-snippet.com/", [(r["link"], r["relevance"]) for r in _rk])
+
+# ---------- plan: กว้างขึ้น (ชื่อ + คีย์เวิร์ด ผสมกัน) ----------
+_selp = osint.Selectors()
+_selp.names = ["สมชาย ใจดี"]
+_selp.keywords = ["hacker"]
+_pq = osint.plan_queries("", _selp, max_queries=8)
+check("plan: มี query ผสมชื่อ+คีย์เวิร์ด", any("สมชาย ใจดี" in q and "hacker" in q for q in _pq), _pq)
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
 
