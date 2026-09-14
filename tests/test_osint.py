@@ -69,6 +69,23 @@ _flood += [{"title": "A", "link": "http://a.onion/", "engine": "Y"},
 _capped = osint.merge_and_rank([_flood], None, limit=5, per_host_cap=2)
 _big = sum(1 for r in _capped[:3] if "big.onion" in r["link"])
 check("rank: per_host_cap กระจายโฮสต์ (big.onion <=2 ใน 3 อันแรก)", _big <= 2, _big)
+
+# ---------- persistent deep search: confidence + query expansion ----------
+_dr = [
+    {"title": "ธนาธรณ์ ปัญญาสาร", "snippet": "ติดต่อ thana@ex.com", "link": "https://a.com/1", "relevance": 5},
+    {"title": "profile", "snippet": "thana@ex.com @thana_p", "link": "https://b.net/2", "relevance": 3},
+]
+_c = osint.assess_identity_confidence(_dr, min_relevant=2)
+check("deep: มั่นใจเมื่อตัวระบุยืนยันข้าม >=2 โฮสต์", _c["confident"] is True, _c)
+check("deep: ระบุตัวยืนยันข้ามแหล่งได้", any(x["value"] == "thana@ex.com" for x in _c["corroborated"]), _c["corroborated"])
+# แหล่งเดียว/ไม่มีตัวระบุซ้ำข้ามโฮสต์ = ยังไม่มั่นใจ
+_c2 = osint.assess_identity_confidence(
+    [{"title": "x", "snippet": "no ids here", "link": "https://a.com/1", "relevance": 5}], min_relevant=1)
+check("deep: ไม่มีตัวระบุยืนยัน = ยังไม่มั่นใจ", _c2["confident"] is False, _c2)
+# expand: pivot จากอีเมล/บัญชี/โดเมนที่เจอ และไม่ซ้ำ query เดิม
+_ex = osint.expand_queries(["ธนาธรณ์ ปัญญาสาร"], _dr, osint.extract_selectors("ธนาธรณ์ ปัญญาสาร"), max_new=6)
+check("deep: expand pivot อีเมลที่เจอ", "thana@ex.com" in _ex, _ex)
+check("deep: expand ไม่ยิงซ้ำ query เดิม", "ธนาธรณ์ ปัญญาสาร" not in [q.lower() for q in _ex], _ex)
 check("plan: quoted phrase kept whole",
       'acme holdings' in [x.lower() for x in osint.plan_queries('leak at "acme holdings"')], osint.plan_queries('leak at "acme holdings"'))
 

@@ -1485,6 +1485,77 @@ def corroborated_identifiers(display_records: List[dict], min_sources: int = 2,
     return out[:limit]
 
 
+# ---------------- Persistent / deepening search ("ค้นจนกว่าจะมั่นใจว่าคนเดียว") ----------------
+
+def assess_identity_confidence(ranked: List[dict], min_sources: int = IDENTITY_MIN_SOURCES,
+                               min_relevant: int = 3) -> dict:
+    """ประเมินว่าข้อมูลที่ได้ "เยอะพอและมั่นใจว่าเป็นคนเดียวกัน" หรือยัง
+
+    มั่นใจ = (1) มีผลที่ตรงเป้าจริง (relevance>0) อย่างน้อย min_relevant แหล่ง และ
+             (2) มีตัวระบุ (อีเมล/บัญชี/เบอร์/โปรไฟล์) อย่างน้อย 1 ตัวที่ปรากฏข้าม
+                 แหล่งอิสระ >= min_sources โฮสต์ — นี่คือสัญญาณ "คนเดียวกันจริง"
+    ถ้าไม่มีตัวระบุยืนยันข้ามแหล่งเลย ก็ยังสรุปไม่ได้ว่าเป็นคนเดียว (ชื่อซ้ำกันได้)
+    """
+    relevant = [r for r in (ranked or []) if r.get("relevance", 0) > 0]
+    corroborated = corroborated_identifiers(ranked or [], min_sources=min_sources)
+    confident = len(relevant) >= max(1, int(min_relevant)) and len(corroborated) >= 1
+    return {
+        "confident": confident,
+        "relevant": len(relevant),
+        "total": len(ranked or []),
+        "corroborated": corroborated,
+        "min_relevant": int(min_relevant),
+        "min_sources": int(min_sources),
+    }
+
+
+def expand_queries(seen_queries, ranked: List[dict], selectors: Optional[Selectors] = None,
+                   max_new: int = 6) -> List[str]:
+    """สร้าง query ชุดใหม่จาก "สิ่งที่เพิ่งเจอ" เพื่อค้นต่อให้ลึกและยืนยันตัวตน (pivot)
+
+    ดึงตัวระบุ (อีเมล/โดเมน/บัญชี/onion/เบอร์) จากชื่อเรื่อง+คำโปรย+ลิงก์ของผลที่ได้
+    แล้วตั้งเป็นคำค้นรอบถัดไป — ตัวระบุพวกนี้ "ผูกกับคนคนเดียว" จึงช่วยยืนยันข้ามแหล่ง
+    ตัด query ที่เคยยิงไปแล้วออก (seen_queries, เทียบแบบ case-insensitive)
+    """
+    seen = {str(q).strip().lower() for q in (seen_queries or [])}
+    out: List[str] = []
+
+    def _push(value: str):
+        value = " ".join(str(value or "").split())[:MAX_QUERY_CHARS]
+        if value and value.lower() not in seen and value.lower() not in {o.lower() for o in out}:
+            out.append(value)
+
+    blob_parts = []
+    for rec in (ranked or [])[:20]:
+        blob_parts.append(str(rec.get("title") or ""))
+        blob_parts.append(str(rec.get("snippet") or ""))
+        blob_parts.append(str(rec.get("link") or ""))
+    found = extract_selectors(" ".join(blob_parts))
+
+    # ตัวระบุที่ผูกกับคนคนเดียว มาก่อน (ช่วยยืนยัน "คนเดียวกัน")
+    for email in found.emails:
+        _push(email)
+        local, _, domain = email.partition("@")
+        if domain:
+            _push(domain)
+    for value in found.onions + found.btc + found.eth + found.hashes:
+        _push(value)
+    for value in found.handles + found.phones:
+        _push(value)
+    for value in found.domains:
+        _push(value)
+
+    # ผสมชื่อเป้าหมายกับ keyword ที่ผู้ใช้ให้มา เพื่อขยายมุมค้น
+    if selectors:
+        for name in selectors.names:
+            for kw in selectors.keywords[:3]:
+                _push(f'"{name}" {kw}')
+        for kw in selectors.keywords:
+            _push(kw)
+
+    return out[: max(1, int(max_new))]
+
+
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
                          ranked: List[dict], limit: int = 20,
                          health_note: str = "") -> str:
