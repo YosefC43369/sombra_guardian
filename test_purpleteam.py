@@ -250,14 +250,16 @@ class DetectionTests(PurpleTeamTestCase):
         pt.record_detection(xid, emu, "DETECTED", recorded_by=OP)
         self.assertEqual(pt.get_emulation(emu)["status"], "EXECUTED")
 
-    def test_pii_scrubbed_from_telemetry(self):
+    def test_telemetry_stored_verbatim(self):
+        # PII masking is disabled system-wide (operator config): free text is
+        # stored as-is, not redacted. This documents that deliberate behavior.
         eid, xid = self._running_exercise()
         emu = self._emu(xid)
         pt.record_detection(xid, emu, "DETECTED", recorded_by=OP,
                             telemetry="user victim@example.com triggered rule")
         det = pt.list_detections(xid, emulation_id=emu)[0]
-        self.assertNotIn("victim@example.com", det["telemetry"])
-        self.assertIn("[REDACTED_EMAIL]", det["telemetry"])
+        self.assertIn("victim@example.com", det["telemetry"])
+        self.assertNotIn("[REDACTED_EMAIL]", det["telemetry"])
 
 
 # ---------------- Tune step (gap -> ticket) ----------------

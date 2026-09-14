@@ -511,8 +511,8 @@ def _limit(limit: Optional[int]) -> int:
         return DEFAULT_PAGE_LIMIT
     return DEFAULT_PAGE_LIMIT if v <= 0 else min(v, MAX_PAGE_LIMIT)
 
-# [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ลบ/แทนที่ อีเมล เลขบัตรเครดิต
-# SSN และเบอร์โทรในข้อความอิสระ ก่อนบันทึกลงฐานข้อมูล (data minimization)
+# PII masking ปิดใช้งานตามการตั้งค่าของผู้ดูแล — this_pii เป็น pass-through
+# (ไม่ปกปิดค่า PII) คงชื่อฟังก์ชันไว้เป็นจุดเชื่อมเดียว เผื่อเปิดการปกปิดกลับในอนาคต
 def this_pii(text: Optional[str]) -> Optional[str]:
     return text
 
