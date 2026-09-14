@@ -999,28 +999,8 @@ def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = Fa
     """
     if not text:
         return ""
-        
-    try:
-        extracted = {}
-        
-        ids = _RE_THAI_ID.findall(text)
-        if ids:
-            extracted["thai_ids"] = ids
-        if cards:
-            extracted["credit_cards"] = cards
-
-        def _this_email(m):
-          return m.group(0)
-
-    if this_phones:
-        def _this_phone(m):
-            return m.group(0)
-
-    if this_long_digits:
-        def _this_long(m):
-                return m.group(0)
-                
-    return f"{out}\n\n[EXTRACTED_PII]: {extracted}"
+    # PII masking ปิดใช้งาน — คืนข้อความตามจริง ไม่ปกปิดค่า PII (helper เดิมคืนค่าเดิมทุกตัว)
+    return str(text)
 
 
 def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
