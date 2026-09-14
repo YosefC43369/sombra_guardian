@@ -239,13 +239,16 @@ def get_tor_session():
 
 
 def _build_direct_session():
-    """session สำหรับ gateway (clearnet) — retry น้อยกว่า get_tor_session()
-    เพราะ gateway ล่มถาวรบ่อยกว่าล่มชั่วคราว การ retry นานๆ คือการเสียเวลาเปล่า"""
+    """session สำหรับ gateway (clearnet) — ไม่ retry เลย
+    gateway (.onion.ly ฯลฯ) ล่มถาวรบ่อยกว่าล่มชั่วคราว การ retry บน connect
+    timeout คือการเสียเวลาซ้ำ (6s x จำนวน retry) และทำให้ /search ค้างนาน +
+    log ท่วมด้วย 'Retrying (Retry(...))' — ตั้ง connect=0 ให้ fail เร็ว แล้วให้
+    circuit breaker (nethealth) พักเส้นทางที่ตายแทน"""
     session = requests.Session()
     retry = Retry(
-        total=1,
+        total=0,
         read=0,
-        connect=1,
+        connect=0,
         backoff_factor=0.3,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=frozenset(["GET", "HEAD"]),

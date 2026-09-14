@@ -1016,6 +1016,12 @@ def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = Fa
     return str(text)
 
 
+# ผู้เรียกเดิม (format_search_report / corroborated_identifiers) ยังใช้ชื่อ mask_pii
+# หลังเปลี่ยนชื่อฟังก์ชันเป็น unmask_pii — คงชื่อ mask_pii ไว้เป็น alias เพื่อไม่ให้
+# /search พังด้วย NameError ตอนจัดรูปผลลัพธ์ (พฤติกรรมเดียวกัน: pass-through)
+mask_pii = unmask_pii
+
+
 def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
     """เนื้อหาจาก dark web คือข้อมูลที่ผู้ไม่หวังดีควบคุมได้ 100%
     ถ้ายัดเข้า prompt ดิบๆ หน้าเว็บนั้นสั่งโมเดลได้เลย (prompt injection)

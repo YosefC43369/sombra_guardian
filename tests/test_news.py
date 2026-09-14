@@ -24,9 +24,11 @@ _gem = types.ModuleType("gemini")
 def _split(text, limit=4096):
     return [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
 _gem.split_telegram_message = _split
+_gem.RESEARCH_MAX_INPUT_CHARS = 24000
 _ASK = {"ok": True, "text": ""}          # ปรับผลลัพธ์ต่อเทสได้
-async def _ask_gemini(prompt, system_instruction=None):
+async def _ask_gemini(prompt, system_instruction=None, max_input_chars=None):
     _ASK["last_prompt"] = prompt
+    _ASK["last_cap"] = max_input_chars
     return _ASK["ok"], _ASK["text"]
 _gem.ask_gemini = _ask_gemini
 sys.modules["gemini"] = _gem
@@ -128,6 +130,21 @@ ok_real, _ = news._classify_article_quality("นี่คือเนื้อ�
 bad_bot, reason = news._classify_article_quality("Just a moment... Checking your browser before accessing. Please enable JavaScript.")
 check("quality: บทความจริงผ่าน", ok_real is True)
 check("quality: หน้า anti-bot ไม่ผ่าน", bad_bot is False, reason)
+
+
+# ---------- 7. บั๊กฟิกซ์: บทความยาวไม่ถูกปฏิเสธ + ส่งไม่ถี่ + ข้อความสั้นลง ----------
+# ส่ง max_input_chars = RESEARCH cap เข้า ask_gemini (ไม่งั้นบทความ >4000 จะถูกปฏิเสธ)
+check("fix: _summarize ใช้เพดาน input แบบ research",
+      _ASK.get("last_cap") == _gem.RESEARCH_MAX_INPUT_CHARS, _ASK.get("last_cap"))
+# ส่งข่าวไม่ถี่เกินไป
+check("fix: รอบเช็คห่างขึ้น (>=900s)", news.CHECK_INTERVAL_DEFAULT >= 900, news.CHECK_INTERVAL_DEFAULT)
+check("fix: ข่าวต่อรอบน้อยลง (<=3)", news.MAX_ITEMS_PER_CYCLE_DEFAULT <= 3, news.MAX_ITEMS_PER_CYCLE_DEFAULT)
+check("fix: มีดีเลย์ระหว่างส่ง", news.SEND_DELAY_SECONDS > 0, news.SEND_DELAY_SECONDS)
+check("fix: แหล่งข่าวใช้ max_items ที่ลดลง", news._source("z", feed_default="http://z/f")["max_items_per_cycle"] <= 3)
+# ข้อความข่าวสั้นลง แต่ยังเน้นเนื้อหา
+check("fix: ความยาวสรุปสั้นลง (<=1000)", news.AI_SUMMARY_MAX_CHARS <= 1000, news.AI_SUMMARY_MAX_CHARS)
+check("fix: prompt ยังสั่งให้กระชับแต่เน้นเนื้อหา",
+      "กระชับ" in news._NEWS_SUMMARY_INSTRUCTION and "เน้นเนื้อหา" in news._NEWS_SUMMARY_INSTRUCTION)
 
 
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
