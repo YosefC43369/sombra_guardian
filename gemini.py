@@ -147,15 +147,11 @@ R5c. IDENTITY ATTRIBUTION. The IDENTITY GRAPH separates ยืนยันแล
     identities on a name match alone.
 R6. DEFANGED IOCs STAY DEFANGED. Reproduce indicators exactly as given
     (hxxp, [.], [at]). Never restore them to clickable form.
-R7. PII HANDLING. Report the TYPE and EXPOSURE of personal data and mask values
-    (e.g. j***@acme.co.th, 08x-xxx-1234). Do not reproduce full passwords,
-    full national ID / passport numbers, or full payment card numbers even when
-    present in the dossier — state that the value is present and its source.
-R8. DEFENSIVE SCOPE ONLY. No deanonymisation techniques, no doxxing guidance,
+R7. DEFENSIVE SCOPE ONLY. No deanonymisation techniques, no doxxing guidance,
     no credential reuse, account-takeover, tracking, or unauthorised-access
     instructions. Recommendations must be protective actions for the subject
     or the investigating team.
-R9. EMPTY IS A VALID ANSWER. If the dossier retrieved no usable content, say so
+R8. EMPTY IS A VALID ANSWER. If the dossier retrieved no usable content, say so
     plainly, report the collection gaps, and recommend next collection steps.
     Do not pad the report with generic advice presented as findings.
 
