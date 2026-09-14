@@ -91,7 +91,7 @@ EXECUTE → VERIFY → REPORT
 | 🟣 **Purple Team** | แบบฝึก detect–tune–validate ผูกกับ Engagement ที่ AUTHORIZED, วางแผนจำลองตาม MITRE ATT&CK, บันทึกผลการตรวจจับ + MTTD, คำนวณความครอบคลุมการตรวจจับ (DeTT&CT-style), ช่องโหว่เปิด tuning ticket อัตโนมัติ, ยืนยันผลด้วยมนุษย์ (ไม่มี auto-validate), ส่งออก ATT&CK Navigator layer |
 | 📊 **Reporting** | Dashboard สรุปกลุ่ม, รายงานแยก 4 ส่วน (ข้อเท็จจริง / การวิเคราะห์ / การดำเนินการ / ข้อจำกัด), ส่งออก JSON/CSV |
 | 💰 **Group Finance** | บันทึกหนี้ (`/sign`), กระเป๋าเงิน, ฝาก/ถอน/โอน, บิล, ประวัติธุรกรรม |
-| 📰 **News** | ดึงข่าวความปลอดภัยจาก RSS แล้วสรุปด้วย AI ส่งเข้ากลุ่มอัตโนมัติ |
+| 📰 **News** | ดึงข่าวความปลอดภัย/เทคโนโลยีจาก **RSS หลายเว็บ** (THN, BleepingComputer, Dark Reading, The Register, Krebs, Schneier, The Record, CISA, Ars Technica, Blognone ฯลฯ) สรุปด้วย AI แบบ **เน้นเนื้อหา** (ย่อหน้า + ประเด็นสำคัญ) ส่งเข้ากลุ่มอัตโนมัติ — เว็บที่กันบอทดึงผ่าน **reader proxy** ได้ |
 | 🗂️ **GitHub Sandbox** | โคลน repo (เฉพาะ `github.com/<owner>/<repo>`) เข้า workspace แยกส่วนเพื่อรีวิว |
 
 ---

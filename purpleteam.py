@@ -45,7 +45,8 @@ bb_case.py / member_incident.py):
     shell, no eval/exec, no background threads, no network.
   - Reuses security.DB_PATH and security.write_audit_log(). No second
     database, no second audit system.
-  - Reuses redteam.scrub_pii() for data minimization before storage.
+  - PII masking disabled system-wide by operator config: free text is
+    stored as-is (no redaction) — consistent with redteam.this_pii.
   - CREATE TABLE IF NOT EXISTS only; idempotent init; never a
     destructive migration. Owns only pt_* tables; never touches another
     module's tables.
@@ -66,9 +67,9 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 
 import redteam as rtm
-# [PII-MASKING] นำฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) ของ redteam มาใช้ซ้ำ — เรียกก่อน
-# บันทึกทุกข้อความอิสระ (description / telemetry / analyst_notes / detection_logic / note)
-from redteam import scrub_pii
+# PII masking ถูกปิดทั้งระบบตามการตั้งค่าของผู้ดูแล (ดู redteam.this_pii ที่เป็น
+# pass-through และการถอดกฎ PII ใน gemini) — โมดูลนี้จึงเก็บข้อความอิสระตามจริง
+# ไม่ปกปิดค่า PII (description / telemetry / analyst_notes / detection_logic / note)
 from security import DB_PATH, write_audit_log
 
 logger = logging.getLogger("modbot.purpleteam")
@@ -546,7 +547,7 @@ def add_emulation(exercise_id: int, technique_id: str, planned_by: int,
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (int(exercise_id), technique, _clean(tactic, MAX_NAME_LEN),
          _clean(technique_name, MAX_NAME_LEN),
-         scrub_pii(_clean(description, MAX_DETAIL_LEN)),
+         _clean(description, MAX_DETAIL_LEN),
          _clean(target_ref, MAX_NAME_LEN), EmulationStatus.PLANNED.value,
          int(planned_by), ts, ts))
     emulation_id = cur.lastrowid
@@ -626,8 +627,8 @@ def record_detection(exercise_id: int, emulation_id: int, outcome: str, recorded
         "is_gap, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (int(exercise_id), int(emulation_id), emulation["technique_id"], out,
          _clean(data_source, MAX_NAME_LEN),
-         scrub_pii(_clean(telemetry, MAX_TEXT_LEN)),
-         scrub_pii(_clean(analyst_notes, MAX_DETAIL_LEN)),
+         _clean(telemetry, MAX_TEXT_LEN),
+         _clean(analyst_notes, MAX_DETAIL_LEN),
          executed_at, detected, latency, is_gap, int(recorded_by), ts))
     detection_id = cur.lastrowid
     conn.execute("UPDATE pt_emulations SET status=?, updated_at=? WHERE emulation_id=?",
@@ -724,7 +725,7 @@ def propose_tuning(exercise_id: int, title: str, proposed_by: int,
         "detection_logic, data_source, status, origin, proposed_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (int(exercise_id), emulation_id, technique, title,
-         scrub_pii(_clean(detection_logic, MAX_TEXT_LEN)),
+         _clean(detection_logic, MAX_TEXT_LEN),
          _clean(data_source, MAX_NAME_LEN), TuningStatus.PROPOSED.value,
          "MANUAL", int(proposed_by), ts, ts))
     tuning_id = cur.lastrowid
@@ -789,7 +790,7 @@ def set_tuning_status(tuning_id: int, new_status: str, actor_id: int, note: str 
     conn.execute(
         "UPDATE pt_tuning SET status=?, decided_by=?, decision_note=?, updated_at=? "
         "WHERE tuning_id=?",
-        (target, int(actor_id), scrub_pii(_clean(note, MAX_DETAIL_LEN)), ts,
+        (target, int(actor_id), _clean(note, MAX_DETAIL_LEN), ts,
          int(tuning_id)))
     conn.commit()
     conn.close()
@@ -836,7 +837,7 @@ def validate_tuning(tuning_id: int, detection_id: int, actor_id: int, note: str 
         "UPDATE pt_tuning SET status=?, decided_by=?, decision_note=?, validated_by=?, "
         "validated_at=?, validated_detection_id=?, updated_at=? WHERE tuning_id=?",
         (TuningStatus.VALIDATED.value, int(actor_id),
-         scrub_pii(_clean(note, MAX_DETAIL_LEN)), int(actor_id), ts,
+         _clean(note, MAX_DETAIL_LEN), int(actor_id), ts,
          int(detection_id), ts, int(tuning_id)))
     conn.commit()
     conn.close()

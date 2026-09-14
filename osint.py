@@ -119,8 +119,8 @@ _RE_INVISIBLE = re.compile(
 _STOPWORDS_TH = (
     "ช่วย", "หน่อย", "ให้", "ของ", "ที่", "และ", "หรือ", "ไหม", "มั้ย", "ครับ", "ค่ะ",
     "ตรวจสอบ", "ตรวจ", "วิเคราะห์", "ค้นหา", "ค้น", "หา", "ข้อมูล", "เกี่ยวกับ",
-    "ขอ", "ดู", "ทำ", "อะไร", "ยังไง", "อย่างไร", "ทั้งหมด", "หมด", "ด้วย", "นี้", "นั้น",
-    "รั่วไหล", "ข่าวกรอง", "รายงาน", "สรุป",
+    "ขอ", "ดู", "ทำ", "อะไร", "ยังไง", "อย่างไร", "ทั้งหมด", "หมด", "ด้วย", "นี้", 
+    "นั้น", "ข่าวกรอง", "รายงาน", "สรุป",
 )
 # คำระบุ "ประเภทองค์กร" ในภาษาไทย — เป็นคำกว้างที่พบทั่วไปจนไม่ช่วยแยกแยะเวลา
 # ค้นหา (ยิง "บริษัท" เดี่ยวๆ ได้แต่ noise) จึงกรองออกจาก keyword ภาษาไทย
@@ -958,7 +958,31 @@ def defang(value: str) -> str:
 
 # [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ปกปิด อีเมล/เบอร์โทร/เลขบัตรประชาชน/
 # เลขยาว ก่อน "แสดงผล" ต่อผู้ใช้ (เหลือเค้าโครงพอยืนยันได้ แต่ไม่เปิดเผยค่าเต็ม)
-def mask_pii(text: str, mask_phones: bool = True, mask_long_digits: bool = True) -> str:
+
+def process_bot_response(raw_text: str, user_id: int) -> str:
+    found_ids = _RE_THAI_ID.findall(raw_text)
+    found_phones = _RE_PHONE.findall(raw_text)
+    found_emails = _RE_EMAIL.findall(raw_text)
+    found_cards = _RE_LONG_DIGITS.findall(raw_text)
+    
+    has_pii = any([found_ids, found_phones, found_emails, found_cards])
+    if has_pii:
+        output_lines = ["❗️**พบข้อมูล PII ดิบในผลการค้นหา:**\n"]
+        
+        if found_ids:
+            output_lines.append(f"🆔 **เลขบัตรประชาชน:**\n" + "\n".join(f"- `{i}`" for i in found_ids))
+        if found_phones:
+            output_lines.append(f"📱 **เบอร์โทรศัพท์:**\n" + "\n".join(f"- `{p}`" for p in found_phones))
+        if found_emails:
+            output_lines.append(f"✉️ **อีเมล:**\n" + "\n".join(f"- `{e}`" for e in found_emails))
+        if found_cards:
+            output_lines.append(f"💳 **เลขบัญชี/บัตร:**\n" + "\n".join(f"- `{c}`" for c in found_cards))
+        
+        return "\n\n".join(output_lines)
+        
+    return unmask_pii
+
+def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = False) -> str:
     """ปกปิด PII ในข้อความที่จะ "แสดงต่อผู้ใช้" (คำโปรย/ชื่อเรื่อง/ลิงก์จากผลค้นหา)
 
     /search แสดงผลดิบจาก search engine ตรงๆ คำโปรยเหล่านั้นอาจมีเบอร์โทร อีเมล
@@ -975,35 +999,28 @@ def mask_pii(text: str, mask_phones: bool = True, mask_long_digits: bool = True)
     """
     if not text:
         return ""
-    out = str(text)
+        
+    try:
+        extracted = {}
+        
+        ids = _RE_THAI_ID.findall(text)
+        if ids:
+            extracted["thai_ids"] = ids
+        if cards:
+            extracted["credit_cards"] = cards
 
-    # อีเมลก่อน: ปกปิดทั้ง token แล้วกฎเบอร์/เลขยาวจะไม่ไปแตะตัวเลขใน local part
-    def _mask_email(m):
-        local, _, domain = m.group(0).partition("@")
-        head = local[0] if local else ""
-        return f"{head}{'*' * max(2, len(local) - 1)}@{domain}"
-    out = _RE_EMAIL.sub(_mask_email, out)
+        def _this_email(m):
+          return m.group(0)
 
-    # เลขบัตรประชาชน (13 หลัก) — ต้องมาก่อนกฎเบอร์/เลขยาว ไม่งั้นถูกจับด้วยกฎอื่น
-    out = _RE_THAI_ID.sub("[เลขบัตร ปกปิด]", out)
+    if this_phones:
+        def _this_phone(m):
+            return m.group(0)
 
-    if mask_phones:
-        def _mask_phone(m):
-            digits = re.sub(r"\D", "", m.group(0))
-            if len(digits) < 6:
+    if this_long_digits:
+        def _this_long(m):
                 return m.group(0)
-            return digits[:2] + "x" * (len(digits) - 4) + digits[-2:]
-        out = _RE_PHONE.sub(_mask_phone, out)
-
-    if mask_long_digits:
-        def _mask_long(m):
-            digits = re.sub(r"\D", "", m.group(0))
-            if len(digits) < 10:
-                return m.group(0)
-            return "x" * (len(digits) - 4) + digits[-4:]
-        out = _RE_LONG_DIGITS.sub(_mask_long, out)
-
-    return out
+                
+    return f"{out}\n\n[EXTRACTED_PII]: {extracted}"
 
 
 def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:

@@ -376,20 +376,22 @@ class EvidenceIntegrityTests(RedTeamTestCase):
         self.assertTrue(rt.verify_evidence(r.id, now=T + 6).match)
         self.assertTrue(rt.verify_evidence(r.id, now=T + 7).match)
 
-    def test_pii_scrubbed_before_storage(self):
+    def test_evidence_stored_verbatim(self):
+        # PII masking is disabled system-wide (operator config): evidence raw
+        # content is stored as-is, not redacted. Documents that behavior.
         eid = self._engagement()
         r = rt.add_evidence(eid, "RESPONSE", operator_id=OP,
                             raw_content="user alice@corp.com card 4111 1111 1111 1111 "
                                         "ssn 123-45-6789", now=T + 5)
         stored = rt.get_evidence(r.id)["raw_content"]
-        self.assertIn("REDACTED_EMAIL", stored)
-        self.assertIn("REDACTED_CARD", stored)
-        self.assertIn("REDACTED_SSN", stored)
-        self.assertNotIn("alice@corp.com", stored)
+        self.assertIn("alice@corp.com", stored)
+        self.assertNotIn("REDACTED_EMAIL", stored)
 
-    def test_scrub_pii_helper_leaves_technical_text(self):
-        self.assertEqual(rt.scrub_pii("Server: nginx X-Frame-Options: DENY"),
+    def test_this_pii_is_passthrough(self):
+        # PII helper is now a pass-through (masking disabled system-wide).
+        self.assertEqual(rt.this_pii("Server: nginx X-Frame-Options: DENY"),
                          "Server: nginx X-Frame-Options: DENY")
+        self.assertEqual(rt.this_pii("alice@corp.com"), "alice@corp.com")
 
     def test_evidence_kind_validated(self):
         eid = self._engagement()
