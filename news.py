@@ -51,13 +51,17 @@ DB_PATH = "bot.db"
 from envutil import env_int, env_float, env_bool
 
 HTTP_TIMEOUT_SECONDS = env_float("NEWS_HTTP_TIMEOUT", 15)
-CHECK_INTERVAL_DEFAULT = env_int("NEWS_CHECK_INTERVAL", 600)
-MAX_ITEMS_PER_CYCLE_DEFAULT = env_int("NEWS_MAX_ITEMS_PER_CYCLE", 5)
+# ส่งข่าวไม่ให้ถี่เกินไป: รอบเช็คห่างขึ้น + จำนวนข่าวต่อรอบต่อแหล่งน้อยลง +
+# เว้นจังหวะระหว่างส่งแต่ละข่าว (กันข้อความมาเป็นชุดรัวๆ)
+CHECK_INTERVAL_DEFAULT = env_int("NEWS_CHECK_INTERVAL", 900)
+MAX_ITEMS_PER_CYCLE_DEFAULT = env_int("NEWS_MAX_ITEMS_PER_CYCLE", 3)
+SEND_DELAY_SECONDS = env_float("NEWS_SEND_DELAY_SECONDS", 3)
 SEND_BACKLOG_ON_FIRST_RUN = env_bool("NEWS_SEND_BACKLOG_ON_FIRST_RUN", "false")
 # เพิ่มค่าเริ่มต้นให้ AI ได้เห็น "เนื้อหาบทความ" มากขึ้น เพื่อสรุปแบบเน้นเนื้อหา
 # (ปรับลด/เพิ่มได้ผ่าน env — ค่ามากขึ้น = สรุปละเอียดขึ้นแต่ใช้ token มากขึ้น)
 ARTICLE_MAX_CHARS = env_int("NEWS_ARTICLE_MAX_CHARS", 5000)
-AI_SUMMARY_MAX_CHARS = env_int("NEWS_AI_SUMMARY_MAX_CHARS", 1500)
+# ข้อความข่าวสั้นลง แต่ยังเน้นเนื้อหา (ควบคุมความยาวสรุปที่ส่งเข้ากลุ่ม)
+AI_SUMMARY_MAX_CHARS = env_int("NEWS_AI_SUMMARY_MAX_CHARS", 800)
 RSS_SUMMARY_MIN_CHARS = env_int("NEWS_RSS_SUMMARY_MIN_CHARS", 50)
 _BLOCKED_DOMAINS_THIS_CYCLE: set[str] = set()
 
@@ -110,13 +114,14 @@ _NEWS_SUMMARY_INSTRUCTION = r'''
 7. ห้ามขึ้นต้นด้วย "บทความนี้กล่าวถึง...", "เนื้อหาในบทความ...", "จากข่าวระบุว่า..." — ให้เข้าประเด็นข่าวโดยตรงเหมือนข่าวที่เรียบเรียงเสร็จแล้ว เช่น "แฮ็กเกอร์กลุ่ม X ใช้ช่องโหว่ CVE-... โจมตี..." แทน "บทความนี้กล่าวถึงการโจมตี..."
 8. เนื้อหาที่ได้รับผ่านการตรวจสอบคุณภาพมาแล้วว่าเป็นบทความจริงเสมอ ห้ามตอบว่า "ข้อมูลไม่เพียงพอ" ให้เรียบเรียงข่าวจากสิ่งที่มีเสมอ
 
-รูปแบบผลลัพธ์:
-9. summary_th: เนื้อข่าวเรียบเรียงแล้ว 2-4 ย่อหน้าสั้น ๆ ที่ให้สาระครบตามข้อ 3-4 (ไม่ใช่แค่ paraphrase หัวข้อ)
-10. key_points: รายการ 2-5 ข้อ (bullet) สรุป "ประเด็นสำคัญ/ข้อเท็จจริงหลัก" ของข่าวแบบสั้น กระชับ เจาะเนื้อหา เช่น ช่องโหว่ที่กระทบ เวอร์ชันที่ต้องอัปเดต ตัวเลขความเสียหาย ถ้าข่าวสั้นมากจนไม่มีประเด็นย่อย ให้คืนเป็น list ว่าง []
-11. ตอบกลับเป็น JSON เท่านั้น ตามรูปแบบนี้ (ห้ามมีข้อความอื่นนอก JSON):
+รูปแบบผลลัพธ์ (สั้น กระชับ แต่เน้นเนื้อหา):
+9. summary_th: เนื้อข่าวเรียบเรียงแล้วแบบกระชับ 1-2 ย่อหน้าสั้น (รวมประมาณ 3-5 ประโยค) เก็บเฉพาะสาระสำคัญที่สุดตามข้อ 3-4 ตัดรายละเอียดปลีกย่อย/พื้นหลังที่ไม่จำเป็นออก แต่ต้องไม่ใช่แค่ paraphrase หัวข้อ
+10. key_points: รายการ 2-3 ข้อ (bullet) สรุป "ข้อเท็จจริงหลัก" ที่สำคัญที่สุดของข่าวแบบสั้นมาก เจาะเนื้อหา เช่น ช่องโหว่ที่กระทบ เวอร์ชันที่ต้องอัปเดต ตัวเลขความเสียหาย ถ้าข่าวสั้นจนไม่มีประเด็นย่อย ให้คืน list ว่าง []
+11. เขียนให้อ่านจบเร็ว: หลีกเลี่ยงการเล่าซ้ำระหว่าง summary_th กับ key_points
+12. ตอบกลับเป็น JSON เท่านั้น ตามรูปแบบนี้ (ห้ามมีข้อความอื่นนอก JSON):
 {
   "title_th": "หัวข้อข่าวภาษาไทย",
-  "summary_th": "เนื้อข่าวภาษาไทยที่เรียบเรียงแล้ว เน้นเนื้อหา 2-4 ย่อหน้า",
+  "summary_th": "เนื้อข่าวภาษาไทยที่เรียบเรียงแล้ว กระชับ เน้นเนื้อหา 1-2 ย่อหน้า",
   "key_points": ["ประเด็นสำคัญข้อ 1", "ประเด็นสำคัญข้อ 2"]
 }
 '''.strip()
@@ -135,7 +140,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _source(name: str, feed_default: str = "", page_default: str = "",
-            ai_summary: bool = True, max_items: int = 5) -> dict:
+            ai_summary: bool = True, max_items: int = 3) -> dict:
     """สร้าง config ของแหล่งข่าว 1 แหล่ง โดยอ่านค่าจาก env (ถ้ามี) ทับค่าเริ่มต้น
 
     - NEWS_FEED_URL_<NAME> : RSS/Atom feed (ใช้ก่อนเสมอถ้ามี)
@@ -752,14 +757,17 @@ def _discover_article_links(html: bytes, base_url: str, max_links: int) -> List[
 # ---------------- AI summary ----------------
 
 async def _summarize(item: NewsItem, client: httpx.AsyncClient):
-    from gemini import ask_gemini
+    from gemini import ask_gemini, RESEARCH_MAX_INPUT_CHARS
 
     # ณ จุดนี้ item ผ่าน _classify_article_quality() มาแล้วใน _check_one_source()
     # จึงมั่นใจได้ว่า article_text เป็นเนื้อหาบทความจริง — AI ต้องได้รับ article_text
     # เป็นหลักเสมอ ห้ามใช้ item.summary (RSS description สั้น ๆ) เป็น input หลัก
     content = (item.article_text or "").strip() or item.summary.strip()
     prompt = f"หัวข้อ: {item.title}\n\n<ARTICLE_DATA>\n{content}\n</ARTICLE_DATA>"
-    ok, text = await ask_gemini(prompt, system_instruction=_NEWS_SUMMARY_INSTRUCTION)
+    # ใช้เพดาน input แบบงานวิจัย (ยาวกว่า chat 4000) — ไม่งั้นบทความยาวจะถูก
+    # ปฏิเสธด้วย "ข้อความยาวเกินไป (จำกัด 4000 ตัวอักษร)" แล้วขึ้นว่า AI สรุปไม่สำเร็จ
+    ok, text = await ask_gemini(prompt, system_instruction=_NEWS_SUMMARY_INSTRUCTION,
+                               max_input_chars=RESEARCH_MAX_INPUT_CHARS)
     if not ok:
         logger.warning("NEWS AI SUMMARY FAILED | url=%s | %s", item.url, text)
         fallback = content.strip() or "(ไม่มีเนื้อหาให้สรุป)"
@@ -893,7 +901,7 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
 
     topic_id = source.get("topic_id") or None
 
-    for item in new_items:
+    for index, item in enumerate(new_items):
         try:
             if source.get("ai_summary", True):
                 item.title, item.summary = await _summarize(item, client)
@@ -905,6 +913,10 @@ async def _check_one_source(client: httpx.AsyncClient, bot, source: dict):
             sent_conn.commit()
             sent_conn.close()
             logger.info("NEWS SENT | source=%s | url=%s | topic_id=%s", name, item.url, topic_id)
+
+            # เว้นจังหวะระหว่างข่าว กันข้อความมาเป็นชุดรัวๆ (ไม่หน่วงหลังข่าวสุดท้าย)
+            if SEND_DELAY_SECONDS > 0 and index < len(new_items) - 1:
+                await asyncio.sleep(SEND_DELAY_SECONDS)
 
         except TelegramError as e:
             logger.warning("NEWS TELEGRAM SEND ERROR | source=%s | url=%s | %s", name, item.url, e)

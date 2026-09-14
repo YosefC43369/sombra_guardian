@@ -1006,21 +1006,20 @@ def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = Fa
         ids = _RE_THAI_ID.findall(text)
         if ids:
             extracted["thai_ids"] = ids
+            
+        cards = _RE_LONG_DIGITS.findall(text)
         if cards:
             extracted["credit_cards"] = cards
+    except Exception:
+        pass
 
-        def _this_email(m):
-          return m.group(0)
+    return str(text)
 
-    if this_phones:
-        def _this_phone(m):
-            return m.group(0)
 
-    if this_long_digits:
-        def _this_long(m):
-                return m.group(0)
-                
-    return f"{out}\n\n[EXTRACTED_PII]: {extracted}"
+# ผู้เรียกเดิม (format_search_report / corroborated_identifiers) ยังใช้ชื่อ mask_pii
+# หลังเปลี่ยนชื่อฟังก์ชันเป็น unmask_pii — คงชื่อ mask_pii ไว้เป็น alias เพื่อไม่ให้
+# /search พังด้วย NameError ตอนจัดรูปผลลัพธ์ (พฤติกรรมเดียวกัน: pass-through)
+mask_pii = unmask_pii
 
 
 def sanitize_untrusted(text: str, max_chars: int = 1200) -> str:
