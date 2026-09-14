@@ -512,6 +512,7 @@ def _limit(limit: Optional[int]) -> int:
     return DEFAULT_PAGE_LIMIT if v <= 0 else min(v, MAX_PAGE_LIMIT)
 
 
+# [PII-MASKING] ตารางรูปแบบ PII สำหรับการปกปิดข้อมูลส่วนบุคคล (ใช้โดย scrub_pii ด้านล่าง)
 # Obvious end-user PII patterns scrubbed from evidence text before it is
 # stored (Phase 15 data minimization). Technical proof (headers, hosts,
 # tool output) is kept; incidental personal data is redacted. This is a
@@ -525,6 +526,8 @@ _PII_PATTERNS = (
 )
 
 
+# [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ลบ/แทนที่ อีเมล เลขบัตรเครดิต
+# SSN และเบอร์โทรในข้อความอิสระ ก่อนบันทึกลงฐานข้อมูล (data minimization)
 def scrub_pii(text: Optional[str]) -> Optional[str]:
     """Redact obvious end-user PII from free text before storage. Order
     matters: card/SSN before the looser phone pattern so a card number is

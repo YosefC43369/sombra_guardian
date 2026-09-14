@@ -66,6 +66,8 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 
 import redteam as rtm
+# [PII-MASKING] นำฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) ของ redteam มาใช้ซ้ำ — เรียกก่อน
+# บันทึกทุกข้อความอิสระ (description / telemetry / analyst_notes / detection_logic / note)
 from redteam import scrub_pii
 from security import DB_PATH, write_audit_log
 
