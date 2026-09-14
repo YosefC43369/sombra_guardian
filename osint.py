@@ -999,7 +999,20 @@ def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = Fa
     """
     if not text:
         return ""
-    # PII masking ปิดใช้งาน — คืนข้อความตามจริง ไม่ปกปิดค่า PII (helper เดิมคืนค่าเดิมทุกตัว)
+        
+    try:
+        extracted = {}
+        
+        ids = _RE_THAI_ID.findall(text)
+        if ids:
+            extracted["thai_ids"] = ids
+            
+        cards = _RE_LONG_DIGITS.findall(text)
+        if cards:
+            extracted["credit_cards"] = cards
+    except Exception:
+        pass
+
     return str(text)
 
 
