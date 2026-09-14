@@ -28,6 +28,7 @@ import detection
 import search
 import osint
 import nethealth
+import tor_launcher
 import username_osint
 import envutil
 from security import security_db_init, write_audit_log
@@ -1005,8 +1006,20 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # คำค้นที่เป็นชื่อบัญชี (เช่น /search thana_p) ให้ค้นข้ามเว็บจากฐานข้อมูล
     # เว็บไซต์ใน resource/data.json ด้วย — ชื่อคนไทยจะไม่เข้าเงื่อนไขนี้
     username_hits = []
+    profile_db_hits = []
     handle = query.strip()
     if username_osint.is_plausible_username(handle):
+        # (1) ลิงก์โปรไฟล์ผู้สมัครจาก resource/data.json — ได้ทันที ไม่ยิงเครือข่าย
+        #     จึงมีผลชี้เป้าเสมอ แม้ Tor/engine ล่ม
+        try:
+            profile_db_hits = osint.build_profile_results(
+                handle, limit=SEARCH_RESULTS_DISPLAY_CAP
+            )
+        except Exception as e:
+            logger.warning(f"OSINT PROFILE-DB FAILED | handle={handle!r}: {e}")
+        if profile_db_hits:
+            clean_groups.append(profile_db_hits)
+        # (2) ยืนยันบัญชีจริงด้วยการยิงเว็บจริง (best-effort ตาม budget)
         try:
             username_hits = await username_osint.check_username_as_results_async(
                 handle, budget_seconds=SEARCH_COMMAND_BUDGET_SECONDS
@@ -1029,6 +1042,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     health_bits = [f"Tor: {'ใช้งานได้' if nethealth.tor_reachable() else 'ไม่พร้อมใช้งาน'}"]
     if username_hits:
         health_bits.append(f"พบบัญชีชื่อเดียวกัน {len(username_hits)} เว็บ")
+    if profile_db_hits:
+        health_bits.append(f"ลิงก์โปรไฟล์จากฐานข้อมูลเว็บ {len(profile_db_hits)} รายการ")
     if cooling:
         health_bits.append(f"เส้นทางที่พักอยู่: {', '.join(cooling)}")
     health_note = "สถานะการเก็บข้อมูล — " + " | ".join(health_bits)
@@ -4865,9 +4880,11 @@ _REQUIRED_MODULE_API = {
     "scrape": ("scrape_multiple", "scrape_single", "CONTENT_UNAVAILABLE_MARKER"),
     "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
-              "pivot_queries", "build_dossier", "format_search_report"),
+              "pivot_queries", "build_dossier", "format_search_report",
+              "load_site_db", "profile_url_candidates", "build_profile_results"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
+    "tor_launcher": ("ensure_tor",),
     "username_osint": ("load_sites", "check_username", "check_username_as_results",
                        "check_username_as_results_async", "is_plausible_username"),
     "config": ("resolve_model", "resolve_image_model", "log_startup_summary"),
@@ -4947,8 +4964,10 @@ def log_tor_status() -> bool:
         return True
     logger.warning(
         "TOR: เชื่อมต่อ %s:%s ไม่ได้ — /identity, /corporate, /search จะค้นได้เฉพาะ "
-        "เว็บเปิดไปก่อน วิธีเปิด dark web: รัน Tor ในคอนเทนเนอร์ (Dockerfile ติดตั้งไว้แล้ว "
-        "ผ่าน docker-entrypoint.sh) หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
+        "เว็บเปิดไปก่อน วิธีเปิด dark web: (ก) Docker: Tor สตาร์ทให้เองผ่าน "
+        "docker-entrypoint.sh; (ข) โฮสต์ไม่มี root เช่น FPS.ms: บอตจะดาวน์โหลด+สตาร์ท Tor "
+        "เองถ้า TOR_AUTO_DOWNLOAD=1 (ดีฟอลต์) — ถ้ายังไม่ได้ให้ตั้ง TOR_BINARY ไปที่ tor "
+        "ที่อัปโหลด หรือชี้ TOR_SOCKS_HOST/TOR_SOCKS_PORT ไปที่ Tor ตัวนอก",
         host, port,
     )
     return False
@@ -4960,6 +4979,12 @@ def main():
         
     logger.info("BOT STARTING")
     check_module_integrity()
+    # สตาร์ท/ค้นหา Tor ให้พร้อมก่อน (สำคัญบนโฮสต์ที่รัน python app.py ตรง ๆ โดยไม่ผ่าน
+    # docker-entrypoint.sh เช่น FPS.ms) — best-effort, ล้มก็ค้นเฉพาะเว็บเปิด
+    try:
+        tor_launcher.ensure_tor()
+    except Exception:
+        logger.exception("TOR: ensure_tor ล้มเหลวแบบไม่คาดคิด — ค้นเฉพาะเว็บเปิด")
     log_tor_status()
     # Names and model ids only -- never a key or any fragment of one.
     config.log_startup_summary()
