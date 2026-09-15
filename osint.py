@@ -171,6 +171,33 @@ IOC_LABELS = {
 IOC_ORDER = ("email", "profile", "phone", "handle", "domain",
              "onion", "ipv4", "btc", "eth", "hash", "cve")
 
+# อิโมจิประจำแต่ละหมวด IOC — ใช้จัดหมวดหมู่ผลลัพธ์ให้ "อ่านง่าย" ตอนแสดงผล
+# (คู่กับ IOC_LABELS: อิโมจิ + ข้อความหมวดหมู่ภาษาไทย) รวมถึงใช้ในบันทึกฐานข้อมูล
+IOC_EMOJI = {
+    "email": "✉️", "domain": "🌐", "onion": "🧅", "ipv4": "📡",
+    "btc": "₿", "eth": "Ξ", "hash": "#️⃣", "cve": "🐞",
+    "handle": "🏷️", "phone": "📱", "profile": "👤",
+}
+
+# หมวดหมู่ "ฝั่งที่มาของแหล่ง" (origin) — อิโมจิ + ชื่อหมวดหมู่ + ลำดับการแสดง
+# ใช้แบ่งบล็อกผลลัพธ์ของ /search ให้เป็นกลุ่มชัดเจนแทนการไล่รายการปนกันยาวๆ
+ORIGIN_META = {
+    "clearnet": {"emoji": "🌐", "label": "เว็บเปิด (Clearnet)", "order": 0},
+    "darkweb": {"emoji": "🕸️", "label": "Dark Web (.onion)", "order": 1},
+    "username": {"emoji": "👤", "label": "บัญชีข้ามเว็บ (Username)", "order": 2},
+}
+_ORIGIN_FALLBACK = {"emoji": "🔎", "label": "อื่น ๆ", "order": 9}
+
+
+def origin_meta(origin: str) -> dict:
+    """คืน metadata (อิโมจิ/ชื่อหมวด/ลำดับ) ของฝั่งที่มา — ปลอดภัยเมื่อ origin แปลก"""
+    return ORIGIN_META.get((origin or "").strip().lower(), _ORIGIN_FALLBACK)
+
+
+def ioc_emoji(ioc_type: str) -> str:
+    """อิโมจิของหมวด IOC (คืน 🔹 เมื่อไม่รู้จักชนิด)"""
+    return IOC_EMOJI.get((ioc_type or "").strip().lower(), "🔹")
+
 # ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง ใช้เชื่อมโยงตัวตนข้ามเว็บ
 # เจตนาไม่ใส่ "ชื่อบุคคล": ชื่อซ้ำกันได้ทั่วไป ใช้เชื่อมตัวตนจะได้คนผิด
 IDENTITY_TYPES = ("email", "profile", "phone", "handle")
@@ -1611,6 +1638,29 @@ def expand_queries(seen_queries, ranked: List[dict], selectors: Optional[Selecto
     return out[: max(1, int(max_new))]
 
 
+def categorize_by_origin(display_records: List[dict]) -> List[dict]:
+    """จัดกลุ่มผลลัพธ์ตาม "ฝั่งที่มา" (clearnet/darkweb/username) เพื่อแสดงเป็น
+    บล็อกหมวดหมู่ที่อ่านง่าย โดยคง "เลขอ้างอิง Sxx" เดิมของแต่ละแหล่งไว้ (นับตาม
+    ลำดับที่ส่งเข้ามา) ให้ตรงกับส่วน "ยืนยันข้ามแหล่ง" ที่อ้าง Sxx เหมือนกัน
+
+    คืน list ของ dict: {origin, emoji, label, order, items:[{ref, index, record}]}
+    เรียงตามลำดับหมวด (clearnet -> darkweb -> username -> อื่น ๆ)
+    ใช้ร่วมกันทั้งการแสดงผล /search และการบันทึกลงฐานข้อมูล (osint_db)
+    """
+    buckets: Dict[str, dict] = {}
+    for position, record in enumerate(display_records or [], start=1):
+        origin = (record.get("origin") or "").strip().lower() or "-"
+        meta = origin_meta(origin)
+        bucket = buckets.setdefault(origin, {
+            "origin": origin, "emoji": meta["emoji"],
+            "label": meta["label"], "order": meta["order"], "items": [],
+        })
+        bucket["items"].append({
+            "ref": f"S{position}", "index": position, "record": record,
+        })
+    return sorted(buckets.values(), key=lambda g: (g["order"], g["origin"]))
+
+
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
                          ranked: List[dict], limit: int = 20,
                          health_note: str = "") -> str:
@@ -1643,53 +1693,71 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
     clearnet = sum(1 for r in ranked if r.get("origin") == "clearnet")
     darkweb = sum(1 for r in ranked if r.get("origin") == "darkweb")
     username = sum(1 for r in ranked if r.get("origin") == "username")
-    parts = [f"เว็บเปิด {clearnet}", f"dark web {darkweb}"]
+    parts = [
+        f"{ORIGIN_META['clearnet']['emoji']} เว็บเปิด {clearnet}",
+        f"{ORIGIN_META['darkweb']['emoji']} dark web {darkweb}",
+    ]
     if username:
-        parts.append(f"บัญชีข้ามเว็บ {username}")
+        parts.append(f"{ORIGIN_META['username']['emoji']} บัญชีข้ามเว็บ {username}")
     lines.append(
-        f"พบ {len(ranked)} แหล่ง ({' | '.join(parts)}) "
+        f"📊 พบ {len(ranked)} แหล่ง ({'  '.join(parts)}) "
         f"— แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง"
     )
     if low_relevance_only:
         lines.append("⚠️ ผลด้านล่างความเกี่ยวข้องต่ำ (ไม่พบคำค้นในชื่อ/คำโปรย) "
                      "อาจไม่ตรงเป้า — ลองใส่ชื่อ-นามสกุลให้ครบ หรือรอ engine อื่นกลับมา")
-    lines.append("")
+
     display = ranked[:limit]
-    for position, record in enumerate(display, start=1):
-        marker = " *" if record.get("relevance", 0) > 0 else ""
-        origin = record.get("origin") or "-"
-        engine = record.get("engine") or "-"
-        # ปกปิด PII ในทุกอย่างที่แสดงต่อผู้ใช้ — ชื่อเรื่อง/คำโปรยมาจากหน้าเว็บดิบ
-        # จึงอาจมีเบอร์/อีเมล/เลขบัตรติดมา ส่วนลิงก์ปกปิดเฉพาะบัตรประชาชนกับอีเมล
-        # (ไม่กลบเลข path อื่น เพื่อให้ยังคลิกต่อได้)
-        title = mask_pii(str(record.get("title", "Untitled")))[:120]
-        link = mask_pii(str(record.get("link", "")), mask_phones=False,
-                        mask_long_digits=False)
-        lines.append(f"[S{position}]{marker} {title}")
-        lines.append(f"      {link}")
-        # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
-        snippet = mask_pii(str(record.get("snippet") or "").strip())
-        if snippet:
-            lines.append(f"      คำโปรย: {snippet[:200]}")
-        lines.append(
-            f"      ฝั่ง={origin} | engine={engine} | "
-            f"relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง"
-        )
+    # จัดกลุ่มผลลัพธ์เป็น "หมวดหมู่ตามฝั่งที่มา" พร้อมหัวข้ออิโมจิ แทนการไล่ยาวๆ
+    # ปนกัน (เดิมอ่านยากมาก) — คงเลข Sxx ของแต่ละแหล่งไว้ตามลำดับความเกี่ยวข้อง
+    for group in categorize_by_origin(display):
+        lines.append("")
+        lines.append(f"{group['emoji']} {group['label']} — {len(group['items'])} แหล่ง")
+        lines.append("──────────")
+        for item in group["items"]:
+            record = item["record"]
+            ref = item["ref"]
+            # ⭐ = ตรงเป้า (relevance>0), 🔸 = ความเกี่ยวข้องต่ำ/ตัดสินไม่ได้
+            marker = "⭐" if record.get("relevance", 0) > 0 else "🔸"
+            engine = record.get("engine") or "-"
+            # ปกปิด PII ในทุกอย่างที่แสดงต่อผู้ใช้ — ชื่อเรื่อง/คำโปรยมาจากหน้าเว็บดิบ
+            # จึงอาจมีเบอร์/อีเมล/เลขบัตรติดมา ส่วนลิงก์ปกปิดเฉพาะบัตรประชาชนกับอีเมล
+            # (ไม่กลบเลข path อื่น เพื่อให้ยังคลิกต่อได้)
+            title = mask_pii(str(record.get("title", "Untitled")))[:120]
+            link = mask_pii(str(record.get("link", "")), mask_phones=False,
+                            mask_long_digits=False)
+            lines.append(f"{marker} [{ref}] {title}")
+            lines.append(f"      🔗 {link}")
+            # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
+            snippet = mask_pii(str(record.get("snippet") or "").strip())
+            if snippet:
+                lines.append(f"      💬 {snippet[:200]}")
+            lines.append(
+                f"      🔧 {engine} · 🎯 relevance {record.get('relevance', 0)} · "
+                f"🔁 พบซ้ำ {record.get('engines', 1)} ครั้ง"
+            )
 
     # ยืนยันข้ามแหล่ง: ตัวระบุที่โผล่ในหลายแหล่งอิสระ = สัญญาณว่า "น่าจะเป็นของ
-    # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว
+    # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว จัดหมวดหมู่ตามชนิด IOC
+    # (อิโมจิ + ชื่อหมวด) เพื่อให้กวาดตาอ่านได้เร็วกว่ารายการปนกันยาวๆ
     corroborated = corroborated_identifiers(display, min_sources=IDENTITY_MIN_SOURCES)
     if corroborated:
         lines.append("")
-        lines.append(f"[ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ] (ปกปิด PII แล้ว)")
+        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ (ปกปิด PII แล้ว)")
+        grouped: Dict[str, List[dict]] = {}
         for item in corroborated:
-            label = IOC_LABELS.get(item["type"], item["type"])
-            lines.append(
-                f"- [{label}] {mask_pii(item['value'])} — "
-                f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
-            )
+            grouped.setdefault(item["type"], []).append(item)
+        for ioc_type in sorted(grouped, key=lambda t: IOC_ORDER.index(t)
+                               if t in IOC_ORDER else 99):
+            label = IOC_LABELS.get(ioc_type, ioc_type)
+            lines.append(f"  {ioc_emoji(ioc_type)} {label}")
+            for item in grouped[ioc_type]:
+                lines.append(
+                    f"      • {mask_pii(item['value'])} — "
+                    f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
+                )
 
     lines.append("")
-    lines.append("นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
-    lines.append("ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
+    lines.append("ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
+    lines.append("👉 ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
     return "\n".join(lines)

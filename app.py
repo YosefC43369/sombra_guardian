@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import secrets
 import sqlite3
 import logging
 import asyncio
@@ -28,6 +29,7 @@ import detection
 import search
 import scrape
 import osint
+import osint_db
 import nethealth
 import tor_launcher
 import username_osint
@@ -947,6 +949,126 @@ async def cmd_corporate_espionage(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+# ---------------- OSINT findings database: ยืนยันเพื่อบันทึก (เฉพาะ Admin) ----------------
+#
+# /search แสดงผลดิบเฉยๆ ไม่เก็บอะไรไว้ โมดูล osint_db เพิ่มขั้น "ยืนยันเพื่อบันทึก":
+# หลังแสดงผล เราแนบปุ่มให้ Admin กดยืนยันบันทึกผลที่ค้นเจอลงไฟล์ JSON (ไฟล์จะถูก
+# สร้างครั้งแรกหลังการยืนยัน) — payload เก็บใน context.chat_data ชั่วคราว ส่วน
+# callback_data พก "โทเคนสั้น" เท่านั้น ไม่พกข้อมูลดิบ (จำกัด 64 ไบต์ และกัน leak)
+
+_OSINT_SAVE_CB = "osintdb"                     # prefix ของ callback_data
+_OSINT_PENDING_KEY = "_osint_pending_saves"    # key ใน context.chat_data
+_OSINT_PENDING_MAX = 20                         # กัน chat_data บวม: เก็บคำขอค้างได้เท่านี้
+
+
+def _osint_save_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("💾 บันทึกลงฐานข้อมูล (Admin)",
+                             callback_data=f"{_OSINT_SAVE_CB}:save:{token}"),
+        InlineKeyboardButton("❌ ไม่บันทึก",
+                             callback_data=f"{_OSINT_SAVE_CB}:cancel:{token}"),
+    ]])
+
+
+async def _offer_osint_save(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            query: str, selectors, ranked) -> None:
+    """แนบปุ่มยืนยัน "บันทึกผล /search ลงฐานข้อมูล" (เฉพาะเมื่อมีผลจริง)
+
+    เก็บเฉพาะผลที่ "แสดงจริง" ไว้ใน chat_data ผูกกับโทเคนสุ่ม การบันทึกจริงเกิดใน
+    callback ที่ตรวจ is_admin ซ้ำอีกครั้งก่อนเขียนไฟล์
+
+    ใช้ตัวกรองเดียวกับ format_search_report (ถ้ามีผลตรงเป้า relevance>0 ให้เก็บเฉพาะ
+    พวกนั้น มิฉะนั้นเก็บทั้งหมด) เพื่อให้เลข Sxx ในระเบียนที่บันทึกตรงกับที่ผู้ใช้เห็น"""
+    strong = [r for r in (ranked or []) if r.get("relevance", 0) > 0]
+    display = (strong if strong else list(ranked or []))[:SEARCH_RESULTS_DISPLAY_CAP]
+    if not display:
+        return
+    store = context.chat_data.setdefault(_OSINT_PENDING_KEY, {})
+    # กันบวม: ถ้าเกินเพดาน ตัดคำขอเก่าสุดทิ้ง (dict รักษาลำดับการใส่)
+    while len(store) >= _OSINT_PENDING_MAX:
+        store.pop(next(iter(store)))
+    token = secrets.token_urlsafe(8)
+    store[token] = {
+        "query": query,
+        "selector": selectors.summary(),
+        "records": display,
+        "requested_by": update.effective_user.id,
+    }
+    try:
+        await update.message.reply_text(
+            "💾 ต้องการบันทึกผลการค้นชุดนี้ลงฐานข้อมูล OSINT หรือไม่?\n"
+            "ระบบจะจัดหมวดหมู่แหล่ง/ตัวระบุที่ยืนยันข้ามแหล่ง แล้วเก็บเป็นไฟล์ JSON "
+            "(บันทึกได้เฉพาะ Admin)",
+            reply_markup=_osint_save_keyboard(token),
+        )
+    except TelegramError as e:
+        logger.info("OSINT SAVE OFFER FAILED: %s", e)
+        store.pop(token, None)
+
+
+async def osint_db_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """จัดการปุ่มยืนยัน/ยกเลิกการบันทึกผล /search ลงฐานข้อมูล — บันทึกได้เฉพาะ Admin"""
+    query = update.callback_query
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) < 3 or parts[0] != _OSINT_SAVE_CB:
+        return await query.answer()
+    action, token = parts[1], parts[2]
+
+    # ตรวจ Admin ซ้ำที่ชั้น callback — ปุ่มนี้ทุกคนในแชทเห็น แต่กดบันทึกได้เฉพาะ Admin
+    if not await is_admin(update, context):
+        return await query.answer("❌ บันทึกลงฐานข้อมูลได้เฉพาะ Admin", show_alert=True)
+
+    store = context.chat_data.get(_OSINT_PENDING_KEY, {})
+    payload = store.get(token)
+
+    if action == "cancel":
+        store.pop(token, None)
+        await query.answer("ยกเลิกแล้ว")
+        try:
+            return await query.edit_message_text("❌ ไม่บันทึกผลการค้นลงฐานข้อมูล")
+        except TelegramError:
+            return
+
+    if action != "save":
+        return await query.answer()
+
+    if payload is None:
+        await query.answer("คำขอนี้หมดอายุแล้ว", show_alert=True)
+        try:
+            return await query.edit_message_text(
+                "⚠️ คำขอบันทึกหมดอายุ (บอตอาจรีสตาร์ต) — สั่ง /search แล้วกดบันทึกใหม่อีกครั้ง")
+        except TelegramError:
+            return
+
+    await query.answer("กำลังบันทึก…")
+    try:
+        record = osint_db.build_finding_record(
+            payload["query"], payload.get("selector", ""),
+            payload["records"], actor=update.effective_user.id,
+        )
+        # การเขียนไฟล์เป็น blocking I/O — โยนไป thread เพื่อไม่บล็อก event loop
+        result = await asyncio.to_thread(osint_db.save_finding, record)
+    except Exception:
+        logger.exception("OSINT DB SAVE ERROR token=%s", token)
+        try:
+            return await query.edit_message_text(
+                "⚠️ บันทึกลงฐานข้อมูลไม่สำเร็จ (เกิดข้อผิดพลาดภายใน) ลองใหม่อีกครั้ง")
+        except TelegramError:
+            return
+
+    store.pop(token, None)
+    write_audit_log(
+        update.effective_chat.id, update.effective_user.id, actor="admin",
+        action="OSINT_DB_SAVE",
+        detail=f"id={result.get('id')} | query={str(payload['query'])[:200]}",
+    )
+    try:
+        await query.edit_message_text(osint_db.format_saved_summary(record, result))
+    except TelegramError as e:
+        logger.info("OSINT DB SAVE EDIT FAILED: %s", e)
+
+
 # ---------------- OSINT Search ----------------
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1082,6 +1204,9 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit=SEARCH_RESULTS_DISPLAY_CAP, health_note=health_note,
         ),
     )
+
+    # เสนอให้ Admin ยืนยันบันทึกผลชุดนี้ลงฐานข้อมูล OSINT (สร้างไฟล์ JSON เมื่อยืนยัน)
+    await _offer_osint_save(update, context, query, selectors, ranked)
 
     # ดึง "เนื้อหา + ไฟล์" จริงจากผลอันดับต้นๆ (เฉพาะข้อความในหน้า/ไฟล์ ไม่เอาข้อความ
     # ที่เป็นลิงก์) — clearnet ที่กันบอทใช้ reader proxy, .onion ใช้ Tor (จัดการใน scrape.py)
@@ -5126,7 +5251,10 @@ _REQUIRED_MODULE_API = {
               "build_sources", "verify_sources", "build_identity",
               "pivot_queries", "build_dossier", "format_search_report",
               "load_site_db", "profile_url_candidates", "build_profile_results",
-              "assess_identity_confidence", "expand_queries", "advanced_queries"),
+              "assess_identity_confidence", "expand_queries", "advanced_queries",
+              "categorize_by_origin", "corroborated_identifiers", "ioc_emoji"),
+    "osint_db": ("build_finding_record", "save_finding", "format_saved_summary",
+                 "load_db"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
@@ -5347,6 +5475,7 @@ def main():
     app.add_handler(CommandHandler("debt_pay", cmd_debt_pay))
     app.add_handler(CommandHandler("wallet_admin", cmd_wallet_admin))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
+    app.add_handler(CallbackQueryHandler(osint_db_callback_handler, pattern=r"^osintdb:"))
     # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
     # members' join/leave/ban transitions and the only source of
     # invite-link attribution. run_polling already requests
