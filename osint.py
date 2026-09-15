@@ -1188,69 +1188,117 @@ def defang(value: str) -> str:
     return out.replace(".", "[.]")
 
 
-# [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ปกปิด อีเมล/เบอร์โทร/เลขบัตรประชาชน/
-# เลขยาว ก่อน "แสดงผล" ต่อผู้ใช้ (เหลือเค้าโครงพอยืนยันได้ แต่ไม่เปิดเผยค่าเต็ม)
+# ============================================================================
+# [PII-MASKING] สวิตช์เปิด/ปิด "การปกปิดข้อมูลส่วนบุคคล (PII)"
+# ----------------------------------------------------------------------------
+# ตามคำสั่งผู้ใช้: ปิดการปกปิด PII/masking ทั้งหมด ฟังก์ชันในบล็อกนี้จึงทำงานแบบ
+# "ผ่านตรง (pass-through)" — คืนข้อความดิบตามเดิมโดยไม่ปกปิดอะไร
+#
+#   >>> วิธีเปิด/ปิด <<<
+#   ปิด (ค่าเริ่มต้น) : PII_MASKING_ENABLED = False
+#   เปิดการปกปิดกลับ  : PII_MASKING_ENABLED = True  หรือ env OSINT_PII_MASKING=1
+#
+# โค้ดปกปิด PII จริงถูกเก็บไว้เป็น "ทางเลือก" ในสาขา `if PII_MASKING_ENABLED:` ของ
+# แต่ละฟังก์ชัน พร้อมใช้งานทันทีเมื่อเปิดสวิตช์ (ไม่ต้องเขียนใหม่)
+#
+# ขอบเขต: แก้เฉพาะฟังก์ชัน masking (process_bot_response / unmask_pii และ alias
+# mask_pii) เท่านั้น — ไม่แตะผู้เรียก (format_search_report ฯลฯ) ผู้เรียกยังเรียกชื่อ
+# เดิมได้ แต่จะได้ข้อความดิบกลับไปเมื่อสวิตช์ปิด
+# ============================================================================
+
+# ปิดการปกปิด PII เป็นค่าเริ่มต้น (ตั้ง env OSINT_PII_MASKING=1/true/yes/on เพื่อเปิด)
+PII_MASKING_ENABLED = os.getenv("OSINT_PII_MASKING", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
 
 def process_bot_response(raw_text: str, user_id: int) -> str:
+    """[ปิดใช้งาน PII masking] คืนข้อความดิบตามเดิม
+
+    เมื่อ PII_MASKING_ENABLED = True จะกลับไปสรุปรายการ PII ที่พบ (โค้ดทางเลือกด้านล่าง)
+    """
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง ไม่ปกปิด ---
+    if not PII_MASKING_ENABLED:
+        return raw_text
+
+    # --- ทางเลือก: เปิดใช้เมื่อ PII_MASKING_ENABLED = True (สรุปรายการ PII ที่พบ) ---
     found_ids = _RE_THAI_ID.findall(raw_text)
     found_phones = _RE_PHONE.findall(raw_text)
     found_emails = _RE_EMAIL.findall(raw_text)
     found_cards = _RE_LONG_DIGITS.findall(raw_text)
-    
+
     has_pii = any([found_ids, found_phones, found_emails, found_cards])
-    if has_pii:
-        output_lines = ["❗️**พบข้อมูล PII ดิบในผลการค้นหา:**\n"]
-        
-        if found_ids:
-            output_lines.append(f"🆔 **เลขบัตรประชาชน:**\n" + "\n".join(f"- `{i}`" for i in found_ids))
-        if found_phones:
-            output_lines.append(f"📱 **เบอร์โทรศัพท์:**\n" + "\n".join(f"- `{p}`" for p in found_phones))
-        if found_emails:
-            output_lines.append(f"✉️ **อีเมล:**\n" + "\n".join(f"- `{e}`" for e in found_emails))
-        if found_cards:
-            output_lines.append(f"💳 **เลขบัญชี/บัตร:**\n" + "\n".join(f"- `{c}`" for c in found_cards))
-        
-        return "\n\n".join(output_lines)
-        
-    return unmask_pii
+    if not has_pii:
+        return raw_text
+
+    output_lines = ["❗️**พบข้อมูล PII ดิบในผลการค้นหา:**\n"]
+    if found_ids:
+        output_lines.append("🆔 **เลขบัตรประชาชน:**\n" + "\n".join(f"- `{i}`" for i in found_ids))
+    if found_phones:
+        output_lines.append("📱 **เบอร์โทรศัพท์:**\n" + "\n".join(f"- `{p}`" for p in found_phones))
+    if found_emails:
+        output_lines.append("✉️ **อีเมล:**\n" + "\n".join(f"- `{e}`" for e in found_emails))
+    if found_cards:
+        output_lines.append("💳 **เลขบัญชี/บัตร:**\n" + "\n".join(f"- `{c}`" for c in found_cards))
+    return "\n\n".join(output_lines)
+
 
 def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = False) -> str:
-    """ปกปิด PII ในข้อความที่จะ "แสดงต่อผู้ใช้" (คำโปรย/ชื่อเรื่อง/ลิงก์จากผลค้นหา)
+    """[ปิดใช้งาน PII masking] คืนข้อความดิบตามเดิม (ไม่ปกปิด)
 
-    /search แสดงผลดิบจาก search engine ตรงๆ คำโปรยเหล่านั้นอาจมีเบอร์โทร อีเมล
-    หรือเลขบัตรประชาชนติดมา เครื่องมือ OSINT เชิงตั้งรับต้องไม่กลายเป็นท่อส่ง PII
-    ดิบ จึงปกปิดก่อนแสดงเสมอ โดยเหลือเค้าโครงพอให้นักวิเคราะห์ยืนยันได้ว่า
-    "ตรงกับที่ค้น" โดยไม่เปิดเผยค่าเต็ม:
-      - เลขบัตรประชาชน 13 หลัก -> ปกปิดทั้งหมด (ไม่มีเหตุผลเชิงตั้งรับให้โชว์)
-      - เบอร์โทร -> เหลือ 2 ตัวหน้า + 2 ตัวท้าย
+    เดิมฟังก์ชันนี้ปกปิด อีเมล/เบอร์โทร/เลขบัตรประชาชน/เลขยาว ก่อน "แสดงต่อผู้ใช้"
+    ตอนนี้ปิดตามคำสั่งผู้ใช้ — ตั้ง PII_MASKING_ENABLED = True เพื่อเปิดการปกปิดกลับ
+    (โค้ดปกปิดจริงเป็น "ทางเลือก" อยู่ในสาขา if ด้านล่าง)
+
+    เมื่อเปิด จะปกปิดตามนี้:
+      - เลขบัตรประชาชน 13 หลัก -> ปกปิดทั้งหมด
       - อีเมล -> เหลือตัวแรกของชื่อผู้ใช้ คงโดเมนไว้ (โดเมนใช้ pivot ต่อได้ ไม่ใช่ PII)
-      - เลขยาว 10-19 หลัก (บัญชี/บัตร) -> เหลือ 4 ตัวท้าย
-
+      - เบอร์โทร -> เหลือ 2 ตัวหน้า + 2 ตัวท้าย (เมื่อ mask_phones=True)
+      - เลขยาว 10-19 หลัก (บัญชี/บัตร) -> เหลือ 4 ตัวท้าย (เมื่อ mask_long_digits=True)
     ปิด mask_phones / mask_long_digits ได้เมื่อปกปิดลิงก์ (URL) เพื่อไม่ให้เลข path
-    ที่เป็นรหัสบทความถูกกลบจนคลิกต่อไม่ได้ — แต่บัตรประชาชนกับอีเมลปกปิดเสมอ
+    ที่เป็นรหัสบทความถูกกลบจนคลิกต่อไม่ได้
     """
     if not text:
         return ""
-        
-    try:
-        extracted = {}
-        
-        ids = _RE_THAI_ID.findall(text)
-        if ids:
-            extracted["thai_ids"] = ids
-            
-        cards = _RE_LONG_DIGITS.findall(text)
-        if cards:
-            extracted["credit_cards"] = cards
-    except Exception:
-        pass
 
-    return str(text)
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง คืนข้อความดิบ ไม่ปกปิด ---
+    if not PII_MASKING_ENABLED:
+        return str(text)
+
+    # --- ทางเลือก: โค้ดปกปิด PII จริง เปิดใช้เมื่อ PII_MASKING_ENABLED = True ---
+    out = str(text)
+
+    def _mask_id(m):
+        return "•" * len(re.sub(r"\D", "", m.group(0)))
+    out = _RE_THAI_ID.sub(_mask_id, out)
+
+    def _mask_email(m):
+        local, sep, domain = m.group(0).partition("@")
+        head = local[0] if local else ""
+        return f"{head}***@{domain}" if sep else m.group(0)
+    out = _RE_EMAIL.sub(_mask_email, out)
+
+    if mask_phones:
+        def _mask_phone(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) <= 4:
+                return m.group(0)
+            return digits[:2] + "•" * (len(digits) - 4) + digits[-2:]
+        out = _RE_PHONE.sub(_mask_phone, out)
+
+    if mask_long_digits:
+        def _mask_long(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) <= 4:
+                return m.group(0)
+            return "•" * (len(digits) - 4) + digits[-4:]
+        out = _RE_LONG_DIGITS.sub(_mask_long, out)
+
+    return out
 
 
-# ผู้เรียกเดิม (format_search_report / corroborated_identifiers) ยังใช้ชื่อ mask_pii
-# หลังเปลี่ยนชื่อฟังก์ชันเป็น unmask_pii — คงชื่อ mask_pii ไว้เป็น alias เพื่อไม่ให้
-# /search พังด้วย NameError ตอนจัดรูปผลลัพธ์ (พฤติกรรมเดียวกัน: pass-through)
+# ผู้เรียกเดิม (format_search_report / corroborated_identifiers / app.py) ยังใช้ชื่อ
+# mask_pii — คงชื่อไว้เป็น alias ของ unmask_pii เพื่อไม่ให้พังด้วย NameError
+# (พฤติกรรมตามสวิตช์ PII_MASKING_ENABLED เดียวกัน: ปิด=ผ่านตรง / เปิด=ปกปิด)
 mask_pii = unmask_pii
 
 
