@@ -31,6 +31,7 @@ import scrape
 import osint
 import osint_db
 import osint_es
+import search_es
 import nethealth
 import tor_launcher
 import username_osint
@@ -1299,6 +1300,31 @@ async def cmd_dbsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action="OSINT_DB_SEARCH", detail=f"query={query[:200]} | via={via}",
     )
     await _reply_chunked(update, osint_es.format_search_hits(hits, query, via=via))
+
+
+async def cmd_dbstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สถิติภาพรวมของฐานข้อมูลผล OSINT ที่ยืนยันแล้ว + สุขภาพการค้นหา (Admin)
+
+    วิเคราะห์จากคลังที่มีอยู่แล้ว (osint_db) ไม่ดึงข้อมูลใหม่ — ทำงานได้แม้ไม่มี
+    Elasticsearch (ถ้ามี ES จะแนบสรุป telemetry ประสิทธิภาพการค้นให้ด้วย)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ ดูสถิติฐานข้อมูล OSINT ได้เฉพาะ Admin")
+
+    db = await asyncio.to_thread(osint_db.load_db)
+    summary = osint_es.aggregate_findings(db.get("entries", []))
+    text = osint_es.format_findings_stats(summary, es_on=osint_es.es_available())
+
+    # แนบสุขภาพการค้นหา (telemetry) ถ้าตั้งค่า ES ไว้
+    if osint_es.es_configured():
+        try:
+            health = await asyncio.to_thread(search_es.engine_health, 7)
+            note = search_es.format_engine_health(health)
+            if note:
+                text += "\n\n" + note
+        except Exception:
+            logger.exception("SEARCH ES ENGINE HEALTH ERROR")
+
+    await _reply_chunked(update, text)
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5307,11 +5333,15 @@ _REQUIRED_MODULE_API = {
               "pivot_queries", "build_dossier", "format_search_report",
               "load_site_db", "profile_url_candidates", "build_profile_results",
               "assess_identity_confidence", "expand_queries", "advanced_queries",
-              "categorize_by_origin", "corroborated_identifiers", "ioc_emoji"),
+              "categorize_by_origin", "corroborated_identifiers", "ioc_emoji",
+              "summarize_findings"),
     "osint_db": ("build_finding_record", "save_finding", "format_saved_summary",
                  "load_db"),
     "osint_es": ("es_configured", "es_available", "index_finding", "search",
-                 "local_search", "format_search_hits"),
+                 "local_search", "format_search_hits", "aggregate_findings",
+                 "format_findings_stats"),
+    "search_es": ("record_search", "telemetry_doc", "engine_health",
+                  "format_engine_health"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
@@ -5474,6 +5504,7 @@ def main():
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("dbsearch", cmd_dbsearch))
+    app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

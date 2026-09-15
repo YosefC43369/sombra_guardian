@@ -20,6 +20,8 @@ import os
 import logging
 from typing import Dict, List, Optional
 
+import osint
+
 logger = logging.getLogger("modbot.osint_es")
 
 # ---------------- การตั้งค่า (ผ่าน env) ----------------
@@ -320,4 +322,52 @@ def format_search_hits(hits: List[dict], query_text: str, via: str = "") -> str:
             shown = ", ".join(idents[:6])
             more = f" (+{len(idents) - 6})" if len(idents) > 6 else ""
             lines.append(f"      🔗 ตัวระบุ: {shown}{more}")
+    return "\n".join(lines)
+
+
+# ---------------- สถิติ/วิเคราะห์ฐานข้อมูลผลที่ยืนยันแล้ว ----------------
+
+def aggregate_findings(records: List[dict]) -> dict:
+    """สรุปสถิติภาพรวมของ "ระเบียนผลค้นที่ยืนยันแล้ว" (osint_db)
+
+    ใช้ osint.summarize_findings (บริสุทธิ์ stdlib) เป็นแกน จึงทำงานได้แม้ไม่มี
+    Elasticsearch — ถือเป็นการต่อยอด ES ฝั่งวิเคราะห์: เมื่อมี ES จะ index/ค้นเร็ว
+    ส่วนสถิติรวบยอดคำนวณจากคลังเดียวกันได้ทันทีไม่ว่าจะมี ES หรือไม่
+    """
+    return osint.summarize_findings(records)
+
+
+def format_findings_stats(summary: dict, es_on: bool = False) -> str:
+    """จัดข้อความสถิติฐานข้อมูล OSINT สำหรับ Telegram (/dbstats)"""
+    total = summary.get("total", 0)
+    if not total:
+        return ("📊 ฐานข้อมูล OSINT ยังว่าง — ยังไม่มีระเบียนที่ยืนยันบันทึก\n"
+                "ใช้ /search แล้วกดปุ่มบันทึกเพื่อเริ่มสะสมข้อมูล")
+    lines = [f"📊 สถิติฐานข้อมูล OSINT — {total} ระเบียน"]
+    latest = summary.get("latest_saved_at")
+    if latest:
+        lines.append(f"   🗓️ บันทึกล่าสุด: {latest}")
+
+    by_origin = summary.get("by_origin", {})
+    if by_origin:
+        parts = []
+        for origin, count in sorted(by_origin.items(), key=lambda kv: -kv[1]):
+            meta = osint.origin_meta(origin)
+            parts.append(f"{meta['emoji']} {meta['label']} {count}")
+        lines.append("   📂 แหล่งสะสม: " + "  ".join(parts))
+
+    by_ioc = summary.get("by_ioc_type", {})
+    if by_ioc:
+        lines.append(f"   🔗 ตัวระบุยืนยันข้ามแหล่ง: {summary.get('corroborated_total', 0)} ค่า")
+        for ioc_type, count in by_ioc.items():
+            label = osint.IOC_LABELS.get(ioc_type, ioc_type)
+            lines.append(f"      {osint.ioc_emoji(ioc_type)} {label}: {count}")
+
+    top_hosts = summary.get("top_hosts", [])
+    if top_hosts:
+        lines.append("   🌐 โฮสต์ที่พบบ่อย:")
+        for host, count in top_hosts[:5]:
+            lines.append(f"      • {host} ({count})")
+
+    lines.append("   ⚙️ backend: " + ("Elasticsearch + ไฟล์ JSON" if es_on else "ไฟล์ JSON"))
     return "\n".join(lines)

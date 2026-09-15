@@ -998,6 +998,7 @@ def get_combined_results(query, budget_seconds=None, max_results=None,
     if not tasks:
         return []
 
+    _t0 = time.monotonic()
     merged = []
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         # ทั้งสองฟังก์ชันมีลำดับพารามิเตอร์เหมือนกัน
@@ -1024,7 +1025,25 @@ def get_combined_results(query, budget_seconds=None, max_results=None,
             continue
         seen.add(key)
         unique.append(item)
-    return unique[: (max_results or SEARCH_MAX_RESULTS)]
+    unique = unique[: (max_results or SEARCH_MAX_RESULTS)]
+
+    # บันทึก telemetry (เมทาดาทาล้วน ไม่เก็บเนื้อหา/PII) แบบ best-effort ลง Elasticsearch
+    # เพื่อดูสุขภาพ/ประสิทธิภาพการค้น — ปิดเงียบและไม่บล็อกถ้าไม่ได้ตั้งค่า ES ไว้
+    try:
+        import search_es
+        origin_counts = {}
+        for it in unique:
+            o = it.get("origin") or "?"
+            origin_counts[o] = origin_counts.get(o, 0) + 1
+        search_es.record_search(
+            query, origin_counts=origin_counts, total=len(unique),
+            elapsed_ms=(time.monotonic() - _t0) * 1000.0,
+            engines=[origin for origin, _ in tasks],
+        )
+    except Exception:
+        pass
+
+    return unique
 
 
 async def get_combined_results_async(query, budget_seconds=None, max_results=None,
