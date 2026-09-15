@@ -26,6 +26,11 @@ DICT_DB = {
 LIST_DB = [
     {"iata": "BKK", "icao": "VTBS", "name": "Suvarnabhumi Airport", "city": "Bangkok", "country": "TH"},
 ]
+# สคีมาแบบไฟล์จริงของผู้ใช้: ห่อด้วยคีย์ "airports" เป็น list และใช้ฟิลด์ "code"
+CODE_DB = {"airports": [
+    {"code": "ATL", "name": "Hartsfield-Jackson Atlanta International", "city": "Atlanta", "country": "US"},
+    {"code": "BKK", "name": "Suvarnabhumi Airport", "city": "Bangkok", "country": "TH"},
+]}
 
 def _write(obj):
     d = tempfile.mkdtemp()
@@ -40,6 +45,14 @@ check("load: normalize ฟิลด์ครบ", all(k in recs[0] for k in ("ic
 recs_list = airports.load_airports(_write(LIST_DB))
 check("load: list ของ object -> 1 ระเบียน", len(recs_list) == 1, len(recs_list))
 check("load: ไฟล์ไม่มี -> [] (ไม่ throw)", airports.load_airports("/no/such/airports.json") == [])
+# สคีมาไฟล์จริง: {"airports":[{"code":...}]} — ฟิลด์ code ต้องค้นด้วยรหัสได้
+code_recs = airports.load_airports(_write(CODE_DB))
+check("load: schema {'airports':[{'code'..}]} -> 2 ระเบียน", len(code_recs) == 2, len(code_recs))
+check("load: ฟิลด์ code แมปเป็นรหัสค้นได้",
+      airports.search_airports(code_recs, "ATL") and
+      airports.search_airports(code_recs, "ATL")[0]["name"].startswith("Hartsfield"),
+      code_recs)
+check("load: code -> iata (3 ตัว) ในผลลัพธ์", code_recs[0].get("iata") == "ATL", code_recs[0])
 
 # ---------- 2. extract_query: สกัดข้อความ ----------
 check("extract: IATA 3 ตัว", airports.extract_query("bkk") == {"raw": "bkk", "value": "BKK", "kind": "iata"})

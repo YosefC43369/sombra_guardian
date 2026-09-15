@@ -47,17 +47,24 @@ def _normalize(rec: dict, key: Optional[str] = None) -> Optional[dict]:
             if v not in (None, ""):
                 return v
         return ""
-    icao = str(g("icao", "ICAO", "ident") or (key or "")).strip().upper()
+    icao = str(g("icao", "ICAO", "ident")).strip().upper()
     iata = str(g("iata", "IATA", "iata_code")).strip().upper()
+    # ฟิลด์ "code" แบบทั่วไป (บางไฟล์ใช้ code เดี่ยว ๆ ไม่แยก iata/icao) รวมถึงคีย์ dict
+    code = str(g("code", "Code") or (key or "")).strip().upper()
+    # เดารหัสตามความยาวถ้ายังไม่มี iata/icao ชัดเจน (3 ตัว = IATA, 4 ตัว = ICAO)
+    if not iata and len(code) == 3:
+        iata = code
+    if not icao and len(code) == 4:
+        icao = code
     name = str(g("name", "airport", "Name")).strip()
     city = str(g("city", "municipality", "City")).strip()
     country = str(g("country", "iso_country", "Country")).strip()
     state = str(g("state", "region", "State")).strip()
-    if not (name or iata or icao):
+    if not (name or iata or icao or code):
         return None
     out = {
-        "icao": icao, "iata": iata, "name": name, "city": city,
-        "country": country, "state": state,
+        "icao": icao, "iata": iata, "code": code or iata or icao,
+        "name": name, "city": city, "country": country, "state": state,
         "lat": g("lat", "latitude", "latitude_deg"),
         "lon": g("lon", "lng", "longitude", "longitude_deg"),
         "elevation": g("elevation", "elevation_ft", "alt"),
@@ -141,19 +148,16 @@ def _score(rec: dict, q: dict) -> int:
     value = q["value"]
     low = value.lower()
     kind = q["kind"]
-    icao = (rec.get("icao") or "").lower()
-    iata = (rec.get("iata") or "").lower()
     name = (rec.get("name") or "").lower()
     city = (rec.get("city") or "").lower()
+    # รหัสทั้งหมดของสนามบินนี้ (iata/icao/code) — รองรับไฟล์ที่ใช้ฟิลด์ต่างกัน
+    codes = {c for c in ((rec.get("iata") or "").lower(),
+                         (rec.get("icao") or "").lower(),
+                         (rec.get("code") or "").lower()) if c}
 
-    # รหัสตรงเป๊ะ = คะแนนสูงสุด
-    if kind == "iata" and iata and iata == low:
+    # รหัสตรงเป๊ะ = คะแนนสูงสุด (ไม่ว่าผู้ใช้จะพิมพ์ IATA/ICAO/code)
+    if low and low in codes:
         return 100
-    if kind == "icao" and icao and icao == low:
-        return 100
-    # เผื่อผู้ใช้พิมพ์รหัสแต่ไปตรงอีกระบบ (พิมพ์ IATA 3 ตัวแต่ตรง ICAO บางส่วน ฯลฯ)
-    if low and (low == iata or low == icao):
-        return 95
 
     if kind == "text":
         if name == low or city == low:
@@ -210,6 +214,7 @@ def reindex_es(path: Optional[str] = None) -> int:
         if not client.indices.exists(index=ES_INDEX):
             client.indices.create(index=ES_INDEX, body={"mappings": {"properties": {
                 "icao": {"type": "keyword"}, "iata": {"type": "keyword"},
+                "code": {"type": "keyword"},
                 "name": {"type": "text"}, "city": {"type": "text"},
                 "country": {"type": "keyword"}, "state": {"type": "text"},
             }}})
@@ -244,6 +249,7 @@ def es_search(query: str, limit: int = 5) -> Optional[List[dict]]:
     if q["kind"] in ("iata", "icao"):
         body = {"size": limit, "query": {"bool": {"should": [
             {"term": {"iata": q["value"]}}, {"term": {"icao": q["value"]}},
+            {"term": {"code": q["value"]}},
         ], "minimum_should_match": 1}}}
     else:
         body = {"size": limit, "query": {"multi_match": {
@@ -264,7 +270,11 @@ def format_airport(rec: dict) -> str:
     """จัดรายละเอียดสนามบิน 1 แห่งเป็นข้อความ (ชื่อ/เมือง/ประเทศ + รหัส/พิกัด)"""
     def line(emoji, label, value):
         return f"{emoji} {label}: {value}" if value not in (None, "") else None
-    codes = " / ".join(c for c in [rec.get("iata"), rec.get("icao")] if c)
+    _seen = []
+    for c in (rec.get("iata"), rec.get("icao"), rec.get("code")):
+        if c and c not in _seen:
+            _seen.append(c)
+    codes = " / ".join(_seen)
     parts = [
         line("🛫", "ชื่อ", rec.get("name")),
         line("🏙️", "เมือง", rec.get("city")),
@@ -290,7 +300,11 @@ def format_results(hits: List[dict], query: str, via: str = "") -> str:
         return "🔍 ผลการค้นสนามบิน" + backend + "\n\n" + format_airport(hits[0])
     lines = [f"🔍 พบ {len(hits)} สนามบินที่ตรงกับ “{query}”{backend}", ""]
     for i, rec in enumerate(hits, start=1):
-        codes = " / ".join(c for c in [rec.get("iata"), rec.get("icao")] if c)
+        _seen = []
+        for c in (rec.get("iata"), rec.get("icao"), rec.get("code")):
+            if c and c not in _seen:
+                _seen.append(c)
+        codes = " / ".join(_seen)
         loc = ", ".join(x for x in [rec.get("city"), rec.get("country")] if x)
         lines.append(f"{i}. 🛫 {rec.get('name') or '-'}"
                      + (f" [{codes}]" if codes else "")
