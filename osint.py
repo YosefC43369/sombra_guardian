@@ -1816,10 +1816,13 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
     # ยืนยันข้ามแหล่ง: ตัวระบุที่โผล่ในหลายแหล่งอิสระ = สัญญาณว่า "น่าจะเป็นของ
     # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว จัดหมวดหมู่ตามชนิด IOC
     # (อิโมจิ + ชื่อหมวด) เพื่อให้กวาดตาอ่านได้เร็วกว่ารายการปนกันยาวๆ
+    # ข้อความกำกับสถานะการปกปิด PII ให้ตรงกับสวิตช์จริง (PII_MASKING_ENABLED)
+    # ปิดอยู่ = แสดงค่าดิบ จึงต้องไม่ไปเขียนว่า "ปกปิดแล้ว" ให้เข้าใจผิด
+    _pii_note = "ปกปิด PII แล้ว" if PII_MASKING_ENABLED else "แสดง PII ดิบ — ไม่ได้ปกปิด"
     corroborated = corroborated_identifiers(display, min_sources=IDENTITY_MIN_SOURCES)
     if corroborated:
         lines.append("")
-        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ (ปกปิด PII แล้ว)")
+        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ ({_pii_note})")
         grouped: Dict[str, List[dict]] = {}
         for item in corroborated:
             grouped.setdefault(item["type"], []).append(item)
@@ -1833,7 +1836,9 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
                     f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
                 )
 
+    _pii_display = ("PII ถูกปกปิดในการแสดงผล" if PII_MASKING_ENABLED
+                    else "แสดง PII ดิบ ไม่ได้ปกปิดในการแสดงผล")
     lines.append("")
-    lines.append("ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
+    lines.append(f"ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ ({_pii_display})")
     lines.append("👉 ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
     return "\n".join(lines)
