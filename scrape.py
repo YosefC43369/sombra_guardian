@@ -507,3 +507,184 @@ def format_scrape_results(results, limit=None, header="📄 เนื้อห�
     for index, (url, text) in enumerate(items, start=1):
         lines.append(f"{index}. {url}\n{text}")
     return "\n\n".join(lines)
+
+
+# ---------------- ดึง "เนื้อหา + ไฟล์" ในหน้าเว็บ (สำหรับ /search) ----------------
+# ต่างจาก _extract_text/scrape_single เดิม: อันนี้เก็บ "เนื้อความจริง" (ย่อหน้า/บทความ)
+# โดย "ไม่เอาข้อความที่เป็นลิงก์" (ตัด <a>, nav, header/footer ออก) และแยกรายการ
+# "ไฟล์ในหน้า" (เอกสาร/รูป/สื่อ) ออกมาให้ชัด — เป็นฟังก์ชันใหม่ล้วน ไม่แก้ของเดิม
+
+# นามสกุลไฟล์ที่ถือว่าเป็น "ไฟล์ในเว็บ" (เอกสาร/บีบอัด/รูป/สื่อ/ข้อมูล)
+_FILE_EXT_RE = re.compile(
+    r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|rtf|odt|ods|odp|zip|rar|7z|tar|gz|tgz|"
+    r"jpe?g|png|gif|webp|bmp|svg|tiff?|mp3|m4a|wav|flac|ogg|mp4|m4v|avi|mov|mkv|webm|"
+    r"json|xml|sql|db|sqlite|apk|exe|msi|dmg|iso|epub|mobi)(?:[?#].*)?$",
+    re.I,
+)
+_NONCONTENT_TAGS = ("script", "style", "noscript", "template", "nav", "header",
+                    "footer", "aside", "form", "button", "svg", "iframe")
+
+
+def extract_content_and_files(html_text, base_url=""):
+    """แยก (เนื้อความจริง, [ไฟล์ในหน้า]) จาก HTML
+
+    - เนื้อความ: เอาจากย่อหน้า/บทความ ตัด nav/header/footer/aside/form และ "ตัดข้อความ
+      ที่เป็นลิงก์" (<a>) ออกก่อน เพื่อไม่ให้เมนู/ลิงก์ปน — เหลือแต่เนื้อหาที่คนอ่านจริง
+    - ไฟล์: ลิงก์/แหล่งสื่อที่ลงท้ายด้วยนามสกุลไฟล์ (pdf/doc/xls/zip/รูป/วิดีโอ ฯลฯ)
+    เป็นฟังก์ชันบริสุทธิ์ (ไม่ยิงเครือข่าย) ทดสอบง่าย
+    """
+    try:
+        soup = BeautifulSoup(html_text or "", "html.parser")
+    except Exception:
+        return "", []
+    for tag in soup(list(_NONCONTENT_TAGS)):
+        tag.extract()
+
+    files, seen = [], set()
+
+    def _add_file(raw):
+        raw = (raw or "").strip()
+        if not raw:
+            return
+        full = urljoin(base_url, raw) if base_url else raw
+        if _FILE_EXT_RE.search(full.split("#")[0]):
+            key = full.lower()
+            if key not in seen:
+                seen.add(key)
+                files.append(full)
+
+    for a in soup.find_all("a", href=True):
+        _add_file(a["href"])
+    for tag, attr in (("img", "src"), ("source", "src"), ("video", "src"),
+                      ("audio", "src"), ("embed", "src"), ("object", "data")):
+        for el in soup.find_all(tag):
+            _add_file(el.get(attr))
+
+    # ตัด "ข้อความที่เป็นลิงก์" ออก ตามที่ผู้ใช้ต้องการ (เอาเฉพาะเนื้อหา ไม่เอา anchor)
+    for a in soup.find_all("a"):
+        a.extract()
+
+    # ดึงจากแท็กเนื้อหา "ระดับใบ" เท่านั้น (ไม่รวม article/main/div ที่เป็น container
+    # ครอบ p อยู่แล้ว) เพื่อไม่ให้ได้ข้อความซ้ำซ้อน
+    parts = []
+    for el in soup.find_all(["p", "h1", "h2", "h3", "h4", "li",
+                             "blockquote", "td", "figcaption", "pre"]):
+        chunk = " ".join(el.get_text(separator=" ").split())
+        if len(chunk) >= 2:
+            parts.append(chunk)
+    text = " ".join(parts)
+    if not text:  # เผื่อหน้าไม่ใช้แท็กเนื้อหามาตรฐาน — ถอยไปเอา text ทั้งก้อน (ตัด <a> แล้ว)
+        text = " ".join(soup.get_text(separator=" ").split())
+    return text[:MAX_EXTRACTED_TEXT_CHARS], files[:50]
+
+
+def fetch_content_and_files(url_data, deadline=None):
+    """ดึงหน้าเว็บแล้วคืน {url, title, text, files} — clearnet ที่กันบอทใช้ reader proxy,
+    .onion ใช้ Tor/gateway (reuse ตัวช่วยเดิมทั้งหมด ไม่แก้ของเดิม)"""
+    url, title = _normalize_url_data(url_data)
+    result = {"url": url, "title": title, "text": "", "files": []}
+    if not url:
+        return result
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return result
+
+    is_onion = (parsed.hostname or "").lower().endswith(".onion")
+    if is_onion:
+        candidates = []
+        if _tor_enabled():
+            candidates.append((url, True, "tor"))
+        candidates.extend((_onion_to_gateway(url, s), False, s) for s in TOR_GATEWAY_SUFFIXES)
+        candidates = [c for c in candidates if not nethealth.blocked(f"route:{c[2]}")]
+    else:
+        candidates = [(url, False, "direct")]
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+    }
+    html_text = ""
+    for cand, use_tor, route in candidates:
+        timeout = _timeout_for(deadline, is_onion)
+        if timeout is None:
+            break
+        response = None
+        try:
+            response = _get_session(use_tor=use_tor).get(
+                cand, headers=headers, timeout=timeout, stream=True)
+            if response.status_code != 200:
+                if is_onion and (response.status_code >= 500 or response.status_code == 429):
+                    nethealth.record(f"route:{route}", False, nethealth.ROUTE_FAILURE_THRESHOLD)
+                continue
+            if is_onion:
+                nethealth.record(f"route:{route}", True, nethealth.ROUTE_FAILURE_THRESHOLD)
+            ctype = (response.headers.get("Content-Type") or "").lower()
+            if ctype and not any(t in ctype for t in ALLOWED_CONTENT_TYPES):
+                # ตัว URL เองเป็นไฟล์ (ไม่ใช่หน้า HTML)
+                result["files"] = [url]
+                return result
+            raw = b""
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                raw += chunk
+                if len(raw) > MAX_DOWNLOAD_BYTES:
+                    break
+            html_text = raw.decode(response.encoding or "utf-8", errors="replace")
+            break
+        except Exception as exc:
+            if is_onion:
+                nethealth.record(f"route:{route}", False, nethealth.ROUTE_FAILURE_THRESHOLD)
+            _logger.debug("FETCH CONTENT attempt failed url=%s route=%s: %s", url, route, exc)
+            continue
+        finally:
+            if response is not None:
+                response.close()
+
+    if html_text:
+        text, files = extract_content_and_files(html_text, url)
+        # clearnet ที่ได้หน้า challenge -> ลอง reader proxy แทน
+        if not is_onion and _looks_blocked(text):
+            rt = _fetch_via_reader(url, deadline=deadline)
+            if rt:
+                text = rt[:MAX_EXTRACTED_TEXT_CHARS]
+        result["text"], result["files"] = text, files
+        return result
+
+    # ดึง HTML ตรงไม่ได้ (clearnet กันบอท) -> reader proxy
+    if not is_onion:
+        rt = _fetch_via_reader(url, deadline=deadline)
+        if rt:
+            result["text"] = rt[:MAX_EXTRACTED_TEXT_CHARS]
+    return result
+
+
+def fetch_content_and_files_multi(urls_data, max_workers=4, budget_seconds=None, max_urls=None):
+    """ดึงเนื้อหา+ไฟล์หลาย URL พร้อมกันแบบมีเพดานเวลา — คืน list ของ dict"""
+    items = list(urls_data or [])[: (max_urls or SCRAPE_MAX_URLS)]
+    if not items:
+        return []
+    budget = float(budget_seconds) if budget_seconds else SCRAPE_TOTAL_BUDGET_SECONDS
+    deadline = time.monotonic() + budget
+    workers = max(1, min(int(max_workers), len(items)))
+    out = []
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {executor.submit(fetch_content_and_files, u, deadline): u for u in items}
+        try:
+            for future in as_completed(futures, timeout=budget):
+                try:
+                    out.append(future.result())
+                except Exception:
+                    continue
+        except FuturesTimeout:
+            _logger.warning("FETCH CONTENT BUDGET TIMEOUT | got=%d/%d", len(out), len(items))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return out
+
+
+async def fetch_content_and_files_multi_async(urls_data, max_workers=4,
+                                              budget_seconds=None, max_urls=None):
+    return await asyncio.to_thread(
+        fetch_content_and_files_multi, urls_data, max_workers, budget_seconds, max_urls)

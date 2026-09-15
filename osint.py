@@ -171,6 +171,33 @@ IOC_LABELS = {
 IOC_ORDER = ("email", "profile", "phone", "handle", "domain",
              "onion", "ipv4", "btc", "eth", "hash", "cve")
 
+# อิโมจิประจำแต่ละหมวด IOC — ใช้จัดหมวดหมู่ผลลัพธ์ให้ "อ่านง่าย" ตอนแสดงผล
+# (คู่กับ IOC_LABELS: อิโมจิ + ข้อความหมวดหมู่ภาษาไทย) รวมถึงใช้ในบันทึกฐานข้อมูล
+IOC_EMOJI = {
+    "email": "✉️", "domain": "🌐", "onion": "🧅", "ipv4": "📡",
+    "btc": "₿", "eth": "Ξ", "hash": "#️⃣", "cve": "🐞",
+    "handle": "🏷️", "phone": "📱", "profile": "👤",
+}
+
+# หมวดหมู่ "ฝั่งที่มาของแหล่ง" (origin) — อิโมจิ + ชื่อหมวดหมู่ + ลำดับการแสดง
+# ใช้แบ่งบล็อกผลลัพธ์ของ /search ให้เป็นกลุ่มชัดเจนแทนการไล่รายการปนกันยาวๆ
+ORIGIN_META = {
+    "clearnet": {"emoji": "🌐", "label": "เว็บเปิด (Clearnet)", "order": 0},
+    "darkweb": {"emoji": "🕸️", "label": "Dark Web (.onion)", "order": 1},
+    "username": {"emoji": "👤", "label": "บัญชีข้ามเว็บ (Username)", "order": 2},
+}
+_ORIGIN_FALLBACK = {"emoji": "🔎", "label": "อื่น ๆ", "order": 9}
+
+
+def origin_meta(origin: str) -> dict:
+    """คืน metadata (อิโมจิ/ชื่อหมวด/ลำดับ) ของฝั่งที่มา — ปลอดภัยเมื่อ origin แปลก"""
+    return ORIGIN_META.get((origin or "").strip().lower(), _ORIGIN_FALLBACK)
+
+
+def ioc_emoji(ioc_type: str) -> str:
+    """อิโมจิของหมวด IOC (คืน 🔹 เมื่อไม่รู้จักชนิด)"""
+    return IOC_EMOJI.get((ioc_type or "").strip().lower(), "🔹")
+
 # ตัวระบุที่ "ผูกกับคนคนเดียว" ได้จริง ใช้เชื่อมโยงตัวตนข้ามเว็บ
 # เจตนาไม่ใส่ "ชื่อบุคคล": ชื่อซ้ำกันได้ทั่วไป ใช้เชื่อมตัวตนจะได้คนผิด
 IDENTITY_TYPES = ("email", "profile", "phone", "handle")
@@ -611,6 +638,49 @@ def plan_queries(question: str, selectors: Optional[Selectors] = None,
         push(fallback or question)
 
     return queries[: max(1, int(max_queries))]
+
+
+def advanced_queries(question: str, selectors: Optional["Selectors"] = None,
+                     existing=None, max_extra: int = 8) -> List[str]:
+    """สร้าง query "ขั้นสูง/ซับซ้อน" เพิ่มเติมเพื่อความแม่นและกว้างขึ้น — ฟังก์ชันใหม่
+    ไม่แก้ plan_queries เดิม ผู้เรียกเอาไป "ต่อท้าย" ชุด query ปกติ
+
+    เทคนิคที่ใช้: วลีชื่อแบบ exact (เครื่องหมายคำพูด), ชื่อ×คีย์เวิร์ด, คีย์เวิร์ดคู่,
+    และ dork ที่ช่วยความแม่น (site: โซเชียล, filetype: เอกสาร) — ตัด query ที่มีอยู่แล้ว
+    """
+    sel = selectors if selectors is not None else extract_selectors(question)
+    have = {str(q).strip().lower() for q in (existing or [])}
+    out: List[str] = []
+
+    def _push(v: str):
+        v = " ".join(str(v or "").split())[:MAX_QUERY_CHARS]
+        if v and v.lower() not in have and v.lower() not in {o.lower() for o in out}:
+            out.append(v)
+
+    names = list(sel.names)
+    keywords = list(sel.keywords)
+
+    for name in names:
+        _push(f'"{name}"')
+        for kw in keywords[:4]:
+            _push(f'"{name}" {kw}')          # ชื่อ×คีย์เวิร์ด (คัดคนชื่อซ้ำ)
+        # dork: จำกัดเฉพาะโซเชียล/เอกสาร เพื่อความแม่น (เอนจินที่รองรับจะได้ผลตรงขึ้น)
+        _push(f'"{name}" (site:facebook.com OR site:linkedin.com OR '
+              f'site:instagram.com OR site:tiktok.com)')
+        _push(f'"{name}" (filetype:pdf OR filetype:doc OR filetype:xls)')
+
+    # คีย์เวิร์ดจับคู่กันเอง (บริบทซ้อน = แม่นขึ้น)
+    for i in range(len(keywords)):
+        for j in range(i + 1, len(keywords)):
+            _push(f"{keywords[i]} {keywords[j]}")
+
+    # ตัวระบุแข็งที่ผูกกับคนเดียว (ถ้ามี) — เพิ่มความแม่นสูงสุด
+    for email in sel.emails:
+        _push(f'"{email}"')
+    for handle in sel.handles:
+        _push(f'"{handle}"')
+
+    return out[: max(1, int(max_extra))]
 
 
 # ---------------- 1b. Site database (resource/data.json) ----------------
@@ -1109,78 +1179,154 @@ def pivot_queries(identity: IdentityProfile, selectors: Optional[Selectors] = No
     return queries[:max_queries]
 
 
+# ============================================================================
+# [DEFANG] สวิตช์เปิด/ปิด "การ defang IOC" (ทำให้ลิงก์/อีเมลคลิกไม่ได้ในรายงาน)
+# ----------------------------------------------------------------------------
+# ตามคำสั่งผู้ใช้: ปิด defang ฟังก์ชัน defang() จึงทำงานแบบ "ผ่านตรง" — คืนค่า IOC
+# ดิบตามเดิม (ลิงก์คลิกได้/อีเมลไม่ถูกแปลง)
+#
+#   >>> วิธีเปิด/ปิด <<<
+#   ปิด (ค่าเริ่มต้น) : DEFANG_ENABLED = False
+#   เปิด defang กลับ  : DEFANG_ENABLED = True  หรือ env OSINT_DEFANG=1
+#
+# โค้ด defang จริงถูกเก็บไว้เป็น "ทางเลือก" ในสาขา if DEFANG_ENABLED: ด้านล่าง
+# ขอบเขต: แก้เฉพาะฟังก์ชัน defang() เท่านั้น ไม่แตะผู้เรียก (build_dossier ฯลฯ)
+# ============================================================================
+
+# ปิด defang เป็นค่าเริ่มต้น (ตั้ง env OSINT_DEFANG=1/true/yes/on เพื่อเปิด)
+DEFANG_ENABLED = os.getenv("OSINT_DEFANG", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
+
 def defang(value: str) -> str:
-    """ทำให้ IOC ไม่คลิกได้/ไม่ถูก auto-link — มาตรฐานของรายงาน CTI
-    เพื่อไม่ให้ผู้อ่านเผลอกดเข้าไปที่โฮสต์อันตราย"""
+    """[ปิดใช้งาน defang] คืนค่า IOC ดิบตามเดิม (ลิงก์คลิกได้)
+
+    เดิม defang ทำให้ IOC ไม่คลิกได้/ไม่ถูก auto-link (มาตรฐานรายงาน CTI เพื่อกัน
+    ผู้อ่านเผลอกดเข้าโฮสต์อันตราย) ตอนนี้ปิดตามคำสั่งผู้ใช้ — ตั้ง DEFANG_ENABLED = True
+    เพื่อเปิดกลับ (โค้ด defang จริงเป็น "ทางเลือก" อยู่ในสาขา if ด้านล่าง)
+    """
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง คืนค่าดิบ ---
+    if not DEFANG_ENABLED:
+        return str(value)
+
+    # --- ทางเลือก: โค้ด defang จริง เปิดใช้เมื่อ DEFANG_ENABLED = True ---
     out = str(value)
     out = re.sub(r"^https?://", lambda m: m.group(0).replace("http", "hxxp"), out, flags=re.I)
     out = out.replace("@", "[at]")
     return out.replace(".", "[.]")
 
 
-# [PII-MASKING] ฟังก์ชันปกปิดข้อมูลส่วนบุคคล (PII) — ปกปิด อีเมล/เบอร์โทร/เลขบัตรประชาชน/
-# เลขยาว ก่อน "แสดงผล" ต่อผู้ใช้ (เหลือเค้าโครงพอยืนยันได้ แต่ไม่เปิดเผยค่าเต็ม)
+# ============================================================================
+# [PII-MASKING] สวิตช์เปิด/ปิด "การปกปิดข้อมูลส่วนบุคคล (PII)"
+# ----------------------------------------------------------------------------
+# ตามคำสั่งผู้ใช้: ปิดการปกปิด PII/masking ทั้งหมด ฟังก์ชันในบล็อกนี้จึงทำงานแบบ
+# "ผ่านตรง (pass-through)" — คืนข้อความดิบตามเดิมโดยไม่ปกปิดอะไร
+#
+#   >>> วิธีเปิด/ปิด <<<
+#   ปิด (ค่าเริ่มต้น) : PII_MASKING_ENABLED = False
+#   เปิดการปกปิดกลับ  : PII_MASKING_ENABLED = True  หรือ env OSINT_PII_MASKING=1
+#
+# โค้ดปกปิด PII จริงถูกเก็บไว้เป็น "ทางเลือก" ในสาขา `if PII_MASKING_ENABLED:` ของ
+# แต่ละฟังก์ชัน พร้อมใช้งานทันทีเมื่อเปิดสวิตช์ (ไม่ต้องเขียนใหม่)
+#
+# ขอบเขต: แก้เฉพาะฟังก์ชัน masking (process_bot_response / unmask_pii และ alias
+# mask_pii) เท่านั้น — ไม่แตะผู้เรียก (format_search_report ฯลฯ) ผู้เรียกยังเรียกชื่อ
+# เดิมได้ แต่จะได้ข้อความดิบกลับไปเมื่อสวิตช์ปิด
+# ============================================================================
+
+# ปิดการปกปิด PII เป็นค่าเริ่มต้น (ตั้ง env OSINT_PII_MASKING=1/true/yes/on เพื่อเปิด)
+PII_MASKING_ENABLED = os.getenv("OSINT_PII_MASKING", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
 
 def process_bot_response(raw_text: str, user_id: int) -> str:
+    """[ปิดใช้งาน PII masking] คืนข้อความดิบตามเดิม
+
+    เมื่อ PII_MASKING_ENABLED = True จะกลับไปสรุปรายการ PII ที่พบ (โค้ดทางเลือกด้านล่าง)
+    """
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง ไม่ปกปิด ---
+    if not PII_MASKING_ENABLED:
+        return raw_text
+
+    # --- ทางเลือก: เปิดใช้เมื่อ PII_MASKING_ENABLED = True (สรุปรายการ PII ที่พบ) ---
     found_ids = _RE_THAI_ID.findall(raw_text)
     found_phones = _RE_PHONE.findall(raw_text)
     found_emails = _RE_EMAIL.findall(raw_text)
     found_cards = _RE_LONG_DIGITS.findall(raw_text)
-    
+
     has_pii = any([found_ids, found_phones, found_emails, found_cards])
-    if has_pii:
-        output_lines = ["❗️**พบข้อมูล PII ดิบในผลการค้นหา:**\n"]
-        
-        if found_ids:
-            output_lines.append(f"🆔 **เลขบัตรประชาชน:**\n" + "\n".join(f"- `{i}`" for i in found_ids))
-        if found_phones:
-            output_lines.append(f"📱 **เบอร์โทรศัพท์:**\n" + "\n".join(f"- `{p}`" for p in found_phones))
-        if found_emails:
-            output_lines.append(f"✉️ **อีเมล:**\n" + "\n".join(f"- `{e}`" for e in found_emails))
-        if found_cards:
-            output_lines.append(f"💳 **เลขบัญชี/บัตร:**\n" + "\n".join(f"- `{c}`" for c in found_cards))
-        
-        return "\n\n".join(output_lines)
-        
-    return unmask_pii
+    if not has_pii:
+        return raw_text
+
+    output_lines = ["❗️**พบข้อมูล PII ดิบในผลการค้นหา:**\n"]
+    if found_ids:
+        output_lines.append("🆔 **เลขบัตรประชาชน:**\n" + "\n".join(f"- `{i}`" for i in found_ids))
+    if found_phones:
+        output_lines.append("📱 **เบอร์โทรศัพท์:**\n" + "\n".join(f"- `{p}`" for p in found_phones))
+    if found_emails:
+        output_lines.append("✉️ **อีเมล:**\n" + "\n".join(f"- `{e}`" for e in found_emails))
+    if found_cards:
+        output_lines.append("💳 **เลขบัญชี/บัตร:**\n" + "\n".join(f"- `{c}`" for c in found_cards))
+    return "\n\n".join(output_lines)
+
 
 def unmask_pii(text: str, mask_phones: bool = False, mask_long_digits: bool = False) -> str:
-    """ปกปิด PII ในข้อความที่จะ "แสดงต่อผู้ใช้" (คำโปรย/ชื่อเรื่อง/ลิงก์จากผลค้นหา)
+    """[ปิดใช้งาน PII masking] คืนข้อความดิบตามเดิม (ไม่ปกปิด)
 
-    /search แสดงผลดิบจาก search engine ตรงๆ คำโปรยเหล่านั้นอาจมีเบอร์โทร อีเมล
-    หรือเลขบัตรประชาชนติดมา เครื่องมือ OSINT เชิงตั้งรับต้องไม่กลายเป็นท่อส่ง PII
-    ดิบ จึงปกปิดก่อนแสดงเสมอ โดยเหลือเค้าโครงพอให้นักวิเคราะห์ยืนยันได้ว่า
-    "ตรงกับที่ค้น" โดยไม่เปิดเผยค่าเต็ม:
-      - เลขบัตรประชาชน 13 หลัก -> ปกปิดทั้งหมด (ไม่มีเหตุผลเชิงตั้งรับให้โชว์)
-      - เบอร์โทร -> เหลือ 2 ตัวหน้า + 2 ตัวท้าย
+    เดิมฟังก์ชันนี้ปกปิด อีเมล/เบอร์โทร/เลขบัตรประชาชน/เลขยาว ก่อน "แสดงต่อผู้ใช้"
+    ตอนนี้ปิดตามคำสั่งผู้ใช้ — ตั้ง PII_MASKING_ENABLED = True เพื่อเปิดการปกปิดกลับ
+    (โค้ดปกปิดจริงเป็น "ทางเลือก" อยู่ในสาขา if ด้านล่าง)
+
+    เมื่อเปิด จะปกปิดตามนี้:
+      - เลขบัตรประชาชน 13 หลัก -> ปกปิดทั้งหมด
       - อีเมล -> เหลือตัวแรกของชื่อผู้ใช้ คงโดเมนไว้ (โดเมนใช้ pivot ต่อได้ ไม่ใช่ PII)
-      - เลขยาว 10-19 หลัก (บัญชี/บัตร) -> เหลือ 4 ตัวท้าย
-
+      - เบอร์โทร -> เหลือ 2 ตัวหน้า + 2 ตัวท้าย (เมื่อ mask_phones=True)
+      - เลขยาว 10-19 หลัก (บัญชี/บัตร) -> เหลือ 4 ตัวท้าย (เมื่อ mask_long_digits=True)
     ปิด mask_phones / mask_long_digits ได้เมื่อปกปิดลิงก์ (URL) เพื่อไม่ให้เลข path
-    ที่เป็นรหัสบทความถูกกลบจนคลิกต่อไม่ได้ — แต่บัตรประชาชนกับอีเมลปกปิดเสมอ
+    ที่เป็นรหัสบทความถูกกลบจนคลิกต่อไม่ได้
     """
     if not text:
         return ""
-        
-    try:
-        extracted = {}
-        
-        ids = _RE_THAI_ID.findall(text)
-        if ids:
-            extracted["thai_ids"] = ids
-            
-        cards = _RE_LONG_DIGITS.findall(text)
-        if cards:
-            extracted["credit_cards"] = cards
-    except Exception:
-        pass
 
-    return str(text)
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง คืนข้อความดิบ ไม่ปกปิด ---
+    if not PII_MASKING_ENABLED:
+        return str(text)
+
+    # --- ทางเลือก: โค้ดปกปิด PII จริง เปิดใช้เมื่อ PII_MASKING_ENABLED = True ---
+    out = str(text)
+
+    def _mask_id(m):
+        return "•" * len(re.sub(r"\D", "", m.group(0)))
+    out = _RE_THAI_ID.sub(_mask_id, out)
+
+    def _mask_email(m):
+        local, sep, domain = m.group(0).partition("@")
+        head = local[0] if local else ""
+        return f"{head}***@{domain}" if sep else m.group(0)
+    out = _RE_EMAIL.sub(_mask_email, out)
+
+    if mask_phones:
+        def _mask_phone(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) <= 4:
+                return m.group(0)
+            return digits[:2] + "•" * (len(digits) - 4) + digits[-2:]
+        out = _RE_PHONE.sub(_mask_phone, out)
+
+    if mask_long_digits:
+        def _mask_long(m):
+            digits = re.sub(r"\D", "", m.group(0))
+            if len(digits) <= 4:
+                return m.group(0)
+            return "•" * (len(digits) - 4) + digits[-4:]
+        out = _RE_LONG_DIGITS.sub(_mask_long, out)
+
+    return out
 
 
-# ผู้เรียกเดิม (format_search_report / corroborated_identifiers) ยังใช้ชื่อ mask_pii
-# หลังเปลี่ยนชื่อฟังก์ชันเป็น unmask_pii — คงชื่อ mask_pii ไว้เป็น alias เพื่อไม่ให้
-# /search พังด้วย NameError ตอนจัดรูปผลลัพธ์ (พฤติกรรมเดียวกัน: pass-through)
+# ผู้เรียกเดิม (format_search_report / corroborated_identifiers / app.py) ยังใช้ชื่อ
+# mask_pii — คงชื่อไว้เป็น alias ของ unmask_pii เพื่อไม่ให้พังด้วย NameError
+# (พฤติกรรมตามสวิตช์ PII_MASKING_ENABLED เดียวกัน: ปิด=ผ่านตรง / เปิด=ปกปิด)
 mask_pii = unmask_pii
 
 
@@ -1568,6 +1714,29 @@ def expand_queries(seen_queries, ranked: List[dict], selectors: Optional[Selecto
     return out[: max(1, int(max_new))]
 
 
+def categorize_by_origin(display_records: List[dict]) -> List[dict]:
+    """จัดกลุ่มผลลัพธ์ตาม "ฝั่งที่มา" (clearnet/darkweb/username) เพื่อแสดงเป็น
+    บล็อกหมวดหมู่ที่อ่านง่าย โดยคง "เลขอ้างอิง Sxx" เดิมของแต่ละแหล่งไว้ (นับตาม
+    ลำดับที่ส่งเข้ามา) ให้ตรงกับส่วน "ยืนยันข้ามแหล่ง" ที่อ้าง Sxx เหมือนกัน
+
+    คืน list ของ dict: {origin, emoji, label, order, items:[{ref, index, record}]}
+    เรียงตามลำดับหมวด (clearnet -> darkweb -> username -> อื่น ๆ)
+    ใช้ร่วมกันทั้งการแสดงผล /search และการบันทึกลงฐานข้อมูล (osint_db)
+    """
+    buckets: Dict[str, dict] = {}
+    for position, record in enumerate(display_records or [], start=1):
+        origin = (record.get("origin") or "").strip().lower() or "-"
+        meta = origin_meta(origin)
+        bucket = buckets.setdefault(origin, {
+            "origin": origin, "emoji": meta["emoji"],
+            "label": meta["label"], "order": meta["order"], "items": [],
+        })
+        bucket["items"].append({
+            "ref": f"S{position}", "index": position, "record": record,
+        })
+    return sorted(buckets.values(), key=lambda g: (g["order"], g["origin"]))
+
+
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
                          ranked: List[dict], limit: int = 20,
                          health_note: str = "") -> str:
@@ -1600,53 +1769,71 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
     clearnet = sum(1 for r in ranked if r.get("origin") == "clearnet")
     darkweb = sum(1 for r in ranked if r.get("origin") == "darkweb")
     username = sum(1 for r in ranked if r.get("origin") == "username")
-    parts = [f"เว็บเปิด {clearnet}", f"dark web {darkweb}"]
+    parts = [
+        f"{ORIGIN_META['clearnet']['emoji']} เว็บเปิด {clearnet}",
+        f"{ORIGIN_META['darkweb']['emoji']} dark web {darkweb}",
+    ]
     if username:
-        parts.append(f"บัญชีข้ามเว็บ {username}")
+        parts.append(f"{ORIGIN_META['username']['emoji']} บัญชีข้ามเว็บ {username}")
     lines.append(
-        f"พบ {len(ranked)} แหล่ง ({' | '.join(parts)}) "
+        f"📊 พบ {len(ranked)} แหล่ง ({'  '.join(parts)}) "
         f"— แสดง {min(len(ranked), limit)} อันดับแรกตามความเกี่ยวข้อง"
     )
     if low_relevance_only:
         lines.append("⚠️ ผลด้านล่างความเกี่ยวข้องต่ำ (ไม่พบคำค้นในชื่อ/คำโปรย) "
                      "อาจไม่ตรงเป้า — ลองใส่ชื่อ-นามสกุลให้ครบ หรือรอ engine อื่นกลับมา")
-    lines.append("")
+
     display = ranked[:limit]
-    for position, record in enumerate(display, start=1):
-        marker = " *" if record.get("relevance", 0) > 0 else ""
-        origin = record.get("origin") or "-"
-        engine = record.get("engine") or "-"
-        # ปกปิด PII ในทุกอย่างที่แสดงต่อผู้ใช้ — ชื่อเรื่อง/คำโปรยมาจากหน้าเว็บดิบ
-        # จึงอาจมีเบอร์/อีเมล/เลขบัตรติดมา ส่วนลิงก์ปกปิดเฉพาะบัตรประชาชนกับอีเมล
-        # (ไม่กลบเลข path อื่น เพื่อให้ยังคลิกต่อได้)
-        title = mask_pii(str(record.get("title", "Untitled")))[:120]
-        link = mask_pii(str(record.get("link", "")), mask_phones=False,
-                        mask_long_digits=False)
-        lines.append(f"[S{position}]{marker} {title}")
-        lines.append(f"      {link}")
-        # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
-        snippet = mask_pii(str(record.get("snippet") or "").strip())
-        if snippet:
-            lines.append(f"      คำโปรย: {snippet[:200]}")
-        lines.append(
-            f"      ฝั่ง={origin} | engine={engine} | "
-            f"relevance={record.get('relevance', 0)} | พบซ้ำ {record.get('engines', 1)} ครั้ง"
-        )
+    # จัดกลุ่มผลลัพธ์เป็น "หมวดหมู่ตามฝั่งที่มา" พร้อมหัวข้ออิโมจิ แทนการไล่ยาวๆ
+    # ปนกัน (เดิมอ่านยากมาก) — คงเลข Sxx ของแต่ละแหล่งไว้ตามลำดับความเกี่ยวข้อง
+    for group in categorize_by_origin(display):
+        lines.append("")
+        lines.append(f"{group['emoji']} {group['label']} — {len(group['items'])} แหล่ง")
+        lines.append("──────────")
+        for item in group["items"]:
+            record = item["record"]
+            ref = item["ref"]
+            # ⭐ = ตรงเป้า (relevance>0), 🔸 = ความเกี่ยวข้องต่ำ/ตัดสินไม่ได้
+            marker = "⭐" if record.get("relevance", 0) > 0 else "🔸"
+            engine = record.get("engine") or "-"
+            # ปกปิด PII ในทุกอย่างที่แสดงต่อผู้ใช้ — ชื่อเรื่อง/คำโปรยมาจากหน้าเว็บดิบ
+            # จึงอาจมีเบอร์/อีเมล/เลขบัตรติดมา ส่วนลิงก์ปกปิดเฉพาะบัตรประชาชนกับอีเมล
+            # (ไม่กลบเลข path อื่น เพื่อให้ยังคลิกต่อได้)
+            title = mask_pii(str(record.get("title", "Untitled")))[:120]
+            link = mask_pii(str(record.get("link", "")), mask_phones=False,
+                            mask_long_digits=False)
+            lines.append(f"{marker} [{ref}] {title}")
+            lines.append(f"      🔗 {link}")
+            # แสดงคำโปรยของเอนจิน (ถ้ามี) เพื่อให้ผู้ใช้ประเมินได้ก่อนสั่งวิเคราะห์ต่อ
+            snippet = mask_pii(str(record.get("snippet") or "").strip())
+            if snippet:
+                lines.append(f"      💬 {snippet[:200]}")
+            lines.append(
+                f"      🔧 {engine} · 🎯 relevance {record.get('relevance', 0)} · "
+                f"🔁 พบซ้ำ {record.get('engines', 1)} ครั้ง"
+            )
 
     # ยืนยันข้ามแหล่ง: ตัวระบุที่โผล่ในหลายแหล่งอิสระ = สัญญาณว่า "น่าจะเป็นของ
-    # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว
+    # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว จัดหมวดหมู่ตามชนิด IOC
+    # (อิโมจิ + ชื่อหมวด) เพื่อให้กวาดตาอ่านได้เร็วกว่ารายการปนกันยาวๆ
     corroborated = corroborated_identifiers(display, min_sources=IDENTITY_MIN_SOURCES)
     if corroborated:
         lines.append("")
-        lines.append(f"[ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ] (ปกปิด PII แล้ว)")
+        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ (ปกปิด PII แล้ว)")
+        grouped: Dict[str, List[dict]] = {}
         for item in corroborated:
-            label = IOC_LABELS.get(item["type"], item["type"])
-            lines.append(
-                f"- [{label}] {mask_pii(item['value'])} — "
-                f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
-            )
+            grouped.setdefault(item["type"], []).append(item)
+        for ioc_type in sorted(grouped, key=lambda t: IOC_ORDER.index(t)
+                               if t in IOC_ORDER else 99):
+            label = IOC_LABELS.get(ioc_type, ioc_type)
+            lines.append(f"  {ioc_emoji(ioc_type)} {label}")
+            for item in grouped[ioc_type]:
+                lines.append(
+                    f"      • {mask_pii(item['value'])} — "
+                    f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
+                )
 
     lines.append("")
-    lines.append("นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
-    lines.append("ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
+    lines.append("ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
+    lines.append("👉 ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
     return "\n".join(lines)

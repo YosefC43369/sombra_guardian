@@ -212,6 +212,25 @@ check("gemini: _validate_input honours the custom cap",
 check("gemini: chat path still capped at 4000",
       gemini._validate_input("A"*4001) is not None)
 
+# ---------- 7. advanced_queries (ค้นขั้นสูง/ซับซ้อนสำหรับ /search) ----------
+_asel = osint.extract_selectors("สมชาย ใจดี doctor hospital email somchai@example.com @somchai_j")
+_aq = osint.advanced_queries(
+    "สมชาย ใจดี doctor hospital email somchai@example.com @somchai_j",
+    _asel, existing=['"สมชาย ใจดี"'], max_extra=12)
+check("advanced: returns a list of str", isinstance(_aq, list) and all(isinstance(x, str) for x in _aq))
+check("advanced: builds name x keyword", any('"สมชาย ใจดี" doctor' == x for x in _aq), _aq)
+check("advanced: adds social site: dork", any("site:facebook.com" in x for x in _aq), _aq)
+check("advanced: adds filetype dork", any("filetype:pdf" in x for x in _aq), _aq)
+check("advanced: pairs keywords", any(x == "doctor hospital" for x in _aq), _aq)
+check("advanced: quotes hard identifiers (email)", any('"somchai@example.com"' == x for x in _aq), _aq)
+check("advanced: excludes queries already planned",
+      '"สมชาย ใจดี"' not in _aq)
+check("advanced: honours max_extra cap", len(osint.advanced_queries(
+      "สมชาย ใจดี doctor hospital finance ceo", _asel, max_extra=3)) <= 3)
+check("advanced: no duplicate queries", len(_aq) == len(set(_aq)))
+check("advanced: empty selectors safe",
+      isinstance(osint.advanced_queries("", osint.extract_selectors("")), list))
+
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL: print("FAILED:", FAIL)
 sys.exit(1 if FAIL else 0)

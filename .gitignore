@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# ฐานข้อมูลผลการค้น OSINT ที่ยืนยันแล้ว (runtime data — สร้างหลังการกดบันทึก)
+resource/osint_db.json
