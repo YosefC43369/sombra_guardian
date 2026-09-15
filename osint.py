@@ -1179,9 +1179,37 @@ def pivot_queries(identity: IdentityProfile, selectors: Optional[Selectors] = No
     return queries[:max_queries]
 
 
+# ============================================================================
+# [DEFANG] สวิตช์เปิด/ปิด "การ defang IOC" (ทำให้ลิงก์/อีเมลคลิกไม่ได้ในรายงาน)
+# ----------------------------------------------------------------------------
+# ตามคำสั่งผู้ใช้: ปิด defang ฟังก์ชัน defang() จึงทำงานแบบ "ผ่านตรง" — คืนค่า IOC
+# ดิบตามเดิม (ลิงก์คลิกได้/อีเมลไม่ถูกแปลง)
+#
+#   >>> วิธีเปิด/ปิด <<<
+#   ปิด (ค่าเริ่มต้น) : DEFANG_ENABLED = False
+#   เปิด defang กลับ  : DEFANG_ENABLED = True  หรือ env OSINT_DEFANG=1
+#
+# โค้ด defang จริงถูกเก็บไว้เป็น "ทางเลือก" ในสาขา if DEFANG_ENABLED: ด้านล่าง
+# ขอบเขต: แก้เฉพาะฟังก์ชัน defang() เท่านั้น ไม่แตะผู้เรียก (build_dossier ฯลฯ)
+# ============================================================================
+
+# ปิด defang เป็นค่าเริ่มต้น (ตั้ง env OSINT_DEFANG=1/true/yes/on เพื่อเปิด)
+DEFANG_ENABLED = os.getenv("OSINT_DEFANG", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
+
 def defang(value: str) -> str:
-    """ทำให้ IOC ไม่คลิกได้/ไม่ถูก auto-link — มาตรฐานของรายงาน CTI
-    เพื่อไม่ให้ผู้อ่านเผลอกดเข้าไปที่โฮสต์อันตราย"""
+    """[ปิดใช้งาน defang] คืนค่า IOC ดิบตามเดิม (ลิงก์คลิกได้)
+
+    เดิม defang ทำให้ IOC ไม่คลิกได้/ไม่ถูก auto-link (มาตรฐานรายงาน CTI เพื่อกัน
+    ผู้อ่านเผลอกดเข้าโฮสต์อันตราย) ตอนนี้ปิดตามคำสั่งผู้ใช้ — ตั้ง DEFANG_ENABLED = True
+    เพื่อเปิดกลับ (โค้ด defang จริงเป็น "ทางเลือก" อยู่ในสาขา if ด้านล่าง)
+    """
+    # --- ปิด (ค่าเริ่มต้น): ผ่านตรง คืนค่าดิบ ---
+    if not DEFANG_ENABLED:
+        return str(value)
+
+    # --- ทางเลือก: โค้ด defang จริง เปิดใช้เมื่อ DEFANG_ENABLED = True ---
     out = str(value)
     out = re.sub(r"^https?://", lambda m: m.group(0).replace("http", "hxxp"), out, flags=re.I)
     out = out.replace("@", "[at]")
