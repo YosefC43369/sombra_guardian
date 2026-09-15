@@ -32,6 +32,7 @@ import osint
 import osint_db
 import osint_es
 import search_es
+import airports
 import nethealth
 import tor_launcher
 import username_osint
@@ -509,6 +510,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/deepsearch <เป้าหมาย> - ค้นแบบไม่ยอมแพ้ ค้นซ้ำจนมั่นใจว่าเป็นคนเดียวกัน (Admin)\n"
         "/identity <เป้าหมาย> - วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล (Admin)\n"
         "/corporate <เป้าหมาย> - วิเคราะห์ข้อมูลองค์กรรั่วไหล (Admin)\n"
+        "/dbsearch <คำค้น> - ค้นย้อนหลังในฐานข้อมูลผล OSINT ที่ยืนยันแล้ว (Admin)\n"
+        "/dbstats - สถิติฐานข้อมูล OSINT + สุขภาพการค้นหา (Admin)\n"
+        "/airport <รหัส|ชื่อ|เมือง> - ค้นข้อมูลสนามบินจากฐานข้อมูล (เช่น /airport BKK)\n"
         "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
         "/debt [ชื่อ|unpaid|paid|all] - ดูรายการค้างชำระ\n"
         "/debt_summary [YYYY-MM] [ai] - สรุปยอดค้างชำระรายเดือน\n"
@@ -1325,6 +1329,58 @@ async def cmd_dbstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("SEARCH ES ENGINE HEALTH ERROR")
 
     await _reply_chunked(update, text)
+
+
+async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ค้นหาสนามบินจากฐานข้อมูล resource/airports.json แล้วตอบ ชื่อ/เมือง/ประเทศ ฯลฯ
+
+    ใช้งาน: /airport <รหัส IATA|ICAO|ชื่อ|เมือง>  เช่น /airport BKK หรือ /airport กรุงเทพ
+            /airport reindex  (Admin) ทำดัชนีลง Elasticsearch ใหม่
+
+    ค้นผ่าน Elasticsearch ถ้าตั้งค่าไว้ ไม่งั้น fallback ค้นในไฟล์ตรง ๆ — เปิดให้ทุกคน
+    ในแชทใช้ได้ (เป็นข้อมูลอ้างอิงสาธารณะ)"""
+    args = context.args or []
+
+    # subcommand: reindex (Admin เท่านั้น) — สร้างดัชนี ES จากไฟล์
+    if args and args[0].lower() == "reindex":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ /airport reindex ใช้ได้เฉพาะ Admin")
+        if not airports.es_configured():
+            return await update.message.reply_text(
+                "ℹ️ ยังไม่ได้ตั้งค่า Elasticsearch (OSINT_ES_URL) — ค้นในไฟล์ได้อยู่แล้วโดยไม่ต้อง index")
+        n = await asyncio.to_thread(airports.reindex_es)
+        return await update.message.reply_text(
+            f"✅ ทำดัชนีสนามบินลง Elasticsearch แล้ว {n} รายการ" if n
+            else "⚠️ ทำดัชนีไม่สำเร็จ (ES ต่อไม่ติด หรือไฟล์ว่าง)")
+
+    query = " ".join(args).strip()
+    if not query:
+        return await update.message.reply_text(
+            "ใช้งาน: /airport <รหัส IATA | ICAO | ชื่อ | เมือง>\n"
+            "ตัวอย่าง: /airport BKK  |  /airport VTBS  |  /airport Suvarnabhumi\n"
+            "Admin: /airport reindex เพื่อทำดัชนีลง Elasticsearch")
+
+    if not airports.load_airports():
+        return await update.message.reply_text(
+            "⚠️ ยังไม่มีไฟล์ฐานข้อมูลสนามบิน (resource/airports.json) หรืออ่านไม่ได้")
+
+    # ค้นผ่าน ES ก่อน (ถ้ามี) แล้ว fallback ไปค้นในไฟล์
+    hits = None
+    via = ""
+    if airports.es_configured():
+        try:
+            hits = await asyncio.to_thread(airports.es_search, query, 5)
+        except Exception:
+            logger.exception("AIRPORT ES SEARCH ERROR")
+            hits = None
+        if hits is not None:
+            via = "Elasticsearch"
+    if hits is None:
+        recs = airports.load_airports()
+        hits = airports.search_airports(recs, query, 5)
+        via = "ไฟล์ JSON"
+
+    await _reply_chunked(update, airports.format_results(hits, query, via=via))
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5342,6 +5398,8 @@ _REQUIRED_MODULE_API = {
                  "format_findings_stats"),
     "search_es": ("record_search", "telemetry_doc", "engine_health",
                   "format_engine_health"),
+    "airports": ("load_airports", "extract_query", "search_airports",
+                 "es_search", "reindex_es", "format_results", "es_configured"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
@@ -5505,6 +5563,7 @@ def main():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("dbsearch", cmd_dbsearch))
     app.add_handler(CommandHandler("dbstats", cmd_dbstats))
+    app.add_handler(CommandHandler("airport", cmd_airport))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
