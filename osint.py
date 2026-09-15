@@ -1737,6 +1737,49 @@ def categorize_by_origin(display_records: List[dict]) -> List[dict]:
     return sorted(buckets.values(), key=lambda g: (g["order"], g["origin"]))
 
 
+def summarize_findings(records: List[dict]) -> dict:
+    """สรุปสถิติจาก "ระเบียนผลค้นที่ยืนยันแล้ว" (osint_db) — ฟังก์ชันบริสุทธิ์ (stdlib
+    ล้วน ไม่ยุ่งเครือข่าย/ES) ใช้เป็นฐานของสถิติ /dbstats และเป็น fallback ของชั้น
+    Elasticsearch (osint_es.aggregate_findings) เมื่อไม่มี ES
+
+    คงหลักการของ osint.py: วิเคราะห์/รวบยอดข้อมูลที่มีอยู่แล้ว ไม่ดึงข้อมูลใหม่
+    คืน dict: {total, by_origin, by_ioc_type, top_hosts, corroborated_total,
+              latest_saved_at}
+    """
+    total = 0
+    by_origin: Dict[str, int] = {}
+    by_ioc: Dict[str, int] = {}
+    host_counts: Dict[str, int] = {}
+    corroborated_total = 0
+    latest = ""
+    for rec in records or []:
+        total += 1
+        latest = max(latest, str(rec.get("saved_at") or ""))
+        for origin, cat in (rec.get("categories") or {}).items():
+            srcs = cat.get("sources", []) or []
+            by_origin[origin] = by_origin.get(origin, 0) + len(srcs)
+            for src in srcs:
+                host = (src.get("host") or "").strip().lower()
+                if host:
+                    host_counts[host] = host_counts.get(host, 0) + 1
+        for ioc_type, slot in (rec.get("identifiers") or {}).items():
+            vals = slot.get("values", []) or []
+            by_ioc[ioc_type] = by_ioc.get(ioc_type, 0) + len(vals)
+            corroborated_total += len(vals)
+    top_hosts = sorted(host_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    by_ioc_sorted = dict(sorted(
+        by_ioc.items(),
+        key=lambda kv: IOC_ORDER.index(kv[0]) if kv[0] in IOC_ORDER else 99))
+    return {
+        "total": total,
+        "by_origin": by_origin,
+        "by_ioc_type": by_ioc_sorted,
+        "top_hosts": top_hosts,
+        "corroborated_total": corroborated_total,
+        "latest_saved_at": latest,
+    }
+
+
 def format_search_report(question: str, selectors: Selectors, queries: List[str],
                          ranked: List[dict], limit: int = 20,
                          health_note: str = "") -> str:
@@ -1816,10 +1859,13 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
     # ยืนยันข้ามแหล่ง: ตัวระบุที่โผล่ในหลายแหล่งอิสระ = สัญญาณว่า "น่าจะเป็นของ
     # คนเดียวกันจริง" ไม่ใช่ผลบังเอิญ แสดงแบบปกปิด PII แล้ว จัดหมวดหมู่ตามชนิด IOC
     # (อิโมจิ + ชื่อหมวด) เพื่อให้กวาดตาอ่านได้เร็วกว่ารายการปนกันยาวๆ
+    # ข้อความกำกับสถานะการปกปิด PII ให้ตรงกับสวิตช์จริง (PII_MASKING_ENABLED)
+    # ปิดอยู่ = แสดงค่าดิบ จึงต้องไม่ไปเขียนว่า "ปกปิดแล้ว" ให้เข้าใจผิด
+    _pii_note = "ปกปิด PII แล้ว" if PII_MASKING_ENABLED else "แสดง PII ดิบ — ไม่ได้ปกปิด"
     corroborated = corroborated_identifiers(display, min_sources=IDENTITY_MIN_SOURCES)
     if corroborated:
         lines.append("")
-        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ (ปกปิด PII แล้ว)")
+        lines.append(f"🔗 ยืนยันข้ามแหล่ง — ตัวระบุที่พบใน ≥{IDENTITY_MIN_SOURCES} แหล่งอิสระ ({_pii_note})")
         grouped: Dict[str, List[dict]] = {}
         for item in corroborated:
             grouped.setdefault(item["type"], []).append(item)
@@ -1833,7 +1879,9 @@ def format_search_report(question: str, selectors: Selectors, queries: List[str]
                     f"{item['sources']} โฮสต์อิสระ (พบใน {', '.join(item['refs'])})"
                 )
 
+    _pii_display = ("PII ถูกปกปิดในการแสดงผล" if PII_MASKING_ENABLED
+                    else "แสดง PII ดิบ ไม่ได้ปกปิดในการแสดงผล")
     lines.append("")
-    lines.append("ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ (PII ถูกปกปิดในการแสดงผล)")
+    lines.append(f"ℹ️ นี่คือผลค้นหาดิบ ยังไม่ได้ดึงเนื้อหาและยังไม่ผ่านการวิเคราะห์ ({_pii_display})")
     lines.append("👉 ใช้ /identity หรือ /corporate เพื่อให้ระบบดึงเนื้อหา สกัด IOC และวิเคราะห์ต่อ")
     return "\n".join(lines)

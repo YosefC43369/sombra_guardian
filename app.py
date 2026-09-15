@@ -30,6 +30,8 @@ import search
 import scrape
 import osint
 import osint_db
+import osint_es
+import search_es
 import nethealth
 import tor_launcher
 import username_osint
@@ -1063,8 +1065,20 @@ async def osint_db_callback_handler(update: Update, context: ContextTypes.DEFAUL
         action="OSINT_DB_SAVE",
         detail=f"id={result.get('id')} | query={str(payload['query'])[:200]}",
     )
+
+    # ต่อยอด: ทำดัชนีระเบียนที่เพิ่งยืนยันลง Elasticsearch (best-effort) เพื่อค้น
+    # ย้อนหลังผ่าน /dbsearch — ถ้าไม่ได้ตั้งค่า ES ไว้ก็ข้ามเงียบ ไม่กระทบการบันทึก
+    es_note = ""
+    if not result.get("duplicate") and osint_es.es_configured():
+        try:
+            if await asyncio.to_thread(osint_es.index_finding, record):
+                es_note = "\n🔎 ทำดัชนีลง Elasticsearch แล้ว (ค้นย้อนหลังด้วย /dbsearch)"
+        except Exception:
+            logger.exception("OSINT ES INDEX ERROR id=%s", record.get("id"))
+
     try:
-        await query.edit_message_text(osint_db.format_saved_summary(record, result))
+        await query.edit_message_text(
+            osint_db.format_saved_summary(record, result) + es_note)
     except TelegramError as e:
         logger.info("OSINT DB SAVE EDIT FAILED: %s", e)
 
@@ -1244,6 +1258,73 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "(เว็บกันบอท/Tor ไม่พร้อม/ไม่มีเนื้อหาข้อความ)")
         except Exception:
             logger.exception("OSINT SEARCH CONTENT FETCH ERROR")
+
+
+async def cmd_dbsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ค้นย้อนหลังใน "ฐานข้อมูลผลค้น OSINT ที่ยืนยันแล้ว" (osint_db)
+
+    ต่อยอดการค้นหาของ OSINT ด้วย Elasticsearch: ถ้าตั้งค่า ES ไว้และต่อได้ จะค้นผ่าน
+    ES (full-text + fuzzy) ถ้าไม่ ก็ fallback ไปค้นในไฟล์ JSON ตรง ๆ — ไม่ดึงข้อมูล
+    ใหม่จากที่ไหน ค้นเฉพาะสิ่งที่ Admin เคยกดยืนยันบันทึกไว้แล้วเท่านั้น (Admin only)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ ค้นฐานข้อมูล OSINT ได้เฉพาะ Admin")
+
+    query = " ".join(context.args).strip()
+    if not query:
+        return await update.message.reply_text(
+            "ใช้งาน: /dbsearch <คำค้น | อีเมล | โดเมน | โฮสต์ | รหัสระเบียน>\n"
+            "ค้นย้อนหลังในผลที่เคยกดยืนยันบันทึกไว้ (ต่อยอดจาก /search)\n"
+            "ตัวอย่าง: /dbsearch acme.co.th")
+
+    limit = SEARCH_RESULTS_DISPLAY_CAP
+    hits = None
+    via = ""
+    # (1) ลองค้นผ่าน Elasticsearch ก่อน (ถ้าตั้งค่าและต่อได้)
+    if osint_es.es_configured():
+        try:
+            hits = await asyncio.to_thread(osint_es.search, query, limit)
+        except Exception:
+            logger.exception("OSINT ES SEARCH ERROR")
+            hits = None
+        if hits is not None:
+            via = "Elasticsearch"
+
+    # (2) ไม่มี ES / ค้น ES ไม่ได้ -> fallback ค้นในไฟล์ JSON ตรง ๆ
+    if hits is None:
+        db = await asyncio.to_thread(osint_db.load_db)
+        hits = osint_es.local_search(db.get("entries", []), query, limit)
+        via = "ไฟล์ JSON"
+
+    write_audit_log(
+        update.effective_chat.id, update.effective_user.id, actor="admin",
+        action="OSINT_DB_SEARCH", detail=f"query={query[:200]} | via={via}",
+    )
+    await _reply_chunked(update, osint_es.format_search_hits(hits, query, via=via))
+
+
+async def cmd_dbstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สถิติภาพรวมของฐานข้อมูลผล OSINT ที่ยืนยันแล้ว + สุขภาพการค้นหา (Admin)
+
+    วิเคราะห์จากคลังที่มีอยู่แล้ว (osint_db) ไม่ดึงข้อมูลใหม่ — ทำงานได้แม้ไม่มี
+    Elasticsearch (ถ้ามี ES จะแนบสรุป telemetry ประสิทธิภาพการค้นให้ด้วย)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ ดูสถิติฐานข้อมูล OSINT ได้เฉพาะ Admin")
+
+    db = await asyncio.to_thread(osint_db.load_db)
+    summary = osint_es.aggregate_findings(db.get("entries", []))
+    text = osint_es.format_findings_stats(summary, es_on=osint_es.es_available())
+
+    # แนบสุขภาพการค้นหา (telemetry) ถ้าตั้งค่า ES ไว้
+    if osint_es.es_configured():
+        try:
+            health = await asyncio.to_thread(search_es.engine_health, 7)
+            note = search_es.format_engine_health(health)
+            if note:
+                text += "\n\n" + note
+        except Exception:
+            logger.exception("SEARCH ES ENGINE HEALTH ERROR")
+
+    await _reply_chunked(update, text)
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5252,9 +5333,15 @@ _REQUIRED_MODULE_API = {
               "pivot_queries", "build_dossier", "format_search_report",
               "load_site_db", "profile_url_candidates", "build_profile_results",
               "assess_identity_confidence", "expand_queries", "advanced_queries",
-              "categorize_by_origin", "corroborated_identifiers", "ioc_emoji"),
+              "categorize_by_origin", "corroborated_identifiers", "ioc_emoji",
+              "summarize_findings"),
     "osint_db": ("build_finding_record", "save_finding", "format_saved_summary",
                  "load_db"),
+    "osint_es": ("es_configured", "es_available", "index_finding", "search",
+                 "local_search", "format_search_hits", "aggregate_findings",
+                 "format_findings_stats"),
+    "search_es": ("record_search", "telemetry_doc", "engine_health",
+                  "format_engine_health"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),
@@ -5416,6 +5503,8 @@ def main():
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("dbsearch", cmd_dbsearch))
+    app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

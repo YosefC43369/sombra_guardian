@@ -9,3 +9,6 @@ requests
 urllib3
 PySocks
 tzdata
+# ทางเลือก: backend ค้นหา/ทำดัชนีฐานข้อมูลผล OSINT (/dbsearch) — ถ้าไม่ติดตั้ง
+# ระบบจะ fallback ไปค้นในไฟล์ JSON ตรง ๆ โดยอัตโนมัติ
+elasticsearch
