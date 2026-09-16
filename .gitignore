@@ -6,3 +6,5 @@ __pycache__/
 venv/
 # ฐานข้อมูลผลการค้น OSINT ที่ยืนยันแล้ว (runtime data — สร้างหลังการกดบันทึก)
 resource/osint_db.json
+# Google Drive reference-data cache (runtime, derived from Drive)
+cache/

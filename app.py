@@ -5532,6 +5532,17 @@ def main():
     wt.wallet_db_init()
     ex.expense_db_init()
     logger.info("DATABASE: OK")
+
+    # ซิงก์ dataset อ้างอิง (airports.json / programming-languages.json) จาก Google Drive
+    # ครั้งเดียวตอน startup ถ้าตั้งค่า Drive ไว้ — best-effort ไม่ทำให้บอตล่มถ้า Drive ล่ม
+    # (ถ้าไม่ได้ตั้งค่า Drive จะใช้ไฟล์ในเครื่องเหมือนเดิม ไม่มีอะไรเกิดขึ้น)
+    try:
+        import reference_data
+        if reference_data.drive_enabled():
+            logger.info("REFDATA: ซิงก์ dataset อ้างอิงจาก Google Drive ตอนเริ่มระบบ")
+            reference_data.sync_all()
+    except Exception:
+        logger.exception("REFDATA: ซิงก์ตอน startup ผิดพลาด (ใช้ไฟล์ในเครื่องต่อได้)")
     
     app = (
         ApplicationBuilder()

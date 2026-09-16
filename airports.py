@@ -26,6 +26,25 @@ logger = logging.getLogger("modbot.airports")
 AIRPORTS_PATH = os.getenv("AIRPORTS_DB", "").strip() or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "resource", "airports.json")
 
+
+def _resolve_source_path() -> str:
+    """หา path ของไฟล์ airports.json ที่จะเปิดอ่าน
+
+    ถ้าตั้งค่า Google Drive ไว้ (reference_data) จะได้ path ของ cache ที่ซิงก์จาก
+    Drive มาแล้ว (source of truth บน Drive) มิฉะนั้นถอยไปใช้ไฟล์ในเครื่อง AIRPORTS_PATH
+    ตามพฤติกรรมเดิมทุกประการ — import แบบกันพังเพื่อไม่ให้ airports.py พึ่ง reference_data
+    """
+    if os.getenv("AIRPORTS_DB", "").strip():
+        return AIRPORTS_PATH   # ผู้ใช้ override path ตรง ๆ = เคารพเสมอ ไม่ผ่าน Drive
+    try:
+        import reference_data
+        resolved = reference_data.get_dataset_path("airports.json")
+        if resolved:
+            return resolved
+    except Exception:
+        logger.debug("AIRPORTS | reference_data ใช้ไม่ได้ ใช้ไฟล์ในเครื่องแทน")
+    return AIRPORTS_PATH
+
 # ดัชนี Elasticsearch สำหรับสนามบิน (ใช้ client/คอนฟิกร่วมกับ osint_es)
 ES_INDEX = os.getenv("AIRPORTS_ES_INDEX", "").strip() or "sombra_airports"
 
@@ -105,7 +124,7 @@ def load_airports(path: Optional[str] = None) -> List[dict]:
 
     รองรับทั้ง dict (คีย์ = รหัสสนามบิน) และ list ของ object
     """
-    target = path or AIRPORTS_PATH
+    target = path or _resolve_source_path()
     try:
         mtime = os.path.getmtime(target)
     except OSError:
