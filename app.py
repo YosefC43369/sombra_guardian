@@ -4515,6 +4515,31 @@ def _open_incident_from_forbidden_word(update: Update, message, matched_word):
         return None
 
 
+_WELCOME_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _welcome_text(name: str) -> str:
+    """ข้อความต้อนรับสมาชิกใหม่ — เรียบร้อย อ่านสบายตา ใช้อิโมจินำสายตาแต่พอดี"""
+    return (
+        f"👋 ยินดีต้อนรับ {name} สู่กลุ่ม\n"
+        f"{_WELCOME_DIVIDER}\n"
+        "🤖 JOSEPH SECRET BOT พร้อมช่วยดูแลความเรียบร้อยของกลุ่ม\n"
+        "📋 พิมพ์ /help เพื่อดูคำสั่งที่ใช้ได้\n"
+        "🙏 โปรดอ่านกติกากลุ่มและพูดคุยกันด้วยความเคารพ — ขอให้สนุกนะ"
+    )
+
+
+async def _send_welcome(context: ContextTypes.DEFAULT_TYPE, chat, target) -> None:
+    """ส่งข้อความต้อนรับเข้ากลุ่ม (ไม่ทำให้ flow อื่นพังถ้าส่งไม่ได้)"""
+    # ใช้ @username ถ้ามี ไม่งั้นใช้ชื่อที่แสดง — เป็นข้อความล้วน (ไม่ parse_mode) กัน markup พัง
+    name = (("@" + target.username) if getattr(target, "username", None)
+            else (getattr(target, "full_name", None) or "เพื่อนใหม่"))
+    try:
+        await context.bot.send_message(chat.id, _welcome_text(name))
+    except TelegramError as e:
+        logger.info("WELCOME SEND FAILED | chat=%s user=%s (%s)", chat.id, target.id, e)
+
+
 async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Observe join / leave / rejoin / restrict / ban / promote events.
 
@@ -4604,6 +4629,14 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
         _record_member_action(
             chat.id, action, target_user_id=target.id, admin_user_id=admin_user_id,
             reason=f"{result['old_status']} -> {result['new_status']}", executed=True)
+
+    # ยินดีต้อนรับสมาชิกใหม่ (คนจริงเท่านั้น) — ส่งเฉพาะตอน "เพิ่งเข้ากลุ่ม"
+    # (สถานะก่อนหน้าเป็น left/banned/ยังไม่เคยอยู่ -> กลายเป็น member)
+    joined = (result["new_status"] == mi.MembershipStatus.MEMBER.value
+              and result["old_status"] in (mi.MembershipStatus.LEFT.value,
+                                            mi.MembershipStatus.BANNED.value, None))
+    if joined and not target.is_bot:
+        await _send_welcome(context, chat, target)
 
 
 # ---------------- Red Team Assessment (Phase 11, RoE-gated) ----------------
