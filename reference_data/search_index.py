@@ -49,7 +49,7 @@ _HELPER_FIELDS = ("_all_text", "_all_auto", "_codes", "_suggest", "_all_phon", "
 def _has_thai(s: str) -> bool:
     return any("฀" <= ch <= "๿" for ch in str(s or ""))
 # ฟิลด์ที่มักเป็น "รหัส" ใช้เดา _id ของ doc
-_ID_FIELDS = ("code", "iata", "icao", "id", "key", "name")
+_ID_FIELDS = ("code", "email", "SSN", "id", "key", "name")
 
 
 def _synonyms():
