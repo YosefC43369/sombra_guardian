@@ -29,6 +29,8 @@ from .dataset_manager import (
 from .schema import profile_dataset, sql_schema, profile_records
 # Task 2: cleansing + dedupe + index (whitelist-gated)
 from .cleansing import clean_record, dedupe, clean_and_index, clean_all
+# ค้นในไฟล์เร็วแบบ offline: trigram inverted index + LRU cache (whitelist-gated)
+from .fast_index import FastIndex, for_dataset as fast_for_dataset, search as fast_search
 
 __all__ = [
     "ALLOWED_DATASETS", "is_allowed", "drive_enabled",
@@ -36,4 +38,5 @@ __all__ = [
     "sync", "sync_all",
     "profile_dataset", "sql_schema", "profile_records",
     "clean_record", "dedupe", "clean_and_index", "clean_all",
+    "FastIndex", "fast_for_dataset", "fast_search",
 ]
