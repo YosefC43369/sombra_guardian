@@ -36,8 +36,7 @@ _RE_TOKEN = re.compile(r"[a-z0-9฀-๿]+")
 
 # ฟิลด์ที่ถือเป็น "ข้อความค้นได้" โดยดีฟอลต์ (ถ้าไม่ระบุ จะใช้ค่า string ทั้งหมดของ record)
 _DEFAULT_TEXT_FIELDS = ("name", "city", "title", "label", "country", "state",
-                        "code", "iata", "icao", "id", "key")
-
+                        "code", "iata", "icao", "id", "key", "email", "phone", "address", "description")
 
 def _deaccent(text: str) -> str:
     # ตัดเฉพาะ "เครื่องหมายกำกับเสียงของอักษรละติน" (Combining Diacritical Marks
