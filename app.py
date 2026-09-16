@@ -567,7 +567,11 @@ _HELP_BODIES = {
         "/sign <ชื่อ> <จำนวนเงิน> [รายการ...]\n"
         "/debt [ชื่อ|unpaid|paid|all]\n"
         "/debt_summary [YYYY-MM] [ai]\n"
-        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM]"
+        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM]\n\n"
+        "🗂️ Reference Data (Google Drive)\n"
+        "/refdata [status]\n"
+        "/refdata sync\n"
+        "/refdata reindex"
     ),
     "osint": (
         "🔎 OSINT\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
@@ -1540,6 +1544,126 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if dym:
             text += f"\n\n🔎 หมายถึง “{dym}” หรือเปล่า? ลอง /airport {dym}"
     await _reply_chunked(update, text)
+
+
+_REFDATA_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _refdata_source_label(name: str) -> str:
+    """บอกว่าไฟล์ dataset นี้ใช้ได้ไหม และมาจาก Drive-cache หรือไฟล์ในเครื่อง"""
+    import os as _os
+    import reference_data as rd
+    from reference_data import cache_manager as _cache
+    path = rd.get_dataset_path(name)
+    if not path:
+        return "⬜"
+    try:
+        cache_root = str(_cache.cache_dir().resolve())
+        src = "Drive" if str(_os.path.abspath(path)).startswith(cache_root) else "local"
+    except Exception:
+        src = "?"
+    return f"✅ {src}"
+
+
+def _refdata_status_text() -> str:
+    """ประกอบข้อความสถานะชั้น reference_data (Drive/ES/ไฟล์ที่อนุญาต)"""
+    import os as _os
+    import reference_data as rd
+    from reference_data import drive_client as _drive
+    from reference_data import search_index as _si
+
+    if rd.drive_enabled():
+        fid = _drive.DRIVE_FOLDER_ID or ""
+        tail = fid[-6:] if len(fid) > 6 else fid
+        drive_line = f"☁️ Google Drive: 🟢 เปิด (folder …{tail}, read-only)"
+    else:
+        drive_line = "☁️ Google Drive: ⚪ ปิด (ใช้ไฟล์ในเครื่อง resource/)"
+    es_line = ("🔎 Elasticsearch: 🟢 พร้อม" if _si.es_available()
+               else "🔎 Elasticsearch: ⚪ ไม่พร้อม (ค้นในไฟล์แทน)")
+
+    # จัดกลุ่มตาม stem แล้วโชว์ทีละนามสกุล
+    stems = {}
+    for n in sorted(rd.ALLOWED_DATASETS):
+        stem, ext = _os.path.splitext(n)
+        stems.setdefault(stem, []).append((ext, n))
+    lines = ["🗂️ Reference Data · สถานะ", _REFDATA_DIVIDER, drive_line, es_line,
+             "", "📁 ไฟล์ที่อนุญาต (whitelist):"]
+    for stem in sorted(stems):
+        parts = [f"{ext} {_refdata_source_label(n)}" for ext, n in sorted(stems[stem])]
+        lines.append(f"• {stem}")
+        lines.append("   " + " · ".join(parts))
+    return "\n".join(lines)
+
+
+async def cmd_refdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """จัดการ dataset อ้างอิง (Admin): ดูสถานะ / ซิงก์จาก Google Drive / ทำดัชนีใหม่
+
+    /refdata            หรือ /refdata status  — ดูสถานะ Drive/ES/ไฟล์ที่อนุญาต
+    /refdata sync       — ดึงเวอร์ชันล่าสุดจาก Google Drive มาแคช (ไม่ต้อง restart)
+    /refdata reindex    — clean+dedupe แล้วทำดัชนี Elasticsearch ใหม่ + ล้างแคชค้นในไฟล์
+    """
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
+
+    import os as _os
+    import reference_data as rd
+    from reference_data import fast_index as _fi
+
+    sub = (context.args[0].lower() if context.args else "status")
+
+    if sub == "status":
+        return await update.message.reply_text(_refdata_status_text())
+
+    if sub == "sync":
+        if not rd.drive_enabled():
+            return await update.message.reply_text(
+                "⚠️ ยังไม่ได้ตั้งค่า Google Drive (DRIVE_FOLDER_ID + credential)\n"
+                "ตอนนี้ใช้ไฟล์ในเครื่อง resource/ อยู่ — ตั้งค่าใน .env ก่อนจึงจะ sync ได้")
+        await update.message.reply_text("☁️ กำลังซิงก์ dataset จาก Google Drive…")
+        try:
+            res = await asyncio.to_thread(rd.sync_all)   # {name: bool}
+        except Exception:
+            logger.exception("REFDATA SYNC ERROR")
+            return await update.message.reply_text("❌ ซิงก์ล้มเหลว (ดู log) — ยังใช้แคช/ไฟล์เดิมได้")
+        _fi.invalidate()      # ไฟล์อาจเปลี่ยน -> ล้างดัชนีค้นในไฟล์ให้สร้างใหม่
+        ok = sum(1 for v in res.values() if v)
+        lines = [f"✅ ซิงก์เสร็จ: {ok}/{len(res)} ไฟล์พร้อมใช้", _REFDATA_DIVIDER]
+        for name in sorted(res):
+            lines.append(f"{'✅' if res[name] else '⬜'} {name}")
+        return await update.message.reply_text("\n".join(lines))
+
+    if sub in ("reindex", "index"):
+        await update.message.reply_text("🔧 กำลัง clean + dedupe แล้วทำดัชนีใหม่…")
+        _fi.invalidate()
+        # เลือกทำต่อ "stem" ละหนึ่งไฟล์ (ทุกฟอร์แมตของ stem ชี้ index เดียวกัน)
+        chosen = {}
+        for name in sorted(rd.ALLOWED_DATASETS):
+            stem = _os.path.splitext(name)[0]
+            if stem not in chosen and rd.get_dataset_path(name):
+                chosen[stem] = name
+        if not chosen:
+            return await update.message.reply_text("⚠️ ไม่พบไฟล์ dataset ที่ใช้ได้ (ตั้งค่า Drive หรือวางไฟล์ใน resource/ ก่อน)")
+        lines = ["🗂️ ทำดัชนีใหม่เสร็จ", _REFDATA_DIVIDER]
+        for stem, name in sorted(chosen.items()):
+            try:
+                st = await asyncio.to_thread(rd.clean_and_index, name)
+                lines.append(f"• {stem}: อ่าน {st['raw']} · เหลือหลังกันซ้ำ {st['cleaned']} · "
+                             f"index {st['indexed']}")
+            except Exception:
+                logger.exception("REFDATA REINDEX ERROR: %s", name)
+                lines.append(f"• {stem}: ❌ ล้มเหลว (ดู log)")
+        from reference_data import search_index as _si
+        if not _si.es_available():
+            lines.append("")
+            lines.append("ℹ️ Elasticsearch ไม่พร้อม: clean/dedupe ทำงานแล้วแต่ index=0 "
+                         "(บอตจะค้นในไฟล์แทนอัตโนมัติ)")
+        return await update.message.reply_text("\n".join(lines))
+
+    return await update.message.reply_text(
+        "ใช้งาน /refdata:\n"
+        "• /refdata status — ดูสถานะ Drive/ES/ไฟล์ที่อนุญาต\n"
+        "• /refdata sync — ดึงเวอร์ชันล่าสุดจาก Google Drive\n"
+        "• /refdata reindex — clean+dedupe แล้วทำดัชนี Elasticsearch ใหม่")
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5735,6 +5859,7 @@ def main():
     app.add_handler(CommandHandler("dbsearch", cmd_dbsearch))
     app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("airport", cmd_airport))
+    app.add_handler(CommandHandler("refdata", cmd_refdata))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
