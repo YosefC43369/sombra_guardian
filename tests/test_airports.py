@@ -121,11 +121,29 @@ if not airports.es_configured():
     check("es_search: ไม่มี ES คืน None (ให้ fallback)", airports.es_search("BKK") is None)
     check("reindex_es: ไม่มี ES คืน 0", airports.reindex_es(_write(DICT_DB)) == 0)
 
-# ---------- 6. ไฟล์ starter จริงในโปรเจกต์ (ถ้ามี) ----------
+# ---------- 6. ค้นแบบ streaming (memory-safe สำหรับไฟล์ใหญ่) ----------
+_sp_dict = _write(DICT_DB)
+check("source_available: ไฟล์มีอยู่ -> True", airports.source_available(_sp_dict))
+check("source_available: ไฟล์ไม่มี -> False", not airports.source_available("/no/such/airports.json"))
+_ss = airports.search_stream("BKK", 3, path=_sp_dict)
+check("stream: ค้นรหัส BKK เจอ (dict-keyed)", bool(_ss) and _ss[0]["iata"] == "BKK", _ss)
+_ss2 = airports.search_stream("Suvarnabhumi", 3, path=_sp_dict)
+check("stream: ค้นชื่อเจอ", bool(_ss2) and _ss2[0]["icao"] == "VTBS")
+_ss3 = airports.search_stream("Tokyo", 5, path=_sp_dict)
+check("stream: ค้นเมือง Tokyo -> 2 ผล + เคารพ limit", len(airports.search_stream("Tokyo", 1, path=_sp_dict)) == 1
+      and len(_ss3) == 2, [r["iata"] for r in _ss3])
+check("stream: คำค้นว่าง -> []", airports.search_stream("   ", 3, path=_sp_dict) == [])
+# list-schema + wrapped schema ({"airports":[...]}) ก็สตรีม/ถอยไปโหลดได้
+check("stream: list schema เจอ", bool(airports.search_stream("BKK", 1, path=_write(LIST_DB))))
+check("stream: wrapped schema ({'airports':[..]}) เจอ (fallback)",
+      bool(airports.search_stream("ATL", 1, path=_write(CODE_DB))))
+
+# ---------- 7. ไฟล์ starter จริงในโปรเจกต์ (ถ้ามี) ----------
 real = airports.load_airports()
 if real:
     check("starter: /airport BKK ใช้งานได้จริง",
           bool(airports.search_airports(real, "BKK")))
+    check("starter: search_stream ค้นไฟล์จริงได้", bool(airports.search_stream("BKK", 1)))
 
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL: print("FAILED:", FAIL)

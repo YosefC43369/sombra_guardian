@@ -1514,11 +1514,12 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ตัวอย่าง: /airport BKK  |  /airport VTBS  |  /airport Suvarnabhumi\n"
             "Admin: /airport reindex เพื่อทำดัชนีลง Elasticsearch")
 
-    if not airports.load_airports():
+    # เช็คว่ามีไฟล์ให้ค้นไหม แบบเบา ๆ (ไม่โหลดทั้งไฟล์เข้า RAM — รองรับไฟล์ใหญ่)
+    if not airports.source_available():
         return await update.message.reply_text(
             "⚠️ ยังไม่มีไฟล์ฐานข้อมูลสนามบิน (resource/airports.json) หรืออ่านไม่ได้")
 
-    # ค้นผ่าน ES ก่อน (ถ้ามี) แล้ว fallback ไปค้นในไฟล์
+    # ค้นผ่าน ES ก่อน (ถ้ามี) แล้ว fallback ไปค้นในไฟล์แบบ streaming (memory-safe)
     hits = None
     via = ""
     if airports.es_configured():
@@ -1530,9 +1531,8 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hits is not None:
             via = "Elasticsearch"
     if hits is None:
-        recs = airports.load_airports()
-        hits = airports.search_airports(recs, query, 5)
-        via = "ไฟล์ JSON"
+        hits = await asyncio.to_thread(airports.search_stream, query, 5)
+        via = "ไฟล์ (streaming)"
 
     text = airports.format_results(hits, query, via=via)
     # ไม่พบผล + ค้นผ่าน ES -> เสนอ "did you mean" (แก้คำสะกดผิด)
