@@ -16,6 +16,8 @@ import os
 import re
 import json
 import logging
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Dict, List, Optional
 
 logger = logging.getLogger("modbot.airports")
@@ -24,15 +26,59 @@ logger = logging.getLogger("modbot.airports")
 AIRPORTS_PATH = os.getenv("AIRPORTS_DB", "").strip() or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "resource", "airports.json")
 
+
+def _resolve_source_path() -> str:
+    """หา path ของไฟล์ airports.json ที่จะเปิดอ่าน
+
+    ถ้าตั้งค่า Google Drive ไว้ (reference_data) จะได้ path ของ cache ที่ซิงก์จาก
+    Drive มาแล้ว (source of truth บน Drive) มิฉะนั้นถอยไปใช้ไฟล์ในเครื่อง AIRPORTS_PATH
+    ตามพฤติกรรมเดิมทุกประการ — import แบบกันพังเพื่อไม่ให้ airports.py พึ่ง reference_data
+    """
+    if os.getenv("AIRPORTS_DB", "").strip():
+        return AIRPORTS_PATH   # ผู้ใช้ override path ตรง ๆ = เคารพเสมอ ไม่ผ่าน Drive
+    try:
+        import reference_data
+        resolved = reference_data.get_dataset_path("airports.json")
+        if resolved:
+            return resolved
+    except Exception:
+        logger.debug("AIRPORTS | reference_data ใช้ไม่ได้ ใช้ไฟล์ในเครื่องแทน")
+    return AIRPORTS_PATH
+
 # ดัชนี Elasticsearch สำหรับสนามบิน (ใช้ client/คอนฟิกร่วมกับ osint_es)
 ES_INDEX = os.getenv("AIRPORTS_ES_INDEX", "").strip() or "sombra_airports"
 
+# เพดานจำนวนระเบียนที่จะยอมทำ fuzzy (กันไฟล์ใหญ่มากช้าเกินไป) และเกณฑ์ความคล้าย
+FUZZY_MAX_RECORDS = int(os.getenv("AIRPORTS_FUZZY_MAX", "60000") or "60000")
+FUZZY_MIN_RATIO = float(os.getenv("AIRPORTS_FUZZY_MIN_RATIO", "0.72") or "0.72")
+
 _cache = {"path": None, "mtime": None, "records": None}
+# ดัชนีค้นหาในหน่วยความจำ (สร้างครั้งเดียวต่อชุดข้อมูล เพื่อความไว)
+_index_cache = {"key": None, "index": None}
 
 # ---------- regex สำหรับ "สกัดข้อความ" ----------
 _RE_IATA = re.compile(r"^[A-Za-z]{3}$")     # รหัส IATA 3 ตัว (เช่น BKK)
 _RE_ICAO = re.compile(r"^[A-Za-z]{4}$")     # รหัส ICAO 4 ตัว (เช่น VTBS)
 _RE_WS = re.compile(r"\s+")
+_RE_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def _deaccent(text: str) -> str:
+    """ตัดเครื่องหมายกำกับเสียง (accent/diacritic) ออก เพื่อให้ "Suárez"≈"Suarez\""""
+    if not text:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", str(text))
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _norm(text: str) -> str:
+    """normalize สำหรับเทียบข้อความ: ตัด accent + lowercase + ยุบช่องว่าง"""
+    return _RE_WS.sub(" ", _deaccent(text)).strip().lower()
+
+
+def _tokenize(text: str) -> List[str]:
+    """ตัดคำเป็นโทเคน a-z0-9 หลัง normalize (ใช้จับคำแยกในชื่อ/เมือง)"""
+    return _RE_TOKEN.findall(_norm(text))
 
 
 # ---------------- โหลด + normalize ฐานข้อมูล ----------------
@@ -78,7 +124,7 @@ def load_airports(path: Optional[str] = None) -> List[dict]:
 
     รองรับทั้ง dict (คีย์ = รหัสสนามบิน) และ list ของ object
     """
-    target = path or AIRPORTS_PATH
+    target = path or _resolve_source_path()
     try:
         mtime = os.path.getmtime(target)
     except OSError:
@@ -141,47 +187,98 @@ def extract_query(text: str) -> dict:
     return {"raw": raw, "value": value, "kind": "text"}
 
 
-# ---------------- ค้นหาในหน่วยความจำ (fallback ไม่ต้องมี ES) ----------------
+# ---------------- ดัชนีค้นหาในหน่วยความจำ (fallback ไม่ต้องมี ES) ----------------
 
-def _score(rec: dict, q: dict) -> int:
-    """ให้คะแนนความเข้ากันของระเบียนกับคำค้น (มาก = ตรงกว่า) 0 = ไม่ตรง"""
-    value = q["value"]
-    low = value.lower()
-    kind = q["kind"]
-    name = (rec.get("name") or "").lower()
-    city = (rec.get("city") or "").lower()
-    # รหัสทั้งหมดของสนามบินนี้ (iata/icao/code) — รองรับไฟล์ที่ใช้ฟิลด์ต่างกัน
-    codes = {c for c in ((rec.get("iata") or "").lower(),
-                         (rec.get("icao") or "").lower(),
-                         (rec.get("code") or "").lower()) if c}
+def _build_index(records: List[dict]) -> dict:
+    """สร้างดัชนีค้นหา: precompute ชื่อ/เมือง normalize + โทเคน + รหัส และ map รหัส->ระเบียน
+    เพื่อให้ค้นซ้ำ ๆ ไว (ไม่ต้อง normalize ใหม่ทุกครั้ง) — ไม่แก้ไขระเบียนเดิม"""
+    entries = []
+    by_code: Dict[str, dict] = {}
+    for rec in records or []:
+        codes = {c.lower() for c in (rec.get("iata"), rec.get("icao"), rec.get("code")) if c}
+        name_n = _norm(rec.get("name"))
+        city_n = _norm(rec.get("city"))
+        entries.append({
+            "rec": rec, "codes": codes, "name_n": name_n, "city_n": city_n,
+            "country_n": _norm(rec.get("country")),
+            "tokens": set(_tokenize(rec.get("name")) + _tokenize(rec.get("city"))),
+        })
+        for c in codes:
+            by_code.setdefault(c, rec)
+    return {"entries": entries, "by_code": by_code, "n": len(entries)}
 
-    # รหัสตรงเป๊ะ = คะแนนสูงสุด (ไม่ว่าผู้ใช้จะพิมพ์ IATA/ICAO/code)
-    if low and low in codes:
-        return 100
 
-    if kind == "text":
-        if name == low or city == low:
-            return 90
-        if name.startswith(low) or city.startswith(low):
-            return 70
-        if low in name or low in city:
-            return 40
+def _get_index(records: List[dict]) -> dict:
+    """คืนดัชนีของชุดข้อมูลนี้ (แคชไว้ตาม identity+ขนาด เพื่อไม่สร้างซ้ำทุกครั้ง)"""
+    key = (id(records), len(records or []))
+    if _index_cache["key"] == key and _index_cache["index"] is not None:
+        return _index_cache["index"]
+    index = _build_index(records or [])
+    _index_cache.update(key=key, index=index)
+    return index
+
+
+def _text_score(e: dict, qn: str, qtokens: List[str], allow_fuzzy: bool) -> int:
+    """ให้คะแนนความเข้ากันของ 'ชื่อ/เมือง' กับคำค้นที่ normalize แล้ว (0 = ไม่ตรง)
+
+    ไล่จากตรงที่สุดไปหลวมสุด: ตรงเป๊ะ > ขึ้นต้น > ทุกโทเคนขึ้นต้นตรง > substring > fuzzy
+    """
+    name, city = e["name_n"], e["city_n"]
+    if not qn:
+        return 0
+    if qn == name or qn == city:
+        return 96
+    if name.startswith(qn) or city.startswith(qn):
+        return 82
+    # ทุกโทเคนของคำค้นต้องมีคำในชื่อ/เมืองที่ "ขึ้นต้นตรง" (เช่น "los ang" -> Los Angeles)
+    if qtokens:
+        toks = e["tokens"]
+        if all(any(tok == t or tok.startswith(t) for tok in toks) for t in qtokens):
+            return 68
+    if qn in name or qn in city:
+        return 52
+    if allow_fuzzy and len(qn) >= 4:
+        ratio = max(SequenceMatcher(None, qn, name).ratio(),
+                    SequenceMatcher(None, qn, city).ratio())
+        # เทียบกับโทเคนเดี่ยว ๆ ด้วย เผื่อชื่อยาว (เช่น "…Airport") ทำให้ ratio รวมต่ำ
+        # จำกัดเฉพาะโทเคนที่ยาวใกล้เคียงคำค้น เพื่อไม่ให้เสียเวลาโดยเปล่าประโยชน์
+        for tok in e["tokens"]:
+            if abs(len(tok) - len(qn)) <= 3:
+                ratio = max(ratio, SequenceMatcher(None, qn, tok).ratio())
+        if ratio >= FUZZY_MIN_RATIO:
+            return int(35 + ratio * 20)   # ~49..55 (สะกดผิดเล็กน้อยยังเจอ)
     return 0
 
 
 def search_airports(records: List[dict], query: str, limit: int = 5) -> List[dict]:
-    """ค้นสนามบินจากรายการที่โหลดไว้ (pure-python) — คืนระเบียนที่ตรงเรียงตามคะแนน"""
-    q = extract_query(query)
-    if not q["value"]:
+    """ค้นสนามบินจากรายการที่โหลดไว้ (pure-python) — คืนระเบียนที่ตรงเรียงตามคะแนน
+
+    รองรับ: รหัสตรงเป๊ะ (IATA/ICAO/code), รหัสขึ้นต้น (BK->BKK), ชื่อ/เมืองตรง/ขึ้นต้น/
+    ตรงเป็นคำ, substring และ fuzzy (สะกดผิดเล็กน้อย เช่น "Suvarnabumi") — ตัด accent ให้
+    อัตโนมัติ ("Suarez"≈"Suárez")
+    """
+    val = extract_query(query)["value"]
+    if not val:
         return []
+    index = _get_index(records)
+    qn = _norm(val)
+    qtokens = _tokenize(val)
+    allow_fuzzy = index["n"] <= FUZZY_MAX_RECORDS
+
     scored = []
-    for rec in records or []:
-        s = _score(rec, q)
+    for e in index["entries"]:
+        codes = e["codes"]
+        if qn in codes:
+            s = 100                                   # รหัสตรงเป๊ะ
+        elif len(qn) >= 2 and any(c.startswith(qn) for c in codes):
+            s = 88                                    # รหัสขึ้นต้น (BK -> BKK)
+        else:
+            s = _text_score(e, qn, qtokens, allow_fuzzy)
         if s > 0:
-            scored.append((s, rec))
-    # คะแนนมากก่อน แล้วเรียงตามชื่อเพื่อผลคงที่
-    scored.sort(key=lambda x: (-x[0], (x[1].get("name") or "").lower()))
-    return [rec for _, rec in scored[: max(1, int(limit))]]
+            scored.append((s, e["name_n"], e["rec"]))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [rec for _, _, rec in scored[: max(1, int(limit))]]
 
 
 # ---------------- Elasticsearch (ทางเลือก, ใช้ client ร่วมกับ osint_es) ----------------
@@ -203,65 +300,49 @@ def es_configured() -> bool:
 
 
 def reindex_es(path: Optional[str] = None) -> int:
-    """ทำดัชนีสนามบินทั้งหมดลง Elasticsearch — คืนจำนวนที่ index สำเร็จ (0 ถ้าไม่มี ES)"""
-    client = _es_client()
-    if client is None:
-        return 0
+    """ทำดัชนีสนามบินลง Elasticsearch — คืนจำนวนที่ index สำเร็จ (0 ถ้าไม่มี ES)
+
+    ต่อยอดผ่านชั้นค้นหากลาง reference_data.search_index (bulk + analyzer autocomplete/
+    folding/code-normalizer) โดยส่ง "record ที่ normalize แล้ว" ของสนามบินเข้าไป index
+    """
     records = load_airports(path)
     if not records:
         return 0
     try:
-        if not client.indices.exists(index=ES_INDEX):
-            client.indices.create(index=ES_INDEX, body={"mappings": {"properties": {
-                "icao": {"type": "keyword"}, "iata": {"type": "keyword"},
-                "code": {"type": "keyword"},
-                "name": {"type": "text"}, "city": {"type": "text"},
-                "country": {"type": "keyword"}, "state": {"type": "text"},
-            }}})
-    except Exception as e:
-        logger.warning("AIRPORTS ES | สร้าง index ไม่สำเร็จ (%s)", e)
-        return 0
-    ok = 0
-    for rec in records:
-        doc_id = rec.get("icao") or rec.get("iata") or rec.get("name")
-        try:
-            client.index(index=ES_INDEX, id=doc_id, document=rec)
-            ok += 1
-        except Exception as e:
-            logger.debug("AIRPORTS ES | index %s ไม่สำเร็จ (%s)", doc_id, e)
-    try:
-        client.indices.refresh(index=ES_INDEX)
+        from reference_data import search_index
     except Exception:
-        pass
-    logger.info("AIRPORTS ES | ทำดัชนี %d สนามบิน", ok)
-    return ok
+        return 0
+    return search_index.index_dataset("airports.json", records=records)
 
 
 def es_search(query: str, limit: int = 5) -> Optional[List[dict]]:
     """ค้นสนามบินผ่าน Elasticsearch — คืน list ระเบียน หรือ None ถ้า ES ใช้ไม่ได้
     (ให้ผู้เรียก fallback ไป search_airports)"""
-    client = _es_client()
-    if client is None:
-        return None
-    q = extract_query(query)
-    if not q["value"]:
+    if not extract_query(query)["value"]:
         return []
-    if q["kind"] in ("iata", "icao"):
-        body = {"size": limit, "query": {"bool": {"should": [
-            {"term": {"iata": q["value"]}}, {"term": {"icao": q["value"]}},
-            {"term": {"code": q["value"]}},
-        ], "minimum_should_match": 1}}}
-    else:
-        body = {"size": limit, "query": {"multi_match": {
-            "query": q["value"], "fields": ["name^2", "city", "state", "country"],
-            "type": "best_fields", "fuzziness": "AUTO",
-        }}}
     try:
-        resp = client.search(index=ES_INDEX, body=body)
-    except Exception as e:
-        logger.debug("AIRPORTS ES | ค้นไม่สำเร็จ (%s) — fallback", e)
+        from reference_data import search_index
+    except Exception:
         return None
-    return [h.get("_source", {}) for h in resp.get("hits", {}).get("hits", [])]
+    return search_index.search("airports", query, limit)
+
+
+def es_suggest(prefix: str, limit: int = 8) -> Optional[List[dict]]:
+    """typeahead ผ่าน completion suggester — คืน list ระเบียน หรือ None ถ้าไม่มี ES"""
+    try:
+        from reference_data import search_index
+    except Exception:
+        return None
+    return search_index.suggest("airports", prefix, limit)
+
+
+def es_did_you_mean(query: str) -> Optional[str]:
+    """แก้คำสะกดผิด (did you mean) — คืนคำที่น่าจะหมายถึง หรือ None"""
+    try:
+        from reference_data import search_index
+    except Exception:
+        return None
+    return search_index.did_you_mean("airports", query)
 
 
 # ---------------- จัดข้อความตอบกลับ ----------------

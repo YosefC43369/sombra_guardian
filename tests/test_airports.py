@@ -72,6 +72,27 @@ check("search: substring ในชื่อ", airports.search_airports(recs, "Ha
 check("search: ไม่พบ -> []", airports.search_airports(recs, "ZZZ") == [])
 check("search: คำค้นว่าง -> []", airports.search_airports(recs, "  ") == [])
 
+# ---------- 3b. ค้นหาขั้นสูง (upgrade): prefix / accent / fuzzy / token ----------
+ADV = airports.load_airports(_write({"airports": [
+    {"code": "BKK", "name": "Suvarnabhumi Airport", "city": "Bangkok", "country": "TH"},
+    {"code": "MAD", "name": "Adolfo Suárez Madrid-Barajas", "city": "Madrid", "country": "ES"},
+    {"code": "LAX", "name": "Los Angeles International", "city": "Los Angeles", "country": "US"},
+    {"code": "FRA", "name": "Frankfurt Airport", "city": "Frankfurt", "country": "DE"},
+]}))
+def _adv(q):
+    r = airports.search_airports(ADV, q, 3)
+    return r[0]["code"] if r else None
+check("adv: รหัสขึ้นต้น BK -> BKK", _adv("BK") == "BKK")
+check("adv: ชื่อขึ้นต้น Suvarna -> BKK", _adv("Suvarna") == "BKK")
+check("adv: token 'Los Ang' -> LAX", _adv("Los Ang") == "LAX")
+check("adv: accent-fold 'Suarez' -> MAD", _adv("Suarez") == "MAD")
+check("adv: fuzzy 'Suvarnabumi' (สะกดผิด) -> BKK", _adv("Suvarnabumi") == "BKK")
+check("adv: fuzzy 'Frankfrut' -> FRA", _adv("Frankfrut") == "FRA")
+check("adv: exact code ยังแม่น 'MAD' -> MAD", _adv("MAD") == "MAD")
+check("adv: ขยะไม่แมตช์มั่ว 'zzzqwe' -> None", _adv("zzzqwe") is None)
+check("adv: _deaccent ตัด accent", airports._deaccent("Suárez") == "Suarez")
+check("adv: _tokenize แยกคำ", airports._tokenize("Los Angeles Intl!") == ["los", "angeles", "intl"])
+
 # ---------- 4. format ----------
 one = airports.format_results(airports.search_airports(recs, "BKK"), "BKK", via="ไฟล์")
 check("format: ผลเดียวมี ชื่อ/เมือง/ประเทศ",

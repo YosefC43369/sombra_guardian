@@ -12,3 +12,10 @@ tzdata
 # ทางเลือก: backend ค้นหา/ทำดัชนีฐานข้อมูลผล OSINT (/dbsearch) — ถ้าไม่ติดตั้ง
 # ระบบจะ fallback ไปค้นในไฟล์ JSON ตรง ๆ โดยอัตโนมัติ
 elasticsearch
+# ทางเลือก: เก็บ dataset อ้างอิง (airports.json / programming-languages.json) บน
+# Google Drive แทนดิสก์ VPS — ถ้าไม่ติดตั้ง/ไม่ตั้งค่า จะใช้ไฟล์ในเครื่องเหมือนเดิม
+google-api-python-client
+google-auth
+# ทางเลือก: stream อ่าน JSON array ขนาดใหญ่แบบไม่โหลดทั้งไฟล์เข้า RAM (parser JSON)
+# — ถ้าไม่ติดตั้ง จะ fallback ไป json.load ปกติ (CSV/SQL ใช้ stdlib ล้วน ไม่ต้องพึ่ง)
+ijson
