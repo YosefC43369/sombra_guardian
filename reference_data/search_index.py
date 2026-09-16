@@ -32,12 +32,22 @@ BULK_CHUNK = int(os.getenv("REFERENCE_ES_BULK", "1000") or "1000")
 # ไม่มีปลั๊กอิน index_dataset จะถอยไปสร้าง index แบบไม่มี phonetic ให้อัตโนมัติ)
 PHONETIC_ENABLED = os.getenv("REFERENCE_ES_PHONETIC", "").strip().lower() in (
     "1", "true", "yes", "on")
+# Thai word segmentation — ใช้ tokenizer "thai" ที่มากับ Elasticsearch (โมดูล
+# analysis-common ในตัว ไม่ต้องลงปลั๊กอิน) แบ่งคำไทยด้วยพจนานุกรม ทำให้ค้นชื่อ/เมือง
+# ภาษาไทยได้ "ตรงคำ" แทนที่จะตัดเป็นตัวอักษรเดี่ยว ๆ แบบ standard tokenizer (ดีฟอลต์เปิด;
+# ถ้าคลัสเตอร์ใดไม่มี ให้ index_dataset ถอยไปสร้างแบบไม่มี thai ให้อัตโนมัติ)
+THAI_ENABLED = os.getenv("REFERENCE_ES_THAI", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 # synonym expansion ตอนค้น — ดีฟอลต์มีชุดคำพ้องของ "ข้อมูลอ้างอิง" ที่ปลอดภัย
 # override ได้ด้วย env REFERENCE_ES_SYNONYMS (คั่นด้วย ; หรือขึ้นบรรทัดใหม่)
 _DEFAULT_SYNONYMS = ["international, intl, int'l", "airport, airfield, aerodrome"]
 
 # ฟิลด์ช่วยค้นที่เติมตอน index (ไม่ส่งคืนในผลลัพธ์)
-_HELPER_FIELDS = ("_all_text", "_all_auto", "_codes", "_suggest", "_all_phon")
+_HELPER_FIELDS = ("_all_text", "_all_auto", "_codes", "_suggest", "_all_phon", "_all_thai")
+
+# ช่วง Unicode อักษรไทย — ใช้ตัดสินใจว่าคำค้นเป็นภาษาไทยไหม (เลือก field/สัญญาณให้เหมาะ)
+def _has_thai(s: str) -> bool:
+    return any("฀" <= ch <= "๿" for ch in str(s or ""))
 # ฟิลด์ที่มักเป็น "รหัส" ใช้เดา _id ของ doc
 _ID_FIELDS = ("code", "iata", "icao", "id", "key", "name")
 
@@ -50,16 +60,20 @@ def _synonyms():
     return list(_DEFAULT_SYNONYMS)
 
 
-def _index_body(phonetic: bool) -> dict:
-    """ประกอบ settings/mappings ของ index (เปิด/ปิด phonetic + synonym ได้)
+def _index_body(phonetic: bool, thai: Optional[bool] = None) -> dict:
+    """ประกอบ settings/mappings ของ index (เปิด/ปิด phonetic + thai + synonym ได้)
 
     - folding: ตัด accent + lowercase (ค้น full-text)
     - autocomplete_index: edge-ngram ตอน index (พิมพ์ไปค้นไป เร็วมาก)
     - folding_syn: folding + synonym (ใช้เป็น search_analyzer ของ _all_text -> ค้นด้วย
       คำพ้องได้ เช่น "intl" เจอ "International")
+    - thai_text (optional): tokenizer "thai" แบ่งคำไทยด้วยพจนานุกรม + decimal_digit
+      (แปลงเลขไทย ๑๒๓ -> 123) + asciifolding — ค้นคำไทย "ตรงคำ" แม่นขึ้นมาก
     - _suggest (completion): FST suggester สำหรับ typeahead ที่เร็วและ fuzzy ได้
     - _all_phon (optional): ค้นด้วยเสียงคล้าย (Double Metaphone)
     """
+    if thai is None:
+        thai = THAI_ENABLED
     syns = _synonyms()
     analysis = {
         "filter": {"edge_ngram_filter": {"type": "edge_ngram", "min_gram": 2, "max_gram": 20}},
@@ -76,6 +90,11 @@ def _index_body(phonetic: bool) -> dict:
         analysis["analyzer"]["folding_syn"] = {
             "tokenizer": "standard", "filter": ["lowercase", "asciifolding", "syn_filter"]}
         text_search_analyzer = "folding_syn"
+    if thai:
+        # tokenizer "thai" = แบ่งคำไทยด้วย BreakIterator ในตัว ES (ไม่ต้องลงปลั๊กอิน)
+        analysis["analyzer"]["thai_text"] = {
+            "tokenizer": "thai",
+            "filter": ["lowercase", "decimal_digit", "asciifolding"]}
     if phonetic:
         analysis["filter"]["dm_filter"] = {"type": "phonetic", "encoder": "double_metaphone",
                                            "replace": False}
@@ -91,6 +110,8 @@ def _index_body(phonetic: bool) -> dict:
                      "preserve_separators": True, "preserve_position_increments": True,
                      "max_input_length": 50},
     }
+    if thai:
+        properties["_all_thai"] = {"type": "text", "analyzer": "thai_text"}
     if phonetic:
         properties["_all_phon"] = {"type": "text", "analyzer": "phonetic"}
 
@@ -182,6 +203,8 @@ def doc_from_record(rec: dict) -> dict:
     inputs = list(dict.fromkeys(inputs))   # dedupe คงลำดับ
     if inputs:
         doc["_suggest"] = {"input": inputs}
+    if THAI_ENABLED:
+        doc["_all_thai"] = blob      # วิเคราะห์ด้วย thai_text ตอน index (แบ่งคำไทย)
     if PHONETIC_ENABLED:
         doc["_all_phon"] = blob
     return doc
@@ -221,20 +244,32 @@ def index_dataset(name: str, records: Optional[Iterable[dict]] = None) -> int:
     except Exception as e:
         logger.warning("REF ES | ลบ index เก่า %s ไม่สำเร็จ (%s)", idx, e)
         return 0
-    # ลองสร้างพร้อม phonetic ถ้าเปิดไว้ — ถ้าไม่มีปลั๊กอิน analysis-phonetic ให้ถอยไป
-    # สร้างแบบไม่มี phonetic โดยอัตโนมัติ (ความสามารถอื่นยังทำงานครบ)
+    # ลองสร้างด้วยความสามารถครบก่อน (thai + phonetic) แล้วค่อย ๆ ถอยความสามารถที่คลัสเตอร์
+    # นี้ไม่รองรับออก โดยพยายามคง thai ไว้ให้นานที่สุด (ค้นไทยแม่นสำคัญกว่า phonetic)
+    # ลำดับพยายาม: (phon,thai) richest -> plainest ตามแฟล็กที่เปิดไว้
+    def _attempts():
+        seen = set()
+        for th in ([True, False] if THAI_ENABLED else [False]):
+            for ph in ([True, False] if PHONETIC_ENABLED else [False]):
+                key = (ph, th)
+                if key not in seen:
+                    seen.add(key)
+                    yield key
     created = False
-    for want_phonetic in ([True, False] if PHONETIC_ENABLED else [False]):
+    for want_phon, want_thai in _attempts():
         try:
-            client.indices.create(index=idx, body=_index_body(want_phonetic))
+            client.indices.create(index=idx, body=_index_body(want_phon, want_thai))
             created = True
-            if PHONETIC_ENABLED and not want_phonetic:
+            if PHONETIC_ENABLED and not want_phon:
                 logger.warning("REF ES | ไม่มีปลั๊กอิน analysis-phonetic — สร้าง index "
                                "แบบไม่มี phonetic ให้แทน")
+            if THAI_ENABLED and not want_thai:
+                logger.warning("REF ES | คลัสเตอร์ไม่รองรับ tokenizer thai — สร้าง index "
+                               "แบบไม่มี thai ให้แทน (ค้นไทยจะหยาบลง)")
             break
         except Exception as e:
-            logger.info("REF ES | สร้าง index %s (phonetic=%s) ไม่สำเร็จ (%s)",
-                        idx, want_phonetic, e)
+            logger.info("REF ES | สร้าง index %s (phonetic=%s, thai=%s) ไม่สำเร็จ (%s)",
+                        idx, want_phon, want_thai, e)
     if not created:
         return 0
 
@@ -272,15 +307,31 @@ def index_dataset(name: str, records: Optional[Iterable[dict]] = None) -> int:
 # ---------------- search ----------------
 
 def build_query(query_text: str, limit: int = 10) -> dict:
-    """สร้าง ES query หลายสัญญาณ: รหัสตรง > prefix/autocomplete > fuzzy (เร็วและแม่น)"""
+    """สร้าง ES query หลายสัญญาณ (เรียงจากตรงสุด -> หลวมสุด) ให้ทั้งเร็ว แม่น และฉลาด:
+
+        รหัสตรงเป๊ะ (_codes) > วลีตรง (_all_text phrase) > prefix/autocomplete >
+        คำไทยตรงคำ (_all_thai) > fuzzy (สะกดผิด) > phonetic (เสียงคล้าย, ถ้าเปิด)
+
+    เพิ่มความฉลาด: วลีตรง (match_phrase) ดันผลที่ "ตรงทั้งวลี" ขึ้นบน, และเมื่อคำค้นมี
+    หลายคำจะใช้ minimum_should_match แบบ "70%" กับสัญญาณคำไทย/ข้อความ เพื่อไม่ให้คำเดียว
+    ที่บังเอิญตรงลากผลที่ไม่เกี่ยวขึ้นมา
+    """
     q = str(query_text or "").strip()
+    is_thai = THAI_ENABLED and _has_thai(q)
     should = [
         {"term": {"_codes": {"value": q, "boost": 12}}},          # รหัสตรงเป๊ะ
+        {"match_phrase": {"_all_text": {"query": q, "boost": 7}}},  # ตรงทั้งวลี (แม่นสุด)
         {"match_phrase_prefix": {"_all_text": {"query": q, "boost": 5}}},
         {"match": {"_all_auto": {"query": q, "boost": 4}}},        # autocomplete (edge-ngram)
         {"match": {"_all_text": {"query": q, "fuzziness": "AUTO",
                                  "prefix_length": 1, "boost": 2}}},  # สะกดผิดเล็กน้อย
     ]
+    if THAI_ENABLED:
+        # คำไทยตรงคำ (ผ่าน thai tokenizer) — วลีตรงดันสูง, ตามด้วยตรงหลายคำแบบ 70%
+        should.append({"match_phrase": {"_all_thai": {"query": q, "boost": 6}}})
+        should.append({"match": {"_all_thai": {
+            "query": q, "boost": 4 if is_thai else 2,
+            "minimum_should_match": "70%"}}})
     if PHONETIC_ENABLED:
         # จับชื่อที่ออกเสียงคล้าย (เช่น Bankok≈Bangkok) — คะแนนต่ำสุด กันรบกวนผลตรง
         should.append({"match": {"_all_phon": {"query": q, "boost": 1.5}}})
@@ -354,8 +405,10 @@ def did_you_mean(name_or_stem: str, text: str) -> Optional[str]:
     if client is None:
         return None
     idx = index_name(name_or_stem)
+    # คำค้นไทย -> แก้คำบน field ที่แบ่งคำไทยแล้ว (_all_thai) จะได้คำแนะนำที่ตรงกว่า
+    field = "_all_thai" if (THAI_ENABLED and _has_thai(text)) else "_all_text"
     body = {"suggest": {"dym": {"text": text, "term": {
-        "field": "_all_text", "suggest_mode": "missing"}}}}
+        "field": field, "suggest_mode": "missing"}}}}
     try:
         resp = client.search(index=idx, body=body)
     except Exception as e:
