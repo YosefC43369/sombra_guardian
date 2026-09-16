@@ -490,72 +490,203 @@ async def apply_warning_and_maybe_mute(update, context, user_id, reason):
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 กูมาเพื่อช่วยเหลือพวกมึงแล้ว พวกเดนนรก\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด พัฒนาโดย @wissha_yosef พ่อกูเอง")
     
+# ---------------- /help: เมนูช่วยเหลือแบบ Interactive Inline Keyboard ----------------
+#
+# เปลี่ยน /help จาก "รายการยาว ๆ" เป็นเมนูปุ่มแบ่งหมวด แสดงตามสิทธิ์ (permission-aware)
+# ใช้ is_admin() เดิม (chat-scoped) เป็นตัวตัดสินหมวด Admin — ไม่สร้างระบบสิทธิ์ใหม่
+# หมวด Admin/OSINT/BugBounty/RedTeam/PurpleTeam จะไม่แสดงต่อผู้ใช้ทั่วไป และปุ่มของ
+# หมวดเหล่านี้จะถูกตรวจสิทธิ์ซ้ำอีกครั้งใน callback ก่อนแสดงรายละเอียด
+# (การตรวจสิทธิ์จริงตอน execute แต่ละคำสั่งยังทำงานเหมือนเดิมในตัว handler ของคำสั่งนั้น)
+
+_HELP_CB = "help"
+# (key, emoji, label, admin_only)
+_HELP_CATEGORIES = [
+    ("general", "🛠️", "ทั่วไป", False),
+    ("ai", "🤖", "AI", False),
+    ("admin", "🛡️", "Admin", True),
+    ("osint", "🔎", "OSINT", True),
+    ("bugbounty", "🐞", "Bug Bounty", True),
+    ("redteam", "🔴", "Red Team", True),
+    ("purpleteam", "🟣", "Purple Team", True),
+    ("about", "ℹ️", "About", False),
+]
+_HELP_SECTION_KEYS = {k for k, _, _, _ in _HELP_CATEGORIES}
+_HELP_ADMIN_ONLY = {k for k, _, _, adm in _HELP_CATEGORIES if adm}
+_HELP_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+_HELP_MAIN_TEXT = (
+    "🤖 JOSEPH SECRET BOT\n"
+    f"{_HELP_DIVIDER}\n"
+    "📖 เลือกหมวดคำสั่งที่ต้องการ\n\n"
+    "เลือกหมวดด้านล่างเพื่อดูรายละเอียดคำสั่ง\n\n"
+    f"{_HELP_DIVIDER}\n"
+    "🔐 เมนูจะแสดงตามสิทธิ์ของผู้ใช้"
+)
+
+# เนื้อหาแต่ละหมวด ("{bot}" จะถูกแทนด้วย @username จริงตอนแสดง)
+_HELP_BODIES = {
+    "general": (
+        "🛠️ คำสั่งทั่วไป\n" + _HELP_DIVIDER + "\n"
+        "/status\n📡 ดูสถานะบอท\n\n"
+        "/filter_on\n🛡️ เปิดตัวกรองคำ\n\n"
+        "/filter_off\n🛡️ ปิดตัวกรองคำ\n\n"
+        "/addword <คำ>\n➕ เพิ่มคำต้องห้าม\n\n"
+        "/delword <คำ>\n➖ ลบคำต้องห้าม\n\n"
+        "/listwords\n📋 แสดงคำต้องห้ามทั้งหมด\n\n"
+        "/warnings\n⚠️ ดู Warning — ใช้กับ Reply\n\n"
+        "/resetwarn\n🔄 รีเซ็ต Warning — ใช้กับ Reply\n\n"
+        "/mute 10m\n🔇 Mute สมาชิก — ใช้กับ Reply\n\n"
+        "/unmute\n🔊 ปลด Mute\n\n"
+        "/id\n🆔 ดู Chat ID"
+    ),
+    "ai": (
+        "🤖 AI\n" + _HELP_DIVIDER + "\n"
+        "💬 ถาม AI\nแท็ก @{bot} แล้วพิมพ์คำถาม\n\n"
+        "🖼️ วิเคราะห์ไฟล์\nส่งรูปภาพ / PDF / TXT พร้อม Caption ที่แท็กบอท\n"
+        "หรือ Reply ไฟล์เดิมแล้วแท็กบอท\n\n"
+        "🎨 สร้างภาพ\n/imagine <คำอธิบาย>\nให้ AI สร้างรูปภาพแล้วส่งกลับเข้าแชท"
+    ),
+    "admin": (
+        "🛡️ Admin — สมาชิก / เหตุการณ์ / หลักฐาน & การเงิน\n"
+        "(ต้องมีสิทธิ์ Admin ในกลุ่ม — ตรวจสิทธิ์จริงก่อนทำงานเสมอ)\n" + _HELP_DIVIDER + "\n"
+        "👤 Member / Incident\n"
+        "/member <User ID|@user>\n"
+        "/memberhistory <เป้าหมาย>\n"
+        "/memberrisk [เป้าหมาย]\n"
+        "/timeline <เป้าหมาย> [จำนวน]\n"
+        "/incidents [open|สถานะ|ประเภท]\n"
+        "/incident <id> [status|note|case|verify]\n"
+        "/memberreport <เป้าหมาย> [json|csv]\n"
+        "/memberreport audit [ชม.]\n"
+        "/memberpatterns [นาที] [จำนวนบัญชี]\n"
+        "/memberpurge [run|forget <เป้าหมาย>]\n\n"
+        "🔐 Evidence / Audit\n"
+        "/evidence <id>|list|capture\n"
+        "/verifyevidence <id>\n\n"
+        "💰 Debt / Payment\n"
+        "/sign <ชื่อ> <จำนวนเงิน> [รายการ...]\n"
+        "/debt [ชื่อ|unpaid|paid|all]\n"
+        "/debt_summary [YYYY-MM] [ai]\n"
+        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM]"
+    ),
+    "osint": (
+        "🔎 OSINT\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
+        "/search <คำค้น|อีเมล|โดเมน|@user|BTC>\n🔎 ค้นหาข้อมูลจากแหล่งที่ได้รับอนุญาต\n\n"
+        "/deepsearch <เป้าหมาย>\n🔍 ค้นเชื่อมโยงหลายรอบเพื่อตรวจสอบความสัมพันธ์ของข้อมูล\n\n"
+        "/identity <เป้าหมาย>\n🧩 วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล\n\n"
+        "/corporate <เป้าหมาย>\n🏢 วิเคราะห์ข้อมูลที่เกี่ยวข้องกับองค์กร\n\n"
+        "/dbsearch <คำค้น> · /dbstats\n🗂️ ค้น/สถิติฐานข้อมูลผลที่ยืนยันบันทึกแล้ว"
+    ),
+    "bugbounty": (
+        "🐞 Bug Bounty\n🔐 Admin + Target ต้องอยู่ใน Scope ที่ได้รับอนุญาต\n" + _HELP_DIVIDER + "\n"
+        "/scan <program_id> [quick|full] <target>\n🔍 Passive vulnerability scan ภายใน scope\n\n"
+        "/scans <program_id>\n📚 ประวัติการสแกน\n\n"
+        "/scanview <scan_id>\n📑 รายงานผลการสแกน\n\n"
+        "/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ]\n🚩 ยกข้อสังเกตเป็น Finding"
+    ),
+    "redteam": (
+        "🔴 Red Team\n⚔️ Admin + ต้องมี Authorized Engagement และ Rules of Engagement (RoE)\n"
+        + _HELP_DIVIDER + "\n"
+        "/engagement new|list|show|authorize|operator|status|kill\n"
+        "/scope <engagement_id> add|list\n"
+        "/roe <engagement_id> <target>\n"
+        "/rttarget <engagement_id> add|list\n"
+        "/rtfinding <engagement_id> new|list|reclass\n"
+        "/rtvector <engagement_id> new|list|review\n"
+        "/rtevidence <engagement_id> add|list|verify\n"
+        "/rtreview <engagement_id> [queue|decide]\n"
+        "/rttimeline <engagement_id>\n"
+        "/redteam_report <engagement_id> [json|csv|remediation]"
+    ),
+    "purpleteam": (
+        "🟣 Purple Team\n🔐 ต้องผูกกับ Authorized Engagement\n" + _HELP_DIVIDER + "\n"
+        "/exercise new|list|show|start|complete|cancel\n"
+        "/ptemulate <exercise_id> add|list\n"
+        "/ptdetect <exercise_id> <emulation_id> <ผล>\n"
+        "/pttune <exercise_id> list|propose|status|validate\n"
+        "/ptcoverage <exercise_id>\n"
+        "/purple_report <exercise_id> [json|csv|navigator]"
+    ),
+    "about": (
+        "ℹ️ About\n" + _HELP_DIVIDER + "\n"
+        "🤖 JOSEPH SECRET BOT\n"
+        "บอทผู้ช่วยดูแลกลุ่ม + เครื่องมือ OSINT / Bug Bounty / Red-Purple Team\n"
+        "พัฒนาโดย @wissha_yosef\n\n"
+        "พิมพ์ /help เพื่อเปิดเมนูนี้อีกครั้ง\n"
+        "🔐 คำสั่งที่ต้องใช้สิทธิ์จะถูกตรวจสอบก่อนทำงานเสมอ"
+    ),
+}
+
+
+def _help_section_text(key: str, bot_username: str) -> str:
+    body = _HELP_BODIES.get(key, "")
+    if "{bot}" in body:
+        body = body.replace("{bot}", str(bot_username or "bot"))
+    return body
+
+
+def _help_main_keyboard(is_admin_flag: bool) -> InlineKeyboardMarkup:
+    """ปุ่มเมนูหลัก 2 ปุ่มต่อแถว — ซ่อนหมวด admin_only ถ้าไม่ใช่ Admin"""
+    rows, row = [], []
+    for key, emoji, label, admin_only in _HELP_CATEGORIES:
+        if admin_only and not is_admin_flag:
+            continue
+        row.append(InlineKeyboardButton(f"{emoji} {label}",
+                                        callback_data=f"{_HELP_CB}:{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def _help_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "🔙 « กลับเมนูหลัก", callback_data=f"{_HELP_CB}:main")]])
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "/status - ดูสถานะบอท\n"
-        "/filter_on /filter_off - เปิด/ปิดตัวกรองคำ\n"
-        "/addword <คำ> - เพิ่มคำต้องห้าม\n"
-        "/delword <คำ> - ลบคำต้องห้าม\n"
-        "/listwords - แสดงคำต้องห้ามทั้งหมด\n"
-        "/warnings - ดู Warning (Reply ข้อความ)\n"
-        "/resetwarn - รีเซ็ต Warning (Reply ข้อความ)\n"
-        "/mute 10m - Mute สมาชิก (Reply ข้อความ)\n"
-        "/unmute - ปลด Mute (Reply ข้อความ)\n"
-        "/id - ดู Chat ID\n"
-        f"แท็ก @{context.bot.username} แล้วพิมพ์คำถาม - ถาม AI\n"
-        f"ส่งรูปภาพ/ไฟล์ PDF/TXT พร้อม caption แท็ก @{context.bot.username} "
-        f"(หรือ Reply รูป/ไฟล์เดิมแล้วแท็ก) - ให้ AI วิเคราะห์รูป/ไฟล์\n"
-        "/imagine <คำอธิบาย> - ให้ AI สร้างรูปภาพแล้วส่งเข้าแชท\n"
-        "/search <คำค้น|อีเมล|โดเมน|@user|BTC> - ค้นหา OSINT บน dark web (Admin)\n"
-        "/deepsearch <เป้าหมาย> - ค้นแบบไม่ยอมแพ้ ค้นซ้ำจนมั่นใจว่าเป็นคนเดียวกัน (Admin)\n"
-        "/identity <เป้าหมาย> - วิเคราะห์การเปิดเผยข้อมูลส่วนบุคคล (Admin)\n"
-        "/corporate <เป้าหมาย> - วิเคราะห์ข้อมูลองค์กรรั่วไหล (Admin)\n"
-        "/dbsearch <คำค้น> - ค้นย้อนหลังในฐานข้อมูลผล OSINT ที่ยืนยันแล้ว (Admin)\n"
-        "/dbstats - สถิติฐานข้อมูล OSINT + สุขภาพการค้นหา (Admin)\n"
-        "/airport <รหัส|ชื่อ|เมือง> - ค้นข้อมูลสนามบินจากฐานข้อมูล (เช่น /airport BKK)\n"
-        "/sign <ชื่อ> <จำนวนเงิน> [รายการ...] - บันทึกยอดค้างชำระ (Admin)\n"
-        "/debt [ชื่อ|unpaid|paid|all] - ดูรายการค้างชำระ\n"
-        "/debt_summary [YYYY-MM] [ai] - สรุปยอดค้างชำระรายเดือน\n"
-        "/paid <เลขที่รายการ|ชื่อ> [YYYY-MM] - ปิดยอดชำระ (Admin)\n"
-        "\n— ระบบข้อมูลสมาชิก/เหตุการณ์/หลักฐาน (Admin ในกลุ่มเท่านั้น) —\n"
-        "/member <User ID|@user> - รายงานกิจกรรมสมาชิก (Reply ได้)\n"
-        "/memberhistory <เป้าหมาย> - ประวัติ username/ชื่อที่สังเกตได้\n"
-        "/memberrisk [เป้าหมาย] - คะแนนความเสี่ยง (ไม่ระบุ = อันดับในกลุ่ม)\n"
-        "/timeline <เป้าหมาย> [จำนวน] - ไทม์ไลน์เหตุการณ์ของสมาชิก\n"
-        "/incidents [open|สถานะ|ประเภท] - รายการเหตุการณ์\n"
-        "/incident <id> [status|note|case|verify] - รายละเอียด/จัดการเหตุการณ์\n"
-        "/incident open <CATEGORY> [SEVERITY] [สรุป] - เปิดเหตุการณ์ (Reply)\n"
-        "/evidence <id>|list|capture - คลังหลักฐาน (capture ใช้ Reply)\n"
-        "/verifyevidence <id> - ตรวจว่าหลักฐานถูกแก้ไขหรือไม่ (SHA-256)\n"
-        "/memberreport <เป้าหมาย> [json|csv] - รายงาน/ส่งออกข้อมูลสมาชิก\n"
-        "/memberreport audit [ชม.] - รายงานการดำเนินการของผู้ดูแล\n"
-        "/memberpatterns [นาที] [จำนวนบัญชี] - กิจกรรมที่สัมพันธ์กัน (ต้องตรวจสอบ)\n"
-        "/memberpurge [run|forget <เป้าหมาย>] - การเก็บ/ลบข้อมูลตามนโยบาย\n"
-        "\n— สแกนช่องโหว่ (Bug Bounty, Admin + ต้องอยู่ใน Scope ที่อนุญาต) —\n"
-        "/scan <program_id> [quick|full] <target> - สแกนแบบ passive หลายรายการรวดเดียว\n"
-        "/scans <program_id> - ประวัติการสแกน\n"
-        "/scanview <scan_id> - รายงานผลสแกนแบบละเอียด\n"
-        "/scanpromote <scan_id> <ลำดับ> [severity] [หัวข้อ] - ยกข้อสังเกตเป็น Finding\n"
-        "\n— Red Team Assessment (Admin + Rules of Engagement) —\n"
-        "/engagement new|list|show|authorize|operator|status|kill - จัดการงาน Red Team\n"
-        "/scope <engagement_id> add|list - ขอบเขต (Rules of Engagement)\n"
-        "/roe <engagement_id> <target> - ตรวจว่า target อยู่ในขอบเขต RoE หรือไม่\n"
-        "/rttarget <engagement_id> add|list - ทะเบียนเป้าหมาย (ต้องอยู่ในขอบเขต)\n"
-        "/rtfinding <engagement_id> new|list|reclass - ข้อค้นพบ + การจัดระดับ\n"
-        "/rtvector <engagement_id> new|list|review - เส้นทางโจมตีที่เป็นไปได้\n"
-        "/rtevidence <engagement_id> add|list|verify - คลังหลักฐาน + ตรวจความครบถ้วน\n"
-        "/rtreview <engagement_id> [queue|decide] - คิวตรวจสอบโดยมนุษย์\n"
-        "/rttimeline <engagement_id> - ไทม์ไลน์การปฏิบัติงาน\n"
-        "/redteam_report <engagement_id> [json|csv|remediation] - รายงาน/ส่งมอบ\n"
-        "\n— Purple Team (Detect–Tune–Validate, ผูกกับ Engagement ที่ AUTHORIZED) —\n"
-        "/exercise new|list|show|start|complete|cancel - จัดการแบบฝึก Purple Team\n"
-        "/ptemulate <exercise_id> add|list - วางแผนจำลอง (MITRE ATT&CK)\n"
-        "/ptdetect <exercise_id> <emulation_id> <ผล> - บันทึกผลการตรวจจับ + MTTD\n"
-        "/pttune <exercise_id> list|propose|status|validate - คิวปรับจูนการตรวจจับ\n"
-        "/ptcoverage <exercise_id> - ความครอบคลุมการตรวจจับ + เมตริก\n"
-        "/purple_report <exercise_id> [json|csv|navigator] - รายงาน/ส่งมอบ"
-    )
-    await update.message.reply_text(text)
+    """เปิดเมนูช่วยเหลือแบบ inline keyboard (แสดงหมวดตามสิทธิ์ของผู้ใช้)"""
+    is_admin_flag = await is_admin(update, context)
+    try:
+        await update.message.reply_text(
+            _HELP_MAIN_TEXT, reply_markup=_help_main_keyboard(is_admin_flag))
+    except TelegramError as e:
+        logger.info("HELP MENU SEND FAILED: %s", e)
+
+
+async def help_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """จัดการปุ่มเมนู /help — permission-aware + ปุ่มย้อนกลับ, กัน callback หมดอายุ/พังไม่ให้บอตล่ม"""
+    query = update.callback_query
+    data = query.data or ""
+    parts = data.split(":")
+    section = parts[1] if len(parts) > 1 else "main"
+
+    is_admin_flag = await is_admin(update, context)
+    # ตรวจสิทธิ์ซ้ำ: หมวด admin-only ไม่แสดงต่อผู้ใช้ทั่วไป (แม้จะกดปุ่มเก่า/ปลอม)
+    if section in _HELP_ADMIN_ONLY and not is_admin_flag:
+        try:
+            return await query.answer("❌ หมวดนี้ใช้ได้เฉพาะ Admin", show_alert=True)
+        except TelegramError:
+            return
+
+    try:
+        await query.answer()
+    except TelegramError:
+        pass
+
+    try:
+        if section == "main" or section not in _HELP_SECTION_KEYS:
+            await query.edit_message_text(
+                _HELP_MAIN_TEXT, reply_markup=_help_main_keyboard(is_admin_flag))
+        else:
+            await query.edit_message_text(
+                _help_section_text(section, context.bot.username),
+                reply_markup=_help_back_keyboard())
+    except TelegramError as e:
+        # "message is not modified" (กดปุ่มเดิมซ้ำ) หรือ callback เก่า -> ข้ามอย่างสงบ
+        logger.info("HELP CALLBACK EDIT SKIPPED: %s", e)
     
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -5664,6 +5795,7 @@ def main():
     app.add_handler(CommandHandler("wallet_admin", cmd_wallet_admin))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
     app.add_handler(CallbackQueryHandler(osint_db_callback_handler, pattern=r"^osintdb:"))
+    app.add_handler(CallbackQueryHandler(help_callback_handler, pattern=r"^help:"))
     # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
     # members' join/leave/ban transitions and the only source of
     # invite-link attribution. run_polling already requests

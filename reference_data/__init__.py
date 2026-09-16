@@ -25,9 +25,15 @@ from .dataset_manager import (
     sync,
     sync_all,
 )
+# Task 1: สกัดฟิลด์ + แผนที่โครงสร้างจาก dump (whitelist-gated)
+from .schema import profile_dataset, sql_schema, profile_records
+# Task 2: cleansing + dedupe + index (whitelist-gated)
+from .cleansing import clean_record, dedupe, clean_and_index, clean_all
 
 __all__ = [
     "ALLOWED_DATASETS", "is_allowed", "drive_enabled",
     "get_dataset_path", "get_json", "get_records", "parse_records",
     "sync", "sync_all",
+    "profile_dataset", "sql_schema", "profile_records",
+    "clean_record", "dedupe", "clean_and_index", "clean_all",
 ]
