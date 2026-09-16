@@ -1335,6 +1335,7 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ค้นหาสนามบินจากฐานข้อมูล resource/airports.json แล้วตอบ ชื่อ/เมือง/ประเทศ ฯลฯ
 
     ใช้งาน: /airport <รหัส IATA|ICAO|ชื่อ|เมือง>  เช่น /airport BKK หรือ /airport กรุงเทพ
+            /airport suggest <ตัวอักษร>  แนะนำแบบพิมพ์ไปค้นไป (ต้องมี Elasticsearch)
             /airport reindex  (Admin) ทำดัชนีลง Elasticsearch ใหม่
 
     ค้นผ่าน Elasticsearch ถ้าตั้งค่าไว้ ไม่งั้น fallback ค้นในไฟล์ตรง ๆ — เปิดให้ทุกคน
@@ -1352,6 +1353,24 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(
             f"✅ ทำดัชนีสนามบินลง Elasticsearch แล้ว {n} รายการ" if n
             else "⚠️ ทำดัชนีไม่สำเร็จ (ES ต่อไม่ติด หรือไฟล์ว่าง)")
+
+    # subcommand: suggest — typeahead (completion suggester) ต้องมี Elasticsearch
+    if args and args[0].lower() == "suggest":
+        prefix = " ".join(args[1:]).strip()
+        if not prefix:
+            return await update.message.reply_text("ใช้งาน: /airport suggest <ตัวอักษรที่พิมพ์>")
+        if not airports.es_configured():
+            return await update.message.reply_text(
+                "ℹ️ typeahead ต้องตั้งค่า Elasticsearch ก่อน — ใช้ /airport <คำค้น> ค้นในไฟล์ได้เลย")
+        sugg = await asyncio.to_thread(airports.es_suggest, prefix, 8)
+        if not sugg:
+            return await update.message.reply_text(f"🔎 ไม่มีคำแนะนำสำหรับ “{prefix}”")
+        lines = [f"💡 คำแนะนำสำหรับ “{prefix}”:"]
+        for r in sugg:
+            codes = " / ".join(c for c in [r.get("iata"), r.get("icao"), r.get("code")] if c)
+            lines.append(f"• {r.get('name') or r.get('text') or '-'}"
+                         + (f" [{codes}]" if codes else ""))
+        return await _reply_chunked(update, "\n".join(lines))
 
     query = " ".join(args).strip()
     if not query:
@@ -1380,7 +1399,16 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hits = airports.search_airports(recs, query, 5)
         via = "ไฟล์ JSON"
 
-    await _reply_chunked(update, airports.format_results(hits, query, via=via))
+    text = airports.format_results(hits, query, via=via)
+    # ไม่พบผล + ค้นผ่าน ES -> เสนอ "did you mean" (แก้คำสะกดผิด)
+    if not hits and via == "Elasticsearch":
+        try:
+            dym = await asyncio.to_thread(airports.es_did_you_mean, query)
+        except Exception:
+            dym = None
+        if dym:
+            text += f"\n\n🔎 หมายถึง “{dym}” หรือเปล่า? ลอง /airport {dym}"
+    await _reply_chunked(update, text)
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5399,7 +5427,8 @@ _REQUIRED_MODULE_API = {
     "search_es": ("record_search", "telemetry_doc", "engine_health",
                   "format_engine_health"),
     "airports": ("load_airports", "extract_query", "search_airports",
-                 "es_search", "reindex_es", "format_results", "es_configured"),
+                 "es_search", "reindex_es", "format_results", "es_configured",
+                 "es_suggest", "es_did_you_mean"),
     "coordinator": ("handle_request", "OSINT_MAX_QUERIES", "OSINT_TOTAL_BUDGET_SECONDS"),
     "nethealth": ("tor_reachable", "open_routes", "blocked", "record"),
     "tor_launcher": ("ensure_tor",),

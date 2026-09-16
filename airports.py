@@ -327,6 +327,24 @@ def es_search(query: str, limit: int = 5) -> Optional[List[dict]]:
     return search_index.search("airports", query, limit)
 
 
+def es_suggest(prefix: str, limit: int = 8) -> Optional[List[dict]]:
+    """typeahead ผ่าน completion suggester — คืน list ระเบียน หรือ None ถ้าไม่มี ES"""
+    try:
+        from reference_data import search_index
+    except Exception:
+        return None
+    return search_index.suggest("airports", prefix, limit)
+
+
+def es_did_you_mean(query: str) -> Optional[str]:
+    """แก้คำสะกดผิด (did you mean) — คืนคำที่น่าจะหมายถึง หรือ None"""
+    try:
+        from reference_data import search_index
+    except Exception:
+        return None
+    return search_index.did_you_mean("airports", query)
+
+
 # ---------------- จัดข้อความตอบกลับ ----------------
 
 def format_airport(rec: dict) -> str:

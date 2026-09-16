@@ -47,7 +47,55 @@ if not si.es_available():
     check("search: no-ES คืน None (ให้ fallback)", si.search("airports", "BKK") is None)
     check("index_dataset: no-ES คืน 0", si.index_dataset("airports.json", records=[REC]) == 0)
     check("index_dataset: นอก whitelist คืน 0", si.index_dataset("passwords.json", records=[REC]) == 0)
+    check("suggest: no-ES คืน None", si.suggest("airports", "ban") is None)
+    check("did_you_mean: no-ES คืน None", si.did_you_mean("airports", "Bangkkok") is None)
+    check("search_smart: no-ES คืน None", si.search_smart("airports", "x") is None)
 check("search: คำค้นว่าง -> [] (ไม่ยิง ES)", si.search("airports", "   ") == [])
+check("suggest: prefix ว่าง -> []", si.suggest("airports", "  ") == [])
+
+# ---------- 5. ความฉลาดเพิ่ม: _index_body/doc/query ----------
+body = si._index_body(False)
+check("body: มี completion suggester (_suggest)", body["mappings"]["properties"]["_suggest"]["type"] == "completion")
+check("body: มี synonym analyzer (folding_syn)", "folding_syn" in body["settings"]["analysis"]["analyzer"])
+check("body: _all_text ใช้ search_analyzer synonym",
+      body["mappings"]["properties"]["_all_text"]["search_analyzer"] == "folding_syn")
+check("body: phonetic ปิด -> ไม่มี _all_phon", "_all_phon" not in body["mappings"]["properties"])
+bp = si._index_body(True)
+check("body: phonetic เปิด -> มี _all_phon + dm_filter (double_metaphone)",
+      "_all_phon" in bp["mappings"]["properties"]
+      and bp["settings"]["analysis"]["filter"]["dm_filter"]["encoder"] == "double_metaphone")
+dd = si.doc_from_record(REC)
+check("doc: _suggest.input มีชื่อ/เมือง/รหัส", dd["_suggest"]["input"] == ["Suvarnabhumi Airport", "Bangkok", "BKK", "TH"])
+check("doc: default ไม่มี _all_phon (phonetic ปิด)", "_all_phon" not in dd)
+
+# ---------- 6. parse logic ผ่าน fake ES client (ไม่ต้องมี ES จริง) ----------
+class _FakeIndices:
+    def exists(self, index=None): return False
+    def delete(self, index=None): pass
+    def create(self, index=None, body=None): pass
+    def refresh(self, index=None): pass
+class _FakeClient:
+    def __init__(self, resp): self._resp = resp; self.indices = _FakeIndices()
+    def search(self, index=None, body=None): return self._resp
+
+_orig = si._client
+try:
+    # suggest: parse options -> record dict (ตัดฟิลด์ช่วยค้น)
+    si._client = lambda: _FakeClient({"suggest": {"s": [{"options": [
+        {"text": "Bangkok", "_source": si.doc_from_record(REC)}]}]}})
+    sg = si.suggest("airports", "ban", 5)
+    check("suggest(parse): คืน record ที่ตัดฟิลด์ช่วยค้นแล้ว", sg == [REC], sg)
+
+    # did_you_mean: term suggester -> corrected string
+    si._client = lambda: _FakeClient({"suggest": {"dym": [
+        {"text": "bangkkok", "options": [{"text": "bangkok"}]}]}})
+    check("did_you_mean(parse): แก้คำสะกดผิด", si.did_you_mean("airports", "bangkkok") == "bangkok")
+
+    # did_you_mean: ไม่มี option -> None
+    si._client = lambda: _FakeClient({"suggest": {"dym": [{"text": "bkk", "options": []}]}})
+    check("did_you_mean(parse): ไม่มีคำแก้ -> None", si.did_you_mean("airports", "bkk") is None)
+finally:
+    si._client = _orig
 
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL: print("FAILED:", FAIL)
