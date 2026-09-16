@@ -132,10 +132,10 @@ def clean_stream(records: Iterable[dict],
 def _default_keys(name: str) -> Optional[List[str]]:
     """เดาคีย์กันซ้ำที่เหมาะกับ dataset อ้างอิง — ไม่มีก็คืน None (กันซ้ำทั้งแถว)"""
     n = str(name).lower()
-    if n.startswith("PeopleDataLabs_416M"):
-        return ["name", "email"]
-    if n.startswith("northern.ac.th"):
-        return ["phone", "name", "email"]
+    if n.startswith("airports"):
+        return ["code"]
+    if n.startswith("programming-languages"):
+        return ["name"]
     return None
 
 

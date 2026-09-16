@@ -31,9 +31,7 @@ logger = logging.getLogger("modbot.reference_data")
 
 # whitelist แข็ง — เฉพาะ dataset อ้างอิงที่ไม่ใช่ PII 2 ชุด ในฟอร์แมต .json/.csv/.sql
 # (ไม่ใช่ระบบค้นฐานข้อมูล/leak/PII — ไฟล์อื่นในโฟลเดอร์ Drive ถูกเพิกเฉยเสมอ)
-_DATASET_STEMS = ("123rf.com member", "data_tour", "database", "haamor_db", "geniusu_users", "information_schema",
-                  "mysql", "northern.ac.th", "Parkmobile.us_2021-03-21.9M", "PeopleDataLabs_416M", "performance_schema",
-                  "phpmyadmin", "query_zego", "tb_customer", "tour_system")
+_DATASET_STEMS = ("airports", "programming-languages")
 _DATASET_EXTS = (".json", ".csv", ".sql")
 ALLOWED_DATASETS = {f"{stem}{ext}" for stem in _DATASET_STEMS for ext in _DATASET_EXTS}
 
