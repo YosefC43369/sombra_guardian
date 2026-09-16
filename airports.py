@@ -300,83 +300,31 @@ def es_configured() -> bool:
 
 
 def reindex_es(path: Optional[str] = None) -> int:
-    """ทำดัชนีสนามบินทั้งหมดลง Elasticsearch — คืนจำนวนที่ index สำเร็จ (0 ถ้าไม่มี ES)"""
-    client = _es_client()
-    if client is None:
-        return 0
+    """ทำดัชนีสนามบินลง Elasticsearch — คืนจำนวนที่ index สำเร็จ (0 ถ้าไม่มี ES)
+
+    ต่อยอดผ่านชั้นค้นหากลาง reference_data.search_index (bulk + analyzer autocomplete/
+    folding/code-normalizer) โดยส่ง "record ที่ normalize แล้ว" ของสนามบินเข้าไป index
+    """
     records = load_airports(path)
     if not records:
         return 0
     try:
-        if not client.indices.exists(index=ES_INDEX):
-            client.indices.create(index=ES_INDEX, body={
-                # analyzer "folding": ตัด accent (asciifolding) + lowercase เพื่อความไว
-                # ในการค้นชื่อที่มีอักขระพิเศษ (เช่น Suárez -> suarez)
-                "settings": {"analysis": {"analyzer": {"folding": {
-                    "tokenizer": "standard", "filter": ["lowercase", "asciifolding"]}}}},
-                "mappings": {"properties": {
-                    "icao": {"type": "keyword"}, "iata": {"type": "keyword"},
-                    "code": {"type": "keyword"},
-                    # search_as_you_type ให้ค้นแบบพิมพ์ไปค้นไป (prefix) ได้ในตัว
-                    "name": {"type": "search_as_you_type", "analyzer": "folding"},
-                    "city": {"type": "search_as_you_type", "analyzer": "folding"},
-                    "country": {"type": "keyword"}, "state": {"type": "text", "analyzer": "folding"},
-                }},
-            })
-    except Exception as e:
-        logger.warning("AIRPORTS ES | สร้าง index ไม่สำเร็จ (%s)", e)
-        return 0
-    ok = 0
-    for rec in records:
-        doc_id = rec.get("icao") or rec.get("iata") or rec.get("name")
-        try:
-            client.index(index=ES_INDEX, id=doc_id, document=rec)
-            ok += 1
-        except Exception as e:
-            logger.debug("AIRPORTS ES | index %s ไม่สำเร็จ (%s)", doc_id, e)
-    try:
-        client.indices.refresh(index=ES_INDEX)
+        from reference_data import search_index
     except Exception:
-        pass
-    logger.info("AIRPORTS ES | ทำดัชนี %d สนามบิน", ok)
-    return ok
+        return 0
+    return search_index.index_dataset("airports.json", records=records)
 
 
 def es_search(query: str, limit: int = 5) -> Optional[List[dict]]:
     """ค้นสนามบินผ่าน Elasticsearch — คืน list ระเบียน หรือ None ถ้า ES ใช้ไม่ได้
     (ให้ผู้เรียก fallback ไป search_airports)"""
-    client = _es_client()
-    if client is None:
-        return None
-    q = extract_query(query)
-    if not q["value"]:
+    if not extract_query(query)["value"]:
         return []
-    val = q["value"]
-    code = val.upper()
-    # รวมทุกสัญญาณเข้า bool.should ครั้งเดียว: รหัสตรง/รหัสขึ้นต้น (boost สูง) +
-    # ค้นแบบพิมพ์ไปค้นไป (search_as_you_type) + fuzzy บนชื่อ/เมือง เพื่อความไว
-    body = {"size": limit, "query": {"bool": {"should": [
-        {"term": {"iata": {"value": code, "boost": 10}}},
-        {"term": {"icao": {"value": code, "boost": 10}}},
-        {"term": {"code": {"value": code, "boost": 10}}},
-        {"prefix": {"iata": {"value": code, "boost": 4}}},
-        {"prefix": {"code": {"value": code, "boost": 4}}},
-        {"multi_match": {
-            "query": val, "type": "bool_prefix", "boost": 3,
-            "fields": ["name", "name._2gram", "name._3gram",
-                       "city", "city._2gram", "city._3gram"],
-        }},
-        {"multi_match": {
-            "query": val, "type": "best_fields", "fuzziness": "AUTO", "prefix_length": 1,
-            "fields": ["name^3", "city^2", "state", "country"],
-        }},
-    ], "minimum_should_match": 1}}}
     try:
-        resp = client.search(index=ES_INDEX, body=body)
-    except Exception as e:
-        logger.debug("AIRPORTS ES | ค้นไม่สำเร็จ (%s) — fallback", e)
+        from reference_data import search_index
+    except Exception:
         return None
-    return [h.get("_source", {}) for h in resp.get("hits", {}).get("hits", [])]
+    return search_index.search("airports", query, limit)
 
 
 # ---------------- จัดข้อความตอบกลับ ----------------
