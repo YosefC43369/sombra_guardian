@@ -33,14 +33,37 @@ check("whitelist: มี 2 stem อ้างอิง", si._allowed_stems() == {
 # ---------- 3. build_query โครงหลายสัญญาณ ----------
 q = si.build_query("BKK", 7)
 shoulds = q["query"]["bool"]["should"]
-kinds = [list(s.keys())[0] for s in shoulds]
-check("query: มีสัญญาณ term/phrase_prefix/match(autocomplete)/fuzzy",
-      kinds == ["term", "match_phrase_prefix", "match", "match"], kinds)
+
+def _clauses(shoulds, kind, field):
+    """คืนพารามิเตอร์ของ clause ตามชนิด (match/match_phrase/...) + field ที่ยิง"""
+    out = []
+    for s in shoulds:
+        for k, body in s.items():
+            if k == kind and field in body:
+                out.append(body[field])
+    return out
+
 check("query: term ยิงที่ _codes (รหัสตรง) boost สูงสุด", shoulds[0]["term"]["_codes"]["boost"] == 12)
-check("query: autocomplete ยิงที่ _all_auto", shoulds[2]["match"]["_all_auto"]["query"] == "BKK")
-check("query: fuzzy AUTO บน _all_text", shoulds[3]["match"]["_all_text"]["fuzziness"] == "AUTO")
+check("query: วลีตรง (match_phrase _all_text) boost สูง (แม่นขึ้น)",
+      bool(_clauses(shoulds, "match_phrase", "_all_text")) and
+      _clauses(shoulds, "match_phrase", "_all_text")[0]["boost"] == 7)
+check("query: autocomplete ยิงที่ _all_auto",
+      _clauses(shoulds, "match", "_all_auto")[0]["query"] == "BKK")
+check("query: fuzzy AUTO บน _all_text",
+      any(c.get("fuzziness") == "AUTO" for c in _clauses(shoulds, "match", "_all_text")))
 check("query: track_total_hits=False (เร็วขึ้น)", q["track_total_hits"] is False)
 check("query: size เคารพ limit", q["size"] == 7)
+
+# Thai signals (THAI_ENABLED ดีฟอลต์เปิด)
+check("query(thai): มีสัญญาณคำไทย _all_thai (phrase + match)",
+      bool(_clauses(shoulds, "match_phrase", "_all_thai")) and
+      bool(_clauses(shoulds, "match", "_all_thai")))
+check("query(thai): match _all_thai ใช้ minimum_should_match 70%",
+      _clauses(shoulds, "match", "_all_thai")[0]["minimum_should_match"] == "70%")
+qth = si.build_query("กรุงเทพ", 5)
+th_match = _clauses(qth["query"]["bool"]["should"], "match", "_all_thai")
+check("query(thai): คำค้นภาษาไทย boost _all_thai สูงขึ้น (is_thai)",
+      th_match and th_match[0]["boost"] == 4, th_match)
 
 # ---------- 4. graceful เมื่อไม่มี ES ----------
 if not si.es_available():
@@ -67,6 +90,22 @@ check("body: phonetic เปิด -> มี _all_phon + dm_filter (double_metap
 dd = si.doc_from_record(REC)
 check("doc: _suggest.input มีชื่อ/เมือง/รหัส", dd["_suggest"]["input"] == ["Suvarnabhumi Airport", "Bangkok", "BKK", "TH"])
 check("doc: default ไม่มี _all_phon (phonetic ปิด)", "_all_phon" not in dd)
+
+# ---------- 5b. Thai analysis (แบ่งคำไทยด้วย tokenizer thai) ----------
+bt = si._index_body(False, True)   # thai=True
+check("body(thai): มี analyzer thai_text ที่ใช้ tokenizer thai",
+      bt["settings"]["analysis"]["analyzer"]["thai_text"]["tokenizer"] == "thai")
+check("body(thai): thai_text มี decimal_digit (แปลงเลขไทย)",
+      "decimal_digit" in bt["settings"]["analysis"]["analyzer"]["thai_text"]["filter"])
+check("body(thai): มีฟิลด์ _all_thai ใช้ analyzer thai_text",
+      bt["mappings"]["properties"]["_all_thai"]["analyzer"] == "thai_text")
+bnt = si._index_body(False, False)  # thai=False
+check("body(thai ปิด): ไม่มี _all_thai / thai_text",
+      "_all_thai" not in bnt["mappings"]["properties"]
+      and "thai_text" not in bnt["settings"]["analysis"]["analyzer"])
+check("doc(thai): default มี _all_thai (THAI_ENABLED เปิด)", "_all_thai" in dd)
+check("strip: _all_thai ถูกตัดเป็นฟิลด์ช่วยค้น", "_all_thai" not in si._strip_helpers(dd))
+check("_has_thai: ตรวจอักษรไทยถูก", si._has_thai("กรุงเทพ") and not si._has_thai("Bangkok"))
 
 # ---------- 6. parse logic ผ่าน fake ES client (ไม่ต้องมี ES จริง) ----------
 class _FakeIndices:

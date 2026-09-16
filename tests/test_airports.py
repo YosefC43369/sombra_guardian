@@ -99,8 +99,22 @@ check("format: ผลเดียวมี ชื่อ/เมือง/ปร�
       "ชื่อ:" in one and "เมือง:" in one and "ประเทศ:" in one, one)
 check("format: แสดงรหัส IATA/ICAO", "BKK" in one and "VTBS" in one)
 many = airports.format_results(multi, "Tokyo")
-check("format: หลายผลระบุจำนวน", "พบ 2 สนามบิน" in many, many[:60])
+check("format: หลายผลระบุจำนวน", "พบ 2 แห่ง" in many, many[:60])
+check("format: ตกแต่งด้วยเส้นคั่น (อิโมจิ/divider)", "━" in many and "🔎" in many, many[:60])
 check("format: ไม่พบมีข้อความแนะนำ", "ไม่พบ" in airports.format_results([], "ZZZ"))
+
+# ---------- 4b. รองรับค้นภาษาไทย ----------
+check("thai: _deaccent ไม่ทำลายวรรณยุกต์/สระไทย",
+      airports._deaccent("เชียงใหม่") == "เชียงใหม่")
+check("thai: _tokenize เก็บอักษรไทยไว้",
+      airports._tokenize("ท่าอากาศยานเชียงใหม่") == ["ท่าอากาศยานเชียงใหม่"])
+_th = [{"iata": "CNX", "icao": "VTCC", "code": "CNX",
+        "name": "ท่าอากาศยานเชียงใหม่", "city": "เชียงใหม่", "country": "TH"},
+       {"iata": "BKK", "icao": "VTBS", "code": "BKK",
+        "name": "ท่าอากาศยานสุวรรณภูมิ", "city": "กรุงเทพ", "country": "TH"}]
+_thai_hits = airports.search_airports(_th, "เชียงใหม่", 5)
+check("thai: ค้นชื่อ/เมืองภาษาไทยเจอ (CNX)",
+      bool(_thai_hits) and _thai_hits[0]["code"] == "CNX", _thai_hits)
 
 # ---------- 5. es_search graceful (ไม่มี ES) ----------
 if not airports.es_configured():
