@@ -33,6 +33,7 @@ import osint_db
 import osint_es
 import search_es
 import airports
+import notes
 import nethealth
 import tor_launcher
 import username_osint
@@ -537,7 +538,12 @@ _HELP_BODIES = {
         "/resetwarn\n🔄 รีเซ็ต Warning — ใช้กับ Reply\n\n"
         "/mute 10m\n🔇 Mute สมาชิก — ใช้กับ Reply\n\n"
         "/unmute\n🔊 ปลด Mute\n\n"
-        "/id\n🆔 ดู Chat ID"
+        "/id\n🆔 ดู Chat ID\n\n"
+        "📁 คลังบันทึกกลุ่ม\n"
+        "/note <คำ>\n📌 เรียกดูบันทึก\n\n"
+        "/notes\n📋 รายการบันทึกทั้งหมด\n\n"
+        "/note add <คำ> <ข้อความ>\n➕ บันทึก (Admin) — reply ข้อความก็ได้\n\n"
+        "/note del <คำ>\n🗑️ ลบบันทึก (Admin)"
     ),
     "ai": (
         "🤖 AI\n" + _HELP_DIVIDER + "\n"
@@ -1664,6 +1670,82 @@ async def cmd_refdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /refdata status — ดูสถานะ Drive/ES/ไฟล์ที่อนุญาต\n"
         "• /refdata sync — ดึงเวอร์ชันล่าสุดจาก Google Drive\n"
         "• /refdata reindex — clean+dedupe แล้วทำดัชนี Elasticsearch ใหม่")
+
+
+async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """แสดงรายการ keyword ในคลังบันทึกของกลุ่ม (ทุกคนดูได้)"""
+    chat_id = update.effective_chat.id
+    keys = await asyncio.to_thread(notes.list_notes, chat_id)
+    await update.message.reply_text(notes.format_list(chat_id, keys))
+
+
+async def cmd_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """คลังบันทึกกลุ่ม: /note <key> ดู | /note add <key> <ข้อความ> | /note del <key> | /note list
+
+    - เรียกดู: ทุกคน
+    - เพิ่ม/ลบ: เฉพาะ Admin (ตรวจสิทธิ์ตอนสั่งงานจริง)
+    - /note add <key> โดย reply ข้อความ = บันทึกข้อความที่ reply
+    """
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        return await update.message.reply_text(
+            "📁 คลังบันทึกกลุ่ม\n"
+            f"{notes._DIVIDER}\n"
+            "• /note <คำ> — เรียกดู\n"
+            "• /notes หรือ /note list — ดูรายการทั้งหมด\n"
+            "• /note add <คำ> <ข้อความ> — บันทึก (Admin)\n"
+            "• /note del <คำ> — ลบ (Admin)\n"
+            "เคล็ดลับ: reply ข้อความแล้วพิมพ์ /note add <คำ> เพื่อบันทึกข้อความนั้น")
+
+    sub = args[0].lower()
+
+    if sub == "list":
+        keys = await asyncio.to_thread(notes.list_notes, chat_id)
+        return await update.message.reply_text(notes.format_list(chat_id, keys))
+
+    if sub == "add":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ เพิ่มบันทึกได้เฉพาะ Admin")
+        if len(args) < 2:
+            return await update.message.reply_text("ใช้งาน: /note add <คำ> <ข้อความ>")
+        key = args[1]
+        text = " ".join(args[2:]).strip()
+        # ถ้าไม่พิมพ์ข้อความ แต่ reply ข้อความอยู่ -> ใช้ข้อความที่ reply
+        if not text and update.message.reply_to_message:
+            text = (update.message.reply_to_message.text
+                    or update.message.reply_to_message.caption or "").strip()
+        author = update.effective_user.username or update.effective_user.full_name \
+            if update.effective_user else None
+        res = await asyncio.to_thread(notes.add_note, chat_id, key, text, author)
+        if res["ok"]:
+            verb = "อัปเดตบันทึก" if res.get("replaced") else "บันทึก"
+            return await update.message.reply_text(f"✅ {verb} #{res['key']} แล้ว")
+        errmsg = {
+            "bad_key": "❌ คำไม่ถูกต้อง (ใช้ตัวอักษร/ตัวเลข/ไทย/_-. ไม่มีช่องว่าง)",
+            "empty_text": "❌ ไม่มีข้อความให้บันทึก (พิมพ์ข้อความ หรือ reply ข้อความ)",
+            "too_long": f"❌ ข้อความยาวเกิน ({notes.MAX_TEXT_LEN} ตัวอักษร)",
+            "limit": f"❌ กลุ่มนี้มีบันทึกครบเพดานแล้ว ({notes.MAX_NOTES_PER_CHAT})",
+        }.get(res.get("error"), "❌ บันทึกไม่สำเร็จ")
+        return await update.message.reply_text(errmsg)
+
+    if sub in ("del", "delete", "rm", "remove"):
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ ลบบันทึกได้เฉพาะ Admin")
+        if len(args) < 2:
+            return await update.message.reply_text("ใช้งาน: /note del <คำ>")
+        ok = await asyncio.to_thread(notes.del_note, chat_id, args[1])
+        return await update.message.reply_text(
+            f"🗑️ ลบบันทึก #{notes.normalize_key(args[1]) or args[1]} แล้ว" if ok
+            else f"🔎 ไม่พบบันทึก #{args[1]}")
+
+    # ไม่ใช่ subcommand -> ถือเป็น key เรียกดู
+    key = args[0]
+    note = await asyncio.to_thread(notes.get_note, chat_id, key, True)
+    if note:
+        return await _reply_chunked(update, notes.format_note(notes.normalize_key(key), note))
+    return await update.message.reply_text(
+        f"🔎 ไม่พบบันทึก #{key}\nพิมพ์ /notes เพื่อดูรายการที่มี")
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5893,6 +5975,8 @@ def main():
     app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("airport", cmd_airport))
     app.add_handler(CommandHandler("refdata", cmd_refdata))
+    app.add_handler(CommandHandler("note", cmd_note))
+    app.add_handler(CommandHandler("notes", cmd_notes))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
