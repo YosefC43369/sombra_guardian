@@ -34,6 +34,7 @@ import osint_es
 import search_es
 import airports
 import notes
+import reputation
 import nethealth
 import tor_launcher
 import username_osint
@@ -543,7 +544,13 @@ _HELP_BODIES = {
         "/note <คำ>\n📌 เรียกดูบันทึก\n\n"
         "/notes\n📋 รายการบันทึกทั้งหมด\n\n"
         "/note add <คำ> <ข้อความ>\n➕ บันทึก (Admin) — reply ข้อความก็ได้\n\n"
-        "/note del <คำ>\n🗑️ ลบบันทึก (Admin)"
+        "/note del <คำ>\n🗑️ ลบบันทึก (Admin)\n\n"
+        "⭐ ระบบชื่อเสียง/คะแนนน้ำใจ\n"
+        "/rep [เหตุผล]\n➕ ให้คะแนนน้ำใจ — reply ข้อความคนนั้น\n\n"
+        "/karma\n🪪 ดูโปรไฟล์ชื่อเสียง (reply เพื่อดูของคนอื่น)\n\n"
+        "/toprep\n🏅 กระดานผู้นำน้ำใจ\n\n"
+        "/repdigest\n📊 สรุปน้ำใจประจำสัปดาห์\n\n"
+        "/repundo\n↩️ ถอนคืนการให้ล่าสุด"
     ),
     "ai": (
         "🤖 AI\n" + _HELP_DIVIDER + "\n"
@@ -577,7 +584,9 @@ _HELP_BODIES = {
         "🗂️ Reference Data (Google Drive)\n"
         "/refdata [status]\n"
         "/refdata sync\n"
-        "/refdata reindex"
+        "/refdata reindex\n\n"
+        "⭐ ระบบชื่อเสียง\n"
+        "/repconfig [show|<key> <value>|reset|tiers]"
     ),
     "osint": (
         "🔎 OSINT\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
@@ -1746,6 +1755,100 @@ async def cmd_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _reply_chunked(update, notes.format_note(notes.normalize_key(key), note))
     return await update.message.reply_text(
         f"🔎 ไม่พบบันทึก #{key}\nพิมพ์ /notes เพื่อดูรายการที่มี")
+
+
+# ==================== ระบบชื่อเสียง/คะแนนน้ำใจ (reputation) ====================
+
+async def cmd_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ให้คะแนนน้ำใจ: reply ข้อความของสมาชิก แล้วพิมพ์ /rep [จำนวน] [เหตุผล]"""
+    msg = update.message
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        return await msg.reply_text(
+            "💡 ให้คะแนนน้ำใจด้วยการ reply ข้อความของคนนั้น แล้วพิมพ์ /rep\n"
+            "ตัวอย่าง: reply แล้วพิมพ์  /rep ขอบคุณที่ช่วยตอบ")
+    target = msg.reply_to_message.from_user
+    giver = update.effective_user
+    args = context.args or []
+    amount, reason = 1, ""
+    if args and args[0].lstrip("+-").isdigit():
+        amount = int(args[0])
+        reason = " ".join(args[1:])
+    else:
+        reason = " ".join(args)
+    res = await asyncio.to_thread(
+        reputation.give, update.effective_chat.id, giver.id, target.id, amount, reason,
+        (giver.username and "@" + giver.username) or giver.full_name,
+        (target.username and "@" + target.username) or target.full_name,
+        False, bool(target.is_bot))
+    await msg.reply_text(reputation.format_give_result(
+        res, (giver.username and "@" + giver.username) or giver.full_name,
+        (target.username and "@" + target.username) or target.full_name))
+
+
+async def cmd_karma(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ดูโปรไฟล์ชื่อเสียง (ของตัวเอง หรือ reply เพื่อดูของคนอื่น)"""
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        u = update.message.reply_to_message.from_user
+    else:
+        u = update.effective_user
+    name = (u.username and "@" + u.username) or u.full_name
+    prof = await asyncio.to_thread(reputation.get_profile, update.effective_chat.id, u.id, name)
+    await _reply_chunked(update, reputation.format_profile(prof))
+
+
+async def cmd_toprep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """กระดานผู้นำน้ำใจของกลุ่ม"""
+    rows = await asyncio.to_thread(reputation.leaderboard, update.effective_chat.id, 10)
+    await update.message.reply_text(reputation.format_leaderboard(rows))
+
+
+async def cmd_repdigest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สรุปน้ำใจประจำสัปดาห์"""
+    text = await asyncio.to_thread(reputation.format_digest, update.effective_chat.id)
+    await _reply_chunked(update, text)
+
+
+async def cmd_repundo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ถอนคืนการให้คะแนนล่าสุดของตัวเอง (ภายในเวลาที่กำหนด)"""
+    res = await asyncio.to_thread(
+        reputation.undo_last, update.effective_chat.id, update.effective_user.id)
+    if res["ok"]:
+        return await update.message.reply_text(f"↩️ ถอนคืนการให้ล่าสุด ({res['amount']:+d}) แล้ว")
+    if res.get("error") == "expired":
+        return await update.message.reply_text("⌛ เลยเวลาถอนคืนแล้ว")
+    await update.message.reply_text("🔎 ไม่มีการให้ล่าสุดให้ถอนคืน")
+
+
+async def cmd_repconfig(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ตั้งค่าระบบชื่อเสียง (Admin): /repconfig [show|<key> <value>|reset|tiers]"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ ตั้งค่าระบบชื่อเสียงได้เฉพาะ Admin")
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args or args[0].lower() == "show":
+        cfg = await asyncio.to_thread(reputation.get_config, chat_id)
+        return await update.message.reply_text(reputation.format_config(chat_id, cfg))
+    sub = args[0].lower()
+    if sub == "tiers":
+        return await update.message.reply_text(reputation.format_tiers())
+    if sub == "reset":
+        await asyncio.to_thread(reputation.reset_config, chat_id)
+        cfg = await asyncio.to_thread(reputation.get_config, chat_id)
+        return await update.message.reply_text("♻️ รีเซ็ตค่าเริ่มต้นแล้ว\n\n"
+                                               + reputation.format_config(chat_id, cfg))
+    if len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน: /repconfig <key> <value>\nดูค่าทั้งหมด: /repconfig show")
+    res = await asyncio.to_thread(reputation.set_config, chat_id, args[0], args[1])
+    if res["ok"]:
+        return await update.message.reply_text(f"✅ ตั้ง {res['key']} = {res['value']}")
+    errmsg = {
+        "unknown_key": f"❌ ไม่รู้จักคีย์ '{args[0]}' (ดู /repconfig show)",
+        "bad_bool": "❌ ค่าบูลีนต้องเป็น on/off",
+        "bad_value": "❌ ค่าไม่ถูกต้อง",
+        "negative": "❌ ค่าติดลบไม่ได้",
+    }.get(res.get("error"), "❌ ตั้งค่าไม่สำเร็จ")
+    await update.message.reply_text(errmsg)
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5977,6 +6080,12 @@ def main():
     app.add_handler(CommandHandler("refdata", cmd_refdata))
     app.add_handler(CommandHandler("note", cmd_note))
     app.add_handler(CommandHandler("notes", cmd_notes))
+    app.add_handler(CommandHandler("rep", cmd_rep))
+    app.add_handler(CommandHandler("karma", cmd_karma))
+    app.add_handler(CommandHandler("toprep", cmd_toprep))
+    app.add_handler(CommandHandler("repdigest", cmd_repdigest))
+    app.add_handler(CommandHandler("repundo", cmd_repundo))
+    app.add_handler(CommandHandler("repconfig", cmd_repconfig))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
