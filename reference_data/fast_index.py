@@ -30,7 +30,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from . import dataset_manager
 
 _RE_WS = re.compile(r"\s+")
-_RE_TOKEN = re.compile(r"[a-z0-9]+")
+# โทเคน = อักษร/ตัวเลขละติน + อักษรไทย (฀-๿) เพื่อรองรับการพิมพ์/ค้นภาษาไทย
+# (เดิม [a-z0-9]+ จะตัดอักษรไทยทิ้งทั้งหมด ทำให้ค้นชื่อ/เมืองภาษาไทยไม่เจอ)
+_RE_TOKEN = re.compile(r"[a-z0-9฀-๿]+")
 
 # ฟิลด์ที่ถือเป็น "ข้อความค้นได้" โดยดีฟอลต์ (ถ้าไม่ระบุ จะใช้ค่า string ทั้งหมดของ record)
 _DEFAULT_TEXT_FIELDS = ("name", "city", "title", "label", "country", "state",
@@ -38,8 +40,11 @@ _DEFAULT_TEXT_FIELDS = ("name", "city", "title", "label", "country", "state",
 
 
 def _deaccent(text: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", text)
-                   if not unicodedata.combining(c))
+    # ตัดเฉพาะ "เครื่องหมายกำกับเสียงของอักษรละติน" (Combining Diacritical Marks
+    # U+0300–U+036F) เพื่อให้ "Suárez"≈"Suarez" — แต่ "ไม่แตะ" วรรณยุกต์/สระไทย
+    # (เช่น ่ ้ ็ ั ิ ี ึ ื ุ ู ซึ่งเป็น combining เหมือนกัน) มิฉะนั้นคำไทยจะเพี้ยน
+    return "".join(c for c in unicodedata.normalize("NFKD", str(text))
+                   if not (0x0300 <= ord(c) <= 0x036F))
 
 
 def _norm(text: str) -> str:

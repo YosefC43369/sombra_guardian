@@ -46,6 +46,23 @@ check("search: 'chiang' -> CNX", r and r[0]["code"] == "CNX", r)
 check("search: คำค้นว่าง -> []", idx.search("   ") == [])
 check("search: ไม่พบ -> []", idx.search("zzzznowhere") == [])
 
+# ---------- ค้นภาษาไทย (฀-๿) ----------
+check("thai: _deaccent ไม่ทำลายวรรณยุกต์/สระไทย", fi._deaccent("เชียงใหม่") == "เชียงใหม่")
+check("thai: trigrams เก็บอักษรไทย", any("฀" <= ch <= "๿"
+      for tri in fi.trigrams("กรุงเทพ") for ch in tri))
+TH = [
+    {"code": "BKK", "name": "ท่าอากาศยานสุวรรณภูมิ", "city": "กรุงเทพ"},
+    {"code": "CNX", "name": "ท่าอากาศยานเชียงใหม่", "city": "เชียงใหม่"},
+    {"code": "HKT", "name": "ท่าอากาศยานภูเก็ต", "city": "ภูเก็ต"},
+]
+tidx = fi.FastIndex().build(TH)
+check("thai: ค้นเมืองภาษาไทย 'เชียงใหม่' -> CNX",
+      (lambda r: bool(r) and r[0]["code"] == "CNX")(tidx.search("เชียงใหม่")))
+check("thai: ค้นเมืองภาษาไทย 'กรุงเทพ' -> BKK",
+      (lambda r: bool(r) and r[0]["code"] == "BKK")(tidx.search("กรุงเทพ")))
+check("thai: ค้นบางส่วน 'ภูเก็ต' -> HKT",
+      (lambda r: bool(r) and r[0]["code"] == "HKT")(tidx.search("ภูเก็ต")))
+
 # ---------- candidate pre-filter: ไม่สแกนทุก doc ----------
 # สร้างชุดใหญ่ แล้วยืนยันว่าค้นเร็ว (ผ่านได้แปลว่าไม่ scan เชิงเส้นทั้งหมดต่อคำค้น)
 BIG = [{"code": f"C{i:05d}", "name": f"Placeholder Station {i}", "city": f"Town{i%97}"}

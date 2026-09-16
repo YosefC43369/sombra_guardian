@@ -60,15 +60,21 @@ _index_cache = {"key": None, "index": None}
 _RE_IATA = re.compile(r"^[A-Za-z]{3}$")     # รหัส IATA 3 ตัว (เช่น BKK)
 _RE_ICAO = re.compile(r"^[A-Za-z]{4}$")     # รหัส ICAO 4 ตัว (เช่น VTBS)
 _RE_WS = re.compile(r"\s+")
-_RE_TOKEN = re.compile(r"[a-z0-9]+")
+# โทเคน = อักษร/ตัวเลขละติน + อักษรไทย (฀-๿) เพื่อรองรับการพิมพ์/ค้นภาษาไทย
+# (เดิม [a-z0-9]+ จะตัดอักษรไทยทิ้ง ทำให้ค้นชื่อ/เมืองภาษาไทย เช่น "กรุงเทพ" ไม่เจอ)
+_RE_TOKEN = re.compile(r"[a-z0-9฀-๿]+")
 
 
 def _deaccent(text: str) -> str:
-    """ตัดเครื่องหมายกำกับเสียง (accent/diacritic) ออก เพื่อให้ "Suárez"≈"Suarez\""""
+    """ตัดเครื่องหมายกำกับเสียง (accent/diacritic) ของอักษรละตินออก เพื่อให้ "Suárez"≈"Suarez"
+
+    ตัดเฉพาะช่วง Combining Diacritical Marks (U+0300–U+036F) — "ไม่แตะ" วรรณยุกต์/สระ
+    ภาษาไทย (เช่น ่ ้ ็ ั ิ ี ึ ื ุ ู ซึ่งเป็น combining เช่นกัน) มิฉะนั้นคำไทยจะเพี้ยน/ค้นไม่เจอ
+    """
     if not text:
         return ""
     nfkd = unicodedata.normalize("NFKD", str(text))
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+    return "".join(c for c in nfkd if not (0x0300 <= ord(c) <= 0x036F))
 
 
 def _norm(text: str) -> str:
@@ -371,25 +377,58 @@ def format_airport(rec: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# เส้นคั่นตกแต่งข้อความตอบกลับ (สไตล์เดียวกับเมนู /help)
+_RESULT_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _codes_of(rec: dict) -> str:
+    """รวมรหัส (IATA/ICAO/code) ไม่ซ้ำ เป็นข้อความเดียว"""
+    seen = []
+    for c in (rec.get("iata"), rec.get("icao"), rec.get("code")):
+        if c and c not in seen:
+            seen.append(c)
+    return " / ".join(seen)
+
+
 def format_results(hits: List[dict], query: str, via: str = "") -> str:
-    """จัดข้อความผลค้นสนามบินสำหรับ Telegram"""
-    backend = f" (ผ่าน {via})" if via else ""
+    """จัดข้อความผลค้นสนามบินสำหรับ Telegram — ตกแต่งด้วยอิโมจิ + เส้นคั่นให้อ่านง่าย
+
+    รองรับผลลัพธ์ที่มีชื่อ/เมืองเป็นภาษาไทย (แสดงตามข้อมูลในไฟล์ฐานข้อมูล)
+    """
+    # ป้ายบอกช่องทางค้น (ES = ค้นเร็ว/ฉลาด, ไฟล์ = ค้นในไฟล์โดยตรง)
+    backend = ""
+    if via:
+        icon = "⚡" if "Elastic" in via else "🗂️"
+        backend = f" · {icon} ผ่าน {via}"
+
+    # ---- ไม่พบผล ----
     if not hits:
-        return (f"🔍 ค้นสนามบิน: ไม่พบข้อมูลที่ตรงกับ “{query}”{backend}\n"
-                "ลองพิมพ์รหัส IATA (เช่น BKK), ICAO (เช่น VTBS) หรือชื่อ/เมือง")
+        return (f"🔎 ค้นสนามบิน · ❌ ไม่พบข้อมูล{backend}\n"
+                f"{_RESULT_DIVIDER}\n"
+                f"ไม่พบสนามบินที่ตรงกับ “{query}”\n"
+                "💡 ลองรหัส IATA (เช่น BKK), ICAO (เช่น VTBS) หรือชื่อ/เมือง (ไทย/อังกฤษ)")
+
+    # ---- พบผลเดียว: กรอบ + รายละเอียดเต็ม ----
     if len(hits) == 1:
-        return "🔍 ผลการค้นสนามบิน" + backend + "\n\n" + format_airport(hits[0])
-    lines = [f"🔍 พบ {len(hits)} สนามบินที่ตรงกับ “{query}”{backend}", ""]
+        return (f"🔎 ผลการค้นสนามบิน · ✅ พบข้อมูล{backend}\n"
+                f"{_RESULT_DIVIDER}\n"
+                f"{format_airport(hits[0])}")
+
+    # ---- พบหลายผล: สรุปเป็นรายการ ----
+    lines = [f"🔎 ผลการค้นสนามบิน · ✅ พบ {len(hits)} แห่ง{backend}",
+             _RESULT_DIVIDER,
+             f"🔤 คำค้น: “{query}”", ""]
     for i, rec in enumerate(hits, start=1):
-        _seen = []
-        for c in (rec.get("iata"), rec.get("icao"), rec.get("code")):
-            if c and c not in _seen:
-                _seen.append(c)
-        codes = " / ".join(_seen)
+        codes = _codes_of(rec)
         loc = ", ".join(x for x in [rec.get("city"), rec.get("country")] if x)
-        lines.append(f"{i}. 🛫 {rec.get('name') or '-'}"
-                     + (f" [{codes}]" if codes else "")
-                     + (f" — {loc}" if loc else ""))
-    lines.append("")
-    lines.append("พิมพ์รหัสให้เจาะจงขึ้น (เช่น BKK) เพื่อดูรายละเอียดสนามบินเดียว")
+        lines.append(f"{i}. 🛫 {rec.get('name') or '-'}")
+        detail = []
+        if codes:
+            detail.append(f"🔖 {codes}")
+        if loc:
+            detail.append(f"📍 {loc}")
+        if detail:
+            lines.append("    " + " · ".join(detail))
+    lines.append(_RESULT_DIVIDER)
+    lines.append("💡 พิมพ์รหัสให้เจาะจง (เช่น /airport BKK) เพื่อดูรายละเอียดสนามบินเดียว")
     return "\n".join(lines)
