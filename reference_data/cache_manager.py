@@ -37,16 +37,26 @@ def cache_dir() -> Path:
     return CACHE_DIR
 
 
+def _subdir(name: str) -> str:
+    """โฟลเดอร์ย่อยของ cache ตามชนิดไฟล์ (json/csv/sql/other) — เก็บคงรูปแบบเดิมไว้"""
+    ext = os.path.splitext(name)[1].lower().lstrip(".")
+    return ext if ext in ("json", "csv", "sql") else "other"
+
+
 def cache_file(name: str) -> Path:
-    return CACHE_DIR / name
+    return CACHE_DIR / _subdir(name) / name
 
 
 def meta_file(name: str) -> Path:
-    return CACHE_DIR / f"{name}.meta.json"
+    return CACHE_DIR / _subdir(name) / f"{name}.meta.json"
 
 
 def _ensure_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_parent(path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------- metadata sidecar ----------------
@@ -63,9 +73,9 @@ def load_meta(name: str) -> dict:
 
 def save_meta(name: str, meta: dict) -> None:
     """เขียน metadata แบบ atomic"""
-    _ensure_dir()
     target = meta_file(name)
-    fd, tmp = tempfile.mkstemp(prefix=".meta.", dir=str(CACHE_DIR))
+    _ensure_parent(target)
+    fd, tmp = tempfile.mkstemp(prefix=".meta.", dir=str(target.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -146,11 +156,13 @@ def touch_checked(name: str) -> None:
 
 def write_cache(name: str, src_path, remote_meta: dict) -> Path:
     """ย้ายไฟล์ที่ดาวน์โหลดมาเข้ากล่อง cache + บันทึก metadata (atomic)"""
-    _ensure_dir()
     dest = cache_file(name)
+    _ensure_parent(dest)
     os.replace(str(src_path), str(dest))
     meta = dict(remote_meta or {})
     meta.setdefault("md5", file_md5(dest))
+    meta["filename"] = name
+    meta["file_type"] = _subdir(name)
     meta["size"] = dest.stat().st_size
     meta["cached_at"] = time.time()
     meta["checked_at"] = time.time()

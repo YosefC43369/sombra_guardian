@@ -89,8 +89,11 @@ state["available"] = True
 state.update(find=0, dl=0)
 check("T5: ไฟล์นอก whitelist -> None", dm.get_dataset_path("passwords.json") is None)
 check("T5: ไม่ถาม/ดาวน์โหลดไฟล์นอก whitelist", state["find"] == 0 and state["dl"] == 0)
-check("T5: whitelist มีแค่ 2 ไฟล์อ้างอิง",
-      dm.ALLOWED_DATASETS == {"airports.json", "programming-languages.json"})
+check("T5: whitelist = 2 ชุดอ้างอิง x 3 ฟอร์แมต (.json/.csv/.sql)",
+      dm.ALLOWED_DATASETS == {
+          "airports.json", "airports.csv", "airports.sql",
+          "programming-languages.json", "programming-languages.csv",
+          "programming-languages.sql"}, dm.ALLOWED_DATASETS)
 
 # ---------- integrity: md5 ไม่ตรง -> ปฏิเสธ (ไม่ทำ cache เสีย) ----------
 cache.clear_disk("airports.json")
@@ -103,8 +106,8 @@ check("integrity: ถอยไปใช้ไฟล์ในเครื่อ�
 state["md5_override"] = None
 
 # ---------- cache_manager unit ----------
-tmpf = cache.cache_dir() / "x.json"
-cache._ensure_dir(); tmpf.write_bytes(b'{"a":1}')
+tmpf = cache.cache_file("x.json")            # routes into json/ subdir
+cache._ensure_parent(tmpf); tmpf.write_bytes(b'{"a":1}')
 check("cache: file_md5 ตรง", cache.file_md5(tmpf) == _md5(b'{"a":1}'))
 cache.save_meta("x.json", {"md5": _md5(b'{"a":1}'), "file_id": "F"})
 check("cache: meta round-trip", cache.load_meta("x.json")["file_id"] == "F")

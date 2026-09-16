@@ -20,11 +20,14 @@ from .dataset_manager import (
     drive_enabled,
     get_dataset_path,
     get_json,
+    get_records,
+    parse_records,
     sync,
     sync_all,
 )
 
 __all__ = [
     "ALLOWED_DATASETS", "is_allowed", "drive_enabled",
-    "get_dataset_path", "get_json", "sync", "sync_all",
+    "get_dataset_path", "get_json", "get_records", "parse_records",
+    "sync", "sync_all",
 ]

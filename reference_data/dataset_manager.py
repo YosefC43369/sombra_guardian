@@ -25,21 +25,19 @@ from typing import Optional
 
 from . import cache_manager as cache
 from . import drive_client as drive
+from . import parsers
 
 logger = logging.getLogger("modbot.reference_data")
 
-# whitelist แข็ง — เฉพาะ dataset อ้างอิงที่ไม่ใช่ PII เท่านั้น
-ALLOWED_DATASETS = {
-    "airports.json",
-    "programming-languages.json",
-}
+# whitelist แข็ง — เฉพาะ dataset อ้างอิงที่ไม่ใช่ PII 2 ชุด ในฟอร์แมต .json/.csv/.sql
+# (ไม่ใช่ระบบค้นฐานข้อมูล/leak/PII — ไฟล์อื่นในโฟลเดอร์ Drive ถูกเพิกเฉยเสมอ)
+_DATASET_STEMS = ("airports", "programming-languages")
+_DATASET_EXTS = (".json", ".csv", ".sql")
+ALLOWED_DATASETS = {f"{stem}{ext}" for stem in _DATASET_STEMS for ext in _DATASET_EXTS}
 
 # ไฟล์สำรองในเครื่อง (พฤติกรรมเดิมของบอต) — ใช้เมื่อไม่ได้ตั้งค่า Drive หรือ Drive ล่ม
 _RESOURCE_DIR = Path(__file__).resolve().parent.parent / "resource"
-LOCAL_FALLBACK = {
-    "airports.json": _RESOURCE_DIR / "airports.json",
-    "programming-languages.json": _RESOURCE_DIR / "programming-languages.json",
-}
+LOCAL_FALLBACK = {name: _RESOURCE_DIR / name for name in ALLOWED_DATASETS}
 
 
 def is_allowed(name: str) -> bool:
@@ -165,6 +163,28 @@ def get_json(name: str):
         return None
     cache.ram_put(name, path, obj)
     return obj
+
+
+def get_records(name: str, **opts):
+    """คืน iterator ของ "record dict แบน" จาก dataset (รองรับ .json/.csv/.sql)
+
+    เลือก parser ตามนามสกุลไฟล์อัตโนมัติ แล้ว stream ทีละเรกคอร์ด (memory-safe —
+    เหมาะกับไฟล์ใหญ่) โดยผู้เรียกไม่ต้องรู้ว่าเป็นฟอร์แมตไหน ทุกฟอร์แมตคืนโครงเดียวกัน
+
+    ไม่ throw: ไฟล์นอก whitelist / โหลดไม่ได้ / ฟอร์แมตไม่รองรับ -> iterator ว่าง
+    ไฟล์เสียของชุดหนึ่งจะไม่กระทบชุดอื่น (parser จัดการ error ภายในเป็นราย record)
+    """
+    if not is_allowed(name):
+        return iter(())
+    path = get_dataset_path(name)
+    if not path:
+        return iter(())
+    return parsers.stream_records(name, path, **opts)
+
+
+def parse_records(name: str, **opts):
+    """materialize get_records เป็น list (สำหรับไฟล์เล็ก/เทส) — ระวังไฟล์ใหญ่"""
+    return list(get_records(name, **opts))
 
 
 def sync(name: str) -> bool:
