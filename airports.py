@@ -22,20 +22,19 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger("modbot.airports")
 
-# ที่อยู่ไฟล์ฐานข้อมูลสนามบิน — override ได้ด้วย env AIRPORTS_DB
-AIRPORTS_PATH = os.getenv("AIRPORTS_DB", "").strip() or os.path.join(
+# ที่อยู่ไฟล์ฐานข้อมูลสนามบิน — override ได้ด้วย env PPL_DB
+PPL_PATH = os.getenv("PPL_DB", "").strip() or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "resource", "airports.json")
-
 
 def _resolve_source_path() -> str:
     """หา path ของไฟล์ airports.json ที่จะเปิดอ่าน
 
     ถ้าตั้งค่า Google Drive ไว้ (reference_data) จะได้ path ของ cache ที่ซิงก์จาก
-    Drive มาแล้ว (source of truth บน Drive) มิฉะนั้นถอยไปใช้ไฟล์ในเครื่อง AIRPORTS_PATH
+    Drive มาแล้ว (source of truth บน Drive) มิฉะนั้นถอยไปใช้ไฟล์ในเครื่อง PPL_PATH
     ตามพฤติกรรมเดิมทุกประการ — import แบบกันพังเพื่อไม่ให้ airports.py พึ่ง reference_data
     """
-    if os.getenv("AIRPORTS_DB", "").strip():
-        return AIRPORTS_PATH   # ผู้ใช้ override path ตรง ๆ = เคารพเสมอ ไม่ผ่าน Drive
+    if os.getenv("PPL_DB", "").strip():
+        return PPL_PATH   # ผู้ใช้ override path ตรง ๆ = เคารพเสมอ ไม่ผ่าน Drive
     try:
         import reference_data
         resolved = reference_data.get_dataset_path("airports.json")
@@ -43,22 +42,24 @@ def _resolve_source_path() -> str:
             return resolved
     except Exception:
         logger.debug("AIRPORTS | reference_data ใช้ไม่ได้ ใช้ไฟล์ในเครื่องแทน")
-    return AIRPORTS_PATH
+    return PPL_PATH
 
 # ดัชนี Elasticsearch สำหรับสนามบิน (ใช้ client/คอนฟิกร่วมกับ osint_es)
-ES_INDEX = os.getenv("AIRPORTS_ES_INDEX", "").strip() or "sombra_airports"
+ES_INDEX = os.getenv("PPL_ES_INDEX", "").strip() or "sombra_airports"
 
 # เพดานจำนวนระเบียนที่จะยอมทำ fuzzy (กันไฟล์ใหญ่มากช้าเกินไป) และเกณฑ์ความคล้าย
-FUZZY_MAX_RECORDS = int(os.getenv("AIRPORTS_FUZZY_MAX", "60000") or "60000")
-FUZZY_MIN_RATIO = float(os.getenv("AIRPORTS_FUZZY_MIN_RATIO", "0.72") or "0.72")
+FUZZY_MAX_RECORDS = int(os.getenv("PPL_FUZZY_MAX", "60000") or "60000")
+FUZZY_MIN_RATIO = float(os.getenv("PPL_FUZZY_MIN_RATIO", "0.72") or "0.72")
 
 _cache = {"path": None, "mtime": None, "records": None}
 # ดัชนีค้นหาในหน่วยความจำ (สร้างครั้งเดียวต่อชุดข้อมูล เพื่อความไว)
 _index_cache = {"key": None, "index": None}
 
 # ---------- regex สำหรับ "สกัดข้อความ" ----------
-_RE_IATA = re.compile(r"^[A-Za-z]{3}$")     # รหัส IATA 3 ตัว (เช่น BKK)
-_RE_ICAO = re.compile(r"^[A-Za-z]{4}$")     # รหัส ICAO 4 ตัว (เช่น VTBS)
+_RE_PHONE = re.compile(r"^0[689]\d-\d{3}-\d{4}$")   # เบอร์
+_RE_EMAIL = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")     # รูปแบบอีเมล
+_RE_NAME = re.compile(r"^[A-Za-zก-๙]+(?:[ -][A-Za-zก-๙]+)+$")   # ชื่อ-นามสกุล
+_RE_ID = re.compile(r"^\d{13}$")    # เลขบัตรประชาชน 13 หลัก
 _RE_WS = re.compile(r"\s+")
 # โทเคน = อักษร/ตัวเลขละติน + อักษรไทย (฀-๿) เพื่อรองรับการพิมพ์/ค้นภาษาไทย
 # (เดิม [a-z0-9]+ จะตัดอักษรไทยทิ้ง ทำให้ค้นชื่อ/เมืองภาษาไทย เช่น "กรุงเทพ" ไม่เจอ)
@@ -108,7 +109,7 @@ def _normalize(rec: dict, key: Optional[str] = None) -> Optional[dict]:
         iata = code
     if not icao and len(code) == 4:
         icao = code
-    name = str(g("name", "airport", "Name")).strip()
+    name = str(g("name", "phone", "Name", "Phone")).strip()
     city = str(g("city", "municipality", "City")).strip()
     country = str(g("country", "iso_country", "Country")).strip()
     state = str(g("state", "region", "State")).strip()
@@ -186,10 +187,14 @@ def extract_query(text: str) -> dict:
     """
     raw = str(text or "")
     value = _RE_WS.sub(" ", raw).strip()
-    if _RE_IATA.match(value):
-        return {"raw": raw, "value": value.upper(), "kind": "iata"}
-    if _RE_ICAO.match(value):
-        return {"raw": raw, "value": value.upper(), "kind": "icao"}
+    if _RE_NAME.match(value):
+        return {"raw": raw, "value": value.upper(), "kind": "name"}
+    if _RE_ID.match(value):
+        return {"raw": raw, "value": value.upper(), "kind": "id"}
+    if _RE_EMAIL.match(value):
+        return {"raw": raw, "value": value.lower(), "kind": "email"}
+    if _RE_PHONE.match(value):
+        return {"raw": raw, "value": value, "kind": "phone"}
     return {"raw": raw, "value": value, "kind": "text"}
 
 
@@ -364,8 +369,8 @@ def format_airport(rec: dict) -> str:
     codes = " / ".join(_seen)
     parts = [
         line("🛫", "ชื่อ", rec.get("name")),
-        line("🏙️", "เมือง", rec.get("city")),
-        line("🌏", "ประเทศ", rec.get("country")),
+        line("🏙️", "อีเมล", rec.get("email")),
+        line("🌏", "เบอร์โทร์", rec.get("phone")),
         line("🗺️", "รัฐ/ภูมิภาค", rec.get("state")),
         line("🔖", "รหัส (IATA/ICAO)", codes),
     ]
@@ -403,19 +408,18 @@ def format_results(hits: List[dict], query: str, via: str = "") -> str:
 
     # ---- ไม่พบผล ----
     if not hits:
-        return (f"🔎 ค้นสนามบิน · ❌ ไม่พบข้อมูล{backend}\n"
+        return (f"🔎 ค้นข้อมูล · ❌ ไม่พบข้อมูล{backend}\n"
                 f"{_RESULT_DIVIDER}\n"
-                f"ไม่พบสนามบินที่ตรงกับ “{query}”\n"
-                "💡 ลองรหัส IATA (เช่น BKK), ICAO (เช่น VTBS) หรือชื่อ/เมือง (ไทย/อังกฤษ)")
+                f"ไม่พบข้อมูลที่ตรงกับ “{query}”\n")
 
     # ---- พบผลเดียว: กรอบ + รายละเอียดเต็ม ----
     if len(hits) == 1:
-        return (f"🔎 ผลการค้นสนามบิน · ✅ พบข้อมูล{backend}\n"
+        return (f"🔎 ผลการค้นข้อมูล · ✅ พบข้อมูล{backend}\n"
                 f"{_RESULT_DIVIDER}\n"
                 f"{format_airport(hits[0])}")
 
     # ---- พบหลายผล: สรุปเป็นรายการ ----
-    lines = [f"🔎 ผลการค้นสนามบิน · ✅ พบ {len(hits)} แห่ง{backend}",
+    lines = [f"🔎 ผลการค้นข้อมูล · ✅ พบ {len(hits)} แห่ง{backend}",
              _RESULT_DIVIDER,
              f"🔤 คำค้น: “{query}”", ""]
     for i, rec in enumerate(hits, start=1):
