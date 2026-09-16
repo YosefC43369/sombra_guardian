@@ -161,6 +161,8 @@ class FastIndex:
             return []
         candidates = self._candidates(q_tris, max_candidates)
         q_set = set(q_tris)
+        q_tokens = set(_RE_TOKEN.findall(qn))
+        multi = len(q_tokens) >= 2       # คำค้นหลายคำ -> เข้มเรื่องความครอบคลุมคำ
 
         scored: List[Tuple[float, int, int]] = []
         for doc_id, shared in candidates:
@@ -168,12 +170,18 @@ class FastIndex:
             precise = _precise_score(text_n, qn)
             # คะแนน trigram แบบ normalize (สัดส่วน trigram ของคำค้นที่ doc มี)
             tri_score = shared / max(1, len(q_set))
-            score = precise + tri_score * 30      # ให้ความตรงเป๊ะ/ขึ้นต้นนำ, trigram เสริม
+            # ความครอบคลุมคำ: สัดส่วนโทเคนของคำค้นที่ปรากฏเป็น "คำเต็ม" ใน doc (แม่นขึ้น)
+            coverage = (len(q_tokens & set(text_n.split())) / len(q_tokens)) if q_tokens else 0.0
+            score = precise + tri_score * 20 + coverage * 20
             if score <= 0:
                 continue
-            # เกณฑ์กันขยะ: ถ้าไม่ตรงเชิงข้อความเลย ต้องมี trigram ตรงพอสมควร
-            if precise == 0 and tri_score < 0.34:
-                continue
+            # เกณฑ์กันขยะ: ถ้าไม่ตรงเชิงข้อความเลย —
+            #   คำเดียว: ต้องมี trigram ตรงพอ; หลายคำ: ต้องครอบคลุมคำหรือ trigram สูงจริง
+            if precise == 0:
+                if multi and coverage < 0.5 and tri_score < 0.5:
+                    continue
+                if not multi and tri_score < 0.34:
+                    continue
             scored.append((score, len(text_n), doc_id))
 
         scored.sort(key=lambda x: (-x[0], x[1]))

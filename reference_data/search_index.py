@@ -318,7 +318,7 @@ def build_query(query_text: str, limit: int = 10) -> dict:
     """
     q = str(query_text or "").strip()
     is_thai = THAI_ENABLED and _has_thai(q)
-    should = [
+    signals = [
         {"term": {"_codes": {"value": q, "boost": 12}}},          # รหัสตรงเป๊ะ
         {"match_phrase": {"_all_text": {"query": q, "boost": 7}}},  # ตรงทั้งวลี (แม่นสุด)
         {"match_phrase_prefix": {"_all_text": {"query": q, "boost": 5}}},
@@ -328,17 +328,22 @@ def build_query(query_text: str, limit: int = 10) -> dict:
     ]
     if THAI_ENABLED:
         # คำไทยตรงคำ (ผ่าน thai tokenizer) — วลีตรงดันสูง, ตามด้วยตรงหลายคำแบบ 70%
-        should.append({"match_phrase": {"_all_thai": {"query": q, "boost": 6}}})
-        should.append({"match": {"_all_thai": {
+        signals.append({"match_phrase": {"_all_thai": {"query": q, "boost": 6}}})
+        signals.append({"match": {"_all_thai": {
             "query": q, "boost": 4 if is_thai else 2,
             "minimum_should_match": "70%"}}})
     if PHONETIC_ENABLED:
         # จับชื่อที่ออกเสียงคล้าย (เช่น Bankok≈Bangkok) — คะแนนต่ำสุด กันรบกวนผลตรง
-        should.append({"match": {"_all_phon": {"query": q, "boost": 1.5}}})
+        signals.append({"match": {"_all_phon": {"query": q, "boost": 1.5}}})
     return {
         "size": max(1, int(limit)),
         "track_total_hits": False,     # เร็วขึ้น: ไม่ต้องนับผลทั้งหมด
-        "query": {"bool": {"should": should, "minimum_should_match": 1}},
+        # ประสิทธิภาพ: ไม่ต้องส่งฟิลด์ช่วยค้น (_all_text/_all_auto/…) กลับมา (ตัดทิ้งฝั่ง ES)
+        "_source": {"excludes": list(_HELPER_FIELDS)},
+        # ความแม่นยำ: ใช้ dis_max + tie_breaker — เอา "สัญญาณที่ตรงที่สุด" เป็นคะแนนหลัก
+        # แล้วบวกสัญญาณอื่นแบบถ่วงน้ำหนักน้อย (0.3) แทนการรวมคะแนนทุก clause (bool should)
+        # ซึ่งทำให้เอกสารที่บังเอิญตรงหลาย ๆ จุดเล็กน้อยพองคะแนนเกินจริง
+        "query": {"dis_max": {"tie_breaker": 0.3, "queries": signals}},
     }
 
 

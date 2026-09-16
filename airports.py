@@ -373,17 +373,20 @@ def search_stream(query: str, limit: int = 5, path: Optional[str] = None) -> Lis
     ไม่โหลดทั้งไฟล์เข้า RAM (เหมาะกับไฟล์ใหญ่) และไม่สร้างดัชนีในหน่วยความจำ
     รองรับสัญญาณเดียวกับ search_airports: รหัสตรง/ขึ้นต้น, ชื่อ/เมืองตรง/ขึ้นต้น/substring/fuzzy
     """
-    val = extract_query(query)["value"]
+    parsed = extract_query(query)
+    val = parsed["value"]
     if not val:
         return []
     qn = _norm(val)
     qtokens = _tokenize(val)
+    # ประสิทธิภาพ: คำค้นที่เป็น "รหัส" (iata/icao) ไม่ต้องทำ fuzzy บนชื่อ (แพงและไม่จำเป็น)
+    allow_fuzzy = parsed["kind"] == "text"
     lim = max(1, int(limit))
     counter = count()
     heap: List = []   # min-heap ของ (score, -len(name_n), seq, rec) — เก็บ top-K
     for rec in _stream_normalized(path):
         e = _entry_of(rec)
-        s = _score_entry(e, qn, qtokens, allow_fuzzy=True)
+        s = _score_entry(e, qn, qtokens, allow_fuzzy)
         if s <= 0:
             continue
         item = (s, -len(e["name_n"]), next(counter), rec)
@@ -391,6 +394,9 @@ def search_stream(query: str, limit: int = 5, path: Optional[str] = None) -> Lis
             heapq.heappush(heap, item)
         elif item > heap[0]:
             heapq.heapreplace(heap, item)
+        # early-stop: เก็บครบ K แล้วและตัวที่แย่สุดยัง "ตรงเป๊ะ" (100) -> ไม่มีอะไรดีกว่านี้แล้ว
+        if len(heap) >= lim and heap[0][0] >= 100:
+            break
     heap.sort(key=lambda x: (-x[0], -x[1]))   # คะแนนมากก่อน แล้วชื่อสั้นก่อน
     return [rec for _, _, _, rec in heap]
 

@@ -99,6 +99,19 @@ if di is not None and len(di) > 0:
 else:
     check("for_dataset(airports): ข้าม (ไม่มีไฟล์ในเครื่อง)", True)
 
+# ---------- ความแม่นยำ: token coverage (คำค้นหลายคำ) ----------
+COV = [
+    {"code": "A1", "name": "Chiang Mai International", "city": "Chiang Mai"},
+    {"code": "A2", "name": "Chiang Rai", "city": "Chiang Rai"},
+    {"code": "A3", "name": "Mai Khao Beach", "city": "Phuket"},
+]
+cidx = fi.FastIndex().build(COV)
+_cov = cidx.search("chiang mai", 5)
+check("coverage: 'chiang mai' -> A1 อันดับแรก (ครอบคลุมสองคำ)",
+      bool(_cov) and _cov[0]["code"] == "A1", [r["code"] for r in _cov])
+check("coverage: 'chiang mai' จัด A1 เหนือ A2/A3 (ตรงคำเดียว)",
+      _cov[0]["code"] == "A1" and (len(_cov) == 1 or _cov[0]["code"] != _cov[-1]["code"]))
+
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL: print("FAILED:", FAIL)
 sys.exit(1 if FAIL else 0)
