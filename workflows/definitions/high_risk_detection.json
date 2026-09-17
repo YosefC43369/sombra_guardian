@@ -1,0 +1,15 @@
+{
+  "name": "high-risk-detection-audit",
+  "description": "Record an audit trail entry whenever a high-severity detection fires (blocked link, mention spam burst, etc.). Notification-only; performs no moderation of its own, which stays in app.py.",
+  "enabled": true,
+  "trigger": {"event": "detection.triggered"},
+  "conditions": [
+    {"field": "severity", "operator": "equals", "value": "high"}
+  ],
+  "actions": ["log_event"],
+  "max_retries": 0,
+  "timeout_seconds": 10,
+  "cooldown_seconds": 5,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id", "detection_type"]
+}

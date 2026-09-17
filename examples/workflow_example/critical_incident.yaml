@@ -1,0 +1,25 @@
+# Same workflow, written in YAML — accepted only when PyYAML is installed.
+# JSON is the dependency-free default; this file shows the YAML form the task
+# description uses, for teams that already have PyYAML.
+name: example-critical-incident
+description: >
+  Escalate a critical/high incident: log it and alert admins. Notification
+  only — it never mutates the incident, so it cannot feed back into itself.
+enabled: false
+trigger:
+  event: incident.created
+conditions:
+  - field: severity
+    operator: in
+    value: [high, critical]
+actions:
+  - log_event
+  - send_admin_alert
+max_retries: 1
+timeout_seconds: 15
+cooldown_seconds: 30
+max_depth: 3
+dedup_fields:
+  - chat_id
+  - user_id
+  - category

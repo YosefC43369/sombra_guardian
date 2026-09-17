@@ -1,0 +1,15 @@
+{
+  "name": "example-new-member-greeting",
+  "description": "When someone joins, log it and send a welcome message. Disabled by default so it is opt-in; enable with /workflow enable example-new-member-greeting.",
+  "enabled": false,
+  "trigger": {"event": "member.joined"},
+  "conditions": [
+    {"field": "is_bot", "operator": "not_equals", "value": true}
+  ],
+  "actions": ["log_event", "send_message"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 10,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id"]
+}

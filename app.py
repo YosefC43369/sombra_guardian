@@ -107,8 +107,29 @@ import member_report as mrep
 
 import config
 
+# Modular platform layer (plugins + workflow engine + DB migrations). Imported
+# at top level but self-contained: its subsystems isolate their own failures,
+# so this import cannot break app.py's existing behaviour. See sg_platform.py.
+import sg_platform
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
+
+# The live Platform, created in main(). None until then (and if platform init
+# fails for a non-migration reason it stays None and the bot runs unchanged).
+PLATFORM = None
+
+
+def _platform_emit(event_type: str, payload: dict) -> None:
+    """Best-effort: publish an event onto the workflow event bus. Never raises
+    into the caller — a workflow problem must never affect moderation."""
+    platform = PLATFORM
+    if platform is None:
+        return
+    try:
+        platform.emit(event_type, payload)
+    except Exception:
+        logger.debug("PLATFORM emit skipped for %s", event_type, exc_info=True)
 
 SPAM_MESSAGE_LIMIT = 5
 SPAM_TIME_WINDOW = 10
@@ -4651,6 +4672,17 @@ def _open_incident_from_detection(update: Update, worst, all_results):
         if result.ok and result.incident_id and triggered != worst.detection_type:
             mic.add_incident_note(result.incident_id, user.id,
                                   f"detection ทั้งหมดที่ตรวจพบ: {triggered}")
+        if result.ok and result.incident_id:
+            # Notify the workflow engine that an incident was opened. The
+            # shipped workflow only alerts/logs (no incident mutation), so it
+            # cannot feed back into itself; the engine's depth guard backs
+            # that up regardless.
+            _platform_emit("incident.created", {
+                "chat_id": chat.id, "user_id": user.id,
+                "category": worst.detection_type, "severity": worst.severity,
+                "reason": worst.reason, "incident_id": result.incident_id,
+                "username": user.username, "display_name": user.full_name,
+            })
         return result
     except Exception:
         logger.exception("MEMBER INCIDENT ERROR | chat=%s user=%s", chat.id, user.id)
@@ -5746,6 +5778,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 detection_results,
                 key=lambda r: {"low": 0, "medium": 1, "high": 2}.get(r.severity, 0),
             )
+            # Emit a detection.triggered event for any subscribed workflow.
+            # Additive and best-effort: it runs alongside — never instead of —
+            # the existing incident/evidence/delete flow below.
+            _platform_emit("detection.triggered", {
+                "chat_id": chat.id, "user_id": user.id,
+                "detection_type": worst.detection_type, "severity": worst.severity,
+                "reason": worst.reason,
+            })
             # Capture evidence and open/extend an incident BEFORE deleting:
             # once the message is gone the snapshot cannot be taken, and the
             # sender's username at this moment is what the record needs.
@@ -5845,6 +5885,14 @@ def _start_background_task(app, key: str, coro_factory):
 
 
 async def post_init(app):
+    # Wire the workflow engine's Services to the live bot now that app.bot
+    # exists (send_message / send_admin_alert / incident bridges). Best-effort:
+    # a failure here leaves those actions as safe logged stubs.
+    if PLATFORM is not None:
+        try:
+            sg_platform.configure_telegram_services(PLATFORM, app.bot, is_admin)
+        except Exception:
+            logger.exception("PLATFORM: could not configure telegram services")
     _start_background_task(app, "news_task", lambda: news_background_loop(app.bot))
     # github_sweep_loop() existed but was never scheduled, so
     # github_repo.py's DEFAULT_REPOSITORY_TTL_SECONDS never took effect and
@@ -6035,6 +6083,25 @@ def main():
     ex.expense_db_init()
     logger.info("DATABASE: OK")
 
+    # ---- Modular platform: DB migrations + workflow engine + plugins ----
+    # Runs AFTER the legacy *_db_init() calls above (which stay the
+    # compatibility layer for pre-existing schema). A genuine migration
+    # failure is fatal by design — the framework must not let the bot start on
+    # a half-migrated database. Any other platform problem (a bad workflow
+    # file, a broken plugin) is isolated inside init_platform and leaves the
+    # rest of the bot fully functional.
+    global PLATFORM
+    try:
+        PLATFORM = sg_platform.init_platform(DB_PATH)
+    except sg_platform.migrations.MigrationError:
+        logger.critical("MIGRATION: startup aborted — database left consistent, "
+                        "not continuing on a half-migrated schema")
+        raise
+    except Exception:
+        logger.exception("PLATFORM: init failed for a non-migration reason — the "
+                         "bot continues WITHOUT plugins/workflows")
+        PLATFORM = None
+
     # ซิงก์ dataset อ้างอิง (airports.json / programming-languages.json) จาก Google Drive
     # ครั้งเดียวตอน startup ถ้าตั้งค่า Drive ไว้ — best-effort ไม่ทำให้บอตล่มถ้า Drive ล่ม
     # (ถ้าไม่ได้ตั้งค่า Drive จะใช้ไฟล์ในเครื่องเหมือนเดิม ไม่มีอะไรเกิดขึ้น)
@@ -6163,6 +6230,16 @@ def main():
         & ~filters.CaptionRegex(IMAGINE_CAPTION_RE) & ~filters.COMMAND,
         handle_media_message,
     ))
+    # Platform admin commands (/plugins, /workflow, /migration) and any
+    # plugin-contributed commands, registered through the same is_admin gate
+    # the rest of the bot uses. Isolated: a failure here never blocks the
+    # existing handlers already added above.
+    if PLATFORM is not None:
+        try:
+            sg_platform.register_handlers(app, PLATFORM, is_admin)
+        except Exception:
+            logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
+
     app.add_error_handler(error_handler)
 
     logger.info("HANDLERS: OK")
