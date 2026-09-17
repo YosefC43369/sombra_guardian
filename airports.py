@@ -15,10 +15,12 @@
 import os
 import re
 import json
+import heapq
 import logging
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional
+from itertools import count
+from typing import Dict, Iterator, List, Optional
 
 logger = logging.getLogger("modbot.airports")
 
@@ -56,10 +58,8 @@ _cache = {"path": None, "mtime": None, "records": None}
 _index_cache = {"key": None, "index": None}
 
 # ---------- regex สำหรับ "สกัดข้อความ" ----------
-_RE_PHONE = re.compile(r"^0[689]\d-\d{3}-\d{4}$")   # เบอร์
-_RE_EMAIL = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")     # รูปแบบอีเมล
-_RE_NAME = re.compile(r"^[A-Za-zก-๙]+(?:[ -][A-Za-zก-๙]+)+$")   # ชื่อ-นามสกุล
-_RE_ID = re.compile(r"^\d{13}$")    # เลขบัตรประชาชน 13 หลัก
+_RE_IATA = re.compile(r"^[A-Za-z]{3}$")     # รหัส IATA 3 ตัว (เช่น BKK)
+_RE_ICAO = re.compile(r"^[A-Za-z]{4}$")     # รหัส ICAO 4 ตัว (เช่น VTBS)
 _RE_WS = re.compile(r"\s+")
 # โทเคน = อักษร/ตัวเลขละติน + อักษรไทย (฀-๿) เพื่อรองรับการพิมพ์/ค้นภาษาไทย
 # (เดิม [a-z0-9]+ จะตัดอักษรไทยทิ้ง ทำให้ค้นชื่อ/เมืองภาษาไทย เช่น "กรุงเทพ" ไม่เจอ)
@@ -109,7 +109,7 @@ def _normalize(rec: dict, key: Optional[str] = None) -> Optional[dict]:
         iata = code
     if not icao and len(code) == 4:
         icao = code
-    name = str(g("name", "phone", "Name", "Phone")).strip()
+    name = str(g("name", "airport", "Name")).strip()
     city = str(g("city", "municipality", "City")).strip()
     country = str(g("country", "iso_country", "Country")).strip()
     state = str(g("state", "region", "State")).strip()
@@ -187,14 +187,10 @@ def extract_query(text: str) -> dict:
     """
     raw = str(text or "")
     value = _RE_WS.sub(" ", raw).strip()
-    if _RE_NAME.match(value):
-        return {"raw": raw, "value": value.upper(), "kind": "name"}
-    if _RE_ID.match(value):
-        return {"raw": raw, "value": value.upper(), "kind": "id"}
-    if _RE_EMAIL.match(value):
-        return {"raw": raw, "value": value.lower(), "kind": "email"}
-    if _RE_PHONE.match(value):
-        return {"raw": raw, "value": value, "kind": "phone"}
+    if _RE_IATA.match(value):
+        return {"raw": raw, "value": value.upper(), "kind": "iata"}
+    if _RE_ICAO.match(value):
+        return {"raw": raw, "value": value.upper(), "kind": "icao"}
     return {"raw": raw, "value": value, "kind": "text"}
 
 
@@ -292,6 +288,119 @@ def search_airports(records: List[dict], query: str, limit: int = 5) -> List[dic
     return [rec for _, _, rec in scored[: max(1, int(limit))]]
 
 
+# ---------------- ค้นแบบ streaming (memory-safe สำหรับไฟล์ใหญ่) ----------------
+
+def source_available(path: Optional[str] = None) -> bool:
+    """มีไฟล์ฐานข้อมูลให้ค้นไหม — เช็คแบบเบา ๆ (ไม่โหลดทั้งไฟล์เข้า RAM)"""
+    target = path or _resolve_source_path()
+    return bool(target) and os.path.isfile(target)
+
+
+def _entry_of(rec: dict) -> dict:
+    """สร้าง entry ช่วยให้คะแนนของระเบียนเดียว (คำนวณสด — ใช้กับ streaming)"""
+    codes = {c.lower() for c in (rec.get("iata"), rec.get("icao"), rec.get("code")) if c}
+    return {"rec": rec, "codes": codes,
+            "name_n": _norm(rec.get("name")), "city_n": _norm(rec.get("city")),
+            "tokens": set(_tokenize(rec.get("name")) + _tokenize(rec.get("city")))}
+
+
+def _score_entry(e: dict, qn: str, qtokens: List[str], allow_fuzzy: bool) -> int:
+    codes = e["codes"]
+    if qn in codes:
+        return 100
+    if len(qn) >= 2 and any(c.startswith(qn) for c in codes):
+        return 88
+    return _text_score(e, qn, qtokens, allow_fuzzy)
+
+
+def _stream_normalized(path: Optional[str] = None) -> Iterator[dict]:
+    """yield ระเบียนสนามบินที่ normalize แล้ว "ทีละตัว" แบบ memory-safe
+
+    ใช้ ijson สตรีมจากไฟล์ (dict คีย์ด้วยรหัส หรือ list ของ object) โดยไม่โหลดทั้งไฟล์
+    เข้า RAM — เหมาะกับไฟล์ใหญ่ ถ้าไม่มี ijson หรือรูปแบบไฟล์ห่อด้วยคีย์ จะถอยไปใช้
+    load_airports (โหลดปกติ) เพื่อความชัวร์
+    """
+    target = path or _resolve_source_path()
+    if not target or not os.path.isfile(target):
+        return
+    try:
+        import ijson  # type: ignore
+    except Exception:
+        ijson = None
+    if ijson is None:
+        for rec in load_airports(target):
+            yield rec
+        return
+
+    # หา token แรก ( ' { ' = dict คีย์ด้วยรหัส, ' [ ' = list ) โดยไม่อ่านทั้งไฟล์
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            head = f.read(64).lstrip()
+        first = head[:1]
+    except OSError:
+        return
+
+    yielded = 0
+    try:
+        if first == "{":
+            with open(target, "rb") as f:
+                for key, val in ijson.kvitems(f, ""):
+                    if isinstance(val, dict):
+                        norm = _normalize(val, key)
+                        if norm:
+                            yielded += 1
+                            yield norm
+        elif first == "[":
+            with open(target, "rb") as f:
+                for val in ijson.items(f, "item"):
+                    if isinstance(val, dict):
+                        norm = _normalize(val)
+                        if norm:
+                            yielded += 1
+                            yield norm
+    except Exception as e:
+        logger.warning("AIRPORTS | สตรีมไฟล์ล้มเหลว %s (%s) — ถอยไปโหลดปกติ", target, e)
+        yielded = -1
+    # ไฟล์ห่อด้วยคีย์ (เช่น {"airports": {...}}) หรือสตรีมพัง -> ถอยไปโหลดปกติ
+    if yielded <= 0:
+        for rec in load_airports(target):
+            yield rec
+
+
+def search_stream(query: str, limit: int = 5, path: Optional[str] = None) -> List[dict]:
+    """ค้นสนามบินแบบ streaming — ให้คะแนนทีละระเบียน เก็บ top-K ด้วย heap (memory-safe)
+
+    ไม่โหลดทั้งไฟล์เข้า RAM (เหมาะกับไฟล์ใหญ่) และไม่สร้างดัชนีในหน่วยความจำ
+    รองรับสัญญาณเดียวกับ search_airports: รหัสตรง/ขึ้นต้น, ชื่อ/เมืองตรง/ขึ้นต้น/substring/fuzzy
+    """
+    parsed = extract_query(query)
+    val = parsed["value"]
+    if not val:
+        return []
+    qn = _norm(val)
+    qtokens = _tokenize(val)
+    # ประสิทธิภาพ: คำค้นที่เป็น "รหัส" (iata/icao) ไม่ต้องทำ fuzzy บนชื่อ (แพงและไม่จำเป็น)
+    allow_fuzzy = parsed["kind"] == "text"
+    lim = max(1, int(limit))
+    counter = count()
+    heap: List = []   # min-heap ของ (score, -len(name_n), seq, rec) — เก็บ top-K
+    for rec in _stream_normalized(path):
+        e = _entry_of(rec)
+        s = _score_entry(e, qn, qtokens, allow_fuzzy)
+        if s <= 0:
+            continue
+        item = (s, -len(e["name_n"]), next(counter), rec)
+        if len(heap) < lim:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+        # early-stop: เก็บครบ K แล้วและตัวที่แย่สุดยัง "ตรงเป๊ะ" (100) -> ไม่มีอะไรดีกว่านี้แล้ว
+        if len(heap) >= lim and heap[0][0] >= 100:
+            break
+    heap.sort(key=lambda x: (-x[0], -x[1]))   # คะแนนมากก่อน แล้วชื่อสั้นก่อน
+    return [rec for _, _, _, rec in heap]
+
+
 # ---------------- Elasticsearch (ทางเลือก, ใช้ client ร่วมกับ osint_es) ----------------
 
 def _es_client():
@@ -369,8 +478,8 @@ def format_airport(rec: dict) -> str:
     codes = " / ".join(_seen)
     parts = [
         line("🛫", "ชื่อ", rec.get("name")),
-        line("🏙️", "อีเมล", rec.get("email")),
-        line("🌏", "เบอร์โทร์", rec.get("phone")),
+        line("🏙️", "เมือง", rec.get("city")),
+        line("🌏", "ประเทศ", rec.get("country")),
         line("🗺️", "รัฐ/ภูมิภาค", rec.get("state")),
         line("🔖", "รหัส (IATA/ICAO)", codes),
     ]

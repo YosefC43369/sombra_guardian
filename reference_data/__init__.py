@@ -64,6 +64,9 @@ from .dataset_manager import (
 )
 # Task 1: สกัดฟิลด์ + แผนที่โครงสร้างจาก dump (whitelist-gated)
 from .schema import profile_dataset, sql_schema, profile_records
+# คัดแยกบทบาทฟิลด์อัตโนมัติ (auto field classification) — ไม่ต้องกำหนดฟิลด์ในโค้ด
+from .schema import (classify_fields, classify_dataset,
+                     detect_text_fields, detect_code_fields, detect_id_fields)
 # Task 2: cleansing + dedupe + index (whitelist-gated)
 from .cleansing import clean_record, dedupe, clean_and_index, clean_all
 # ค้นในไฟล์เร็วแบบ offline: trigram inverted index + LRU cache (whitelist-gated)
@@ -74,6 +77,8 @@ __all__ = [
     "get_dataset_path", "get_json", "get_records", "parse_records",
     "sync", "sync_all",
     "profile_dataset", "sql_schema", "profile_records",
+    "classify_fields", "classify_dataset",
+    "detect_text_fields", "detect_code_fields", "detect_id_fields",
     "clean_record", "dedupe", "clean_and_index", "clean_all",
     "FastIndex", "fast_for_dataset", "fast_search",
 ]

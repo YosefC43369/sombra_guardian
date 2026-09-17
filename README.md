@@ -291,9 +291,98 @@ docker run --env-file .env sombra-guardian
 | `github_repo.py` · `repository_sandbox.py` · `repository_tools.py` | โคลน/รีวิว repo ใน sandbox |
 | `wallet.py` · `debt_ledger.py` · `expense.py` (+ `*_report.py`) | ระบบการเงินกลุ่ม |
 | `gemini.py` · `quota.py` · `news.py` · `config.py` · `envutil.py` | AI, โควตา, ข่าว, config |
+| `migrations/` | Centralized DB migration framework — versioned schema, checksums, up/down, destructive-safety, `schema_migrations` metadata |
+| `workflows/` | Workflow Automation Engine — event bus, triggers/conditions/actions, execution safety (id, idempotency, retry, timeout, loop guard) |
+| `plugins/` | Plugin Architecture — discover/load/enable/health with per-plugin failure isolation; reuses the existing `is_admin` authority |
+| `sg_platform.py` | Integration seam — wires the three subsystems into `app.py` with minimal, additive edits |
 
-**หลักการ:** เพิ่มตารางด้วย `CREATE TABLE IF NOT EXISTS` เท่านั้น (ไม่มี destructive migration),
+**หลักการ:** โมดูลเดิมยังเพิ่มตารางด้วย `CREATE TABLE IF NOT EXISTS` เหมือนเดิม (นั่นคือ
+compatibility layer ของ schema ที่มีอยู่แล้ว) — **schema ใหม่** ทุกอย่างผ่าน `migrations/` เท่านั้น,
 ทุก query เป็น parameterized, ข้อความ/ชื่อของผู้ใช้ถือเป็น **ข้อมูล ไม่ใช่คำสั่ง**
+
+---
+
+## 🧩 Modular Platform (Plugins · Workflows · Migrations)
+
+ยกระดับเป็น modular security platform โดย **ไม่แตะพฤติกรรมเดิม** — ทุกอย่างเป็นแบบ additive
+และแยก failure ของตัวเอง ถ้าปลั๊กอิน/เวิร์กโฟลว์ตัวใดพัง บอทหลักยังทำงานต่อได้ตามปกติ
+
+### Plugin Architecture (`plugins/`)
+
+ฟีเจอร์ลงทะเบียน command / workflow action / event subscription ได้โดยไม่ต้องเพิ่ม logic ใน
+`app.py` แบบ monolithic ปลั๊กอินหนึ่งพัง (`FAILED`) ไม่กระทบตัวอื่น (`ENABLED`) และไม่ทำให้บูตล่ม
+
+```
+/plugins            # = /plugins list
+/plugins list       # รายชื่อ + สถานะ (🟢 ENABLED / ⚪ DISABLED / 🔴 FAILED)
+/plugins status     # สรุปจำนวนตามสถานะ
+/plugins health     # ผล healthcheck ต่อปลั๊กอิน
+/plugins info <name>
+/plugins enable <name>
+/plugins disable <name>
+```
+
+- **Permission:** `PUBLIC < MODERATOR < ADMIN < OWNER < SYSTEM` — command ระดับ ADMIN ขึ้นไป
+  ผ่านการเช็ก `is_admin` เดิม (ไม่มีระบบ auth ใหม่ซ้ำซ้อน)
+- **สร้างปลั๊กอินของคุณเอง:** ดู `examples/plugin_example/` แล้วตั้ง `SG_PLUGINS_DIR` ชี้ไปที่โฟลเดอร์นั้น
+- built-in: `detection-bridge` (สังเกต detection events, มี workflow action + healthcheck — ไม่แตะการมอเดอเรต)
+
+### Workflow Automation Engine (`workflows/`)
+
+```
+Event → Event Bus → match trigger → conditions → actions → execution log/audit
+```
+
+- **Triggers:** `message.received` · `message.deleted` · `detection.triggered` ·
+  `incident.created` · `incident.updated` · `evidence.created` · `member.joined` ·
+  `member.left` · `system.error` (เพิ่มชนิดใหม่ได้โดยไม่แก้ engine)
+- **Conditions:** `equals, not_equals, contains, not_contains, gt, gte, lt, lte,
+  in, not_in, exists, not_exists, regex` — regex จำกัดความยาว + ปฏิเสธ nested-quantifier (กัน ReDoS)
+- **Actions:** `log_event, send_message, send_admin_alert, create_incident,
+  update_incident, create_evidence, run_detection, generate_report` — action ที่ยังไม่มี
+  service ต่อจริงจะ degrade เป็น safe stub (log) ไม่ทำให้ล่ม
+- **Execution safety:** execution id, correlation id, idempotency/dedup (`cooldown` +
+  `dedup_fields`), `max_retries`, `timeout_seconds`, `max_depth` (กัน workflow loop),
+  state = `PENDING/RUNNING/SUCCESS/FAILED/CANCELLED/TIMEOUT/SKIPPED`
+- นิยาม workflow เป็นไฟล์ใน `workflows/definitions/` — JSON (ดีฟอลต์, ไม่ต้องลง dependency),
+  YAML (ถ้ามี PyYAML), หรือ `.py` ดูตัวอย่าง `examples/workflow_example/`
+
+```
+/workflow list · status · show <name> · history [name] · enable <name> · disable <name>
+```
+
+### Database Migration System (`migrations/`)
+
+schema ใหม่ทุกตัวผ่าน migration แบบมีเวอร์ชัน แทนการกระจาย `CREATE TABLE` (โมดูลเดิมไม่ถูกแตะ)
+
+```
+/migration            # = /migration status
+/migration status · current · pending · verify
+/migration up         # apply pending ที่ไม่ destructive
+/migration up --confirm   # ยืนยัน apply ตัวที่ destructive (DROP/TRUNCATE)
+```
+
+- **Startup:** บูต → เชื่อม DB → apply migration ที่ค้าง (เฉพาะที่ไม่ destructive) →
+  ถ้า migration ล้มเหลว จะ **ไม่ไปต่อเงียบ ๆ** (log ละเอียด, rollback ให้ DB คงสภาพเดิม)
+- **Metadata:** ตาราง `schema_migrations` เก็บ version, name, applied_at, checksum, execution_time
+- **Safety:** migration ที่ destructive ต้องยืนยันจาก admin เท่านั้น ไม่ถูก apply อัตโนมัติตอนบูต
+
+### Integration flow
+
+```
+detection.py → detection.triggered → Event Bus → Workflow Engine
+   → create_incident (member_incident) → Incident + Evidence (DB)
+   → incident.created → critical-incident workflow → admin alert + audit log
+```
+
+### Troubleshooting
+
+- ปลั๊กอินขึ้น `🔴 FAILED` → ดู `/plugins info <name>` (มี error) และ log บรรทัด `PLUGIN FAILED` —
+  บอทหลักไม่กระทบ แก้แล้ว `/plugins enable <name>`
+- workflow ไม่ทำงาน → เช็ก `/workflow show <name>` ว่า `enabled` และ trigger/conditions ตรง;
+  `/workflow history` ดู state (เช่น `SKIPPED` = conditions/dedup/loop-guard)
+- migration ค้าง → `/migration pending`; ถ้ามี destructive ต้อง `/migration up --confirm`
+- schema เพี้ยน → `/migration verify` (ตรวจ checksum/ไฟล์หาย)
 
 ---
 
@@ -331,8 +420,14 @@ python test_mute_regression.py
 python -m unittest test_bb_report
 python -m unittest test_redteam test_purpleteam
 
-# ชุด OSINT / search / scrape ทั้งหมด
+# ชุด OSINT / search / scrape ทั้งหมด + ชุด platform (plugins/workflows/migrations)
 python tests/run_all.py
+
+# ชุด Modular Platform โดยเฉพาะ
+python tests/test_migrations.py            # migration framework
+python tests/test_workflows.py             # workflow engine
+python tests/test_plugins.py               # plugin architecture + failure isolation
+python tests/test_platform_integration.py  # detection→event→workflow→incident→DB→audit
 
 # จำลองการบูตจริงทั้ง main() (ยกเว้น run_polling)
 python tests/test_startup.py

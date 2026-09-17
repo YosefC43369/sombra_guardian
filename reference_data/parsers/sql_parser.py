@@ -27,7 +27,7 @@ _INSERT_RE = re.compile(
     re.IGNORECASE | re.DOTALL)
 
 _CONSTRAINT_KW = {"PRIMARY", "UNIQUE", "KEY", "CONSTRAINT", "FOREIGN",
-                  "INDEX", "FULLTEXT", "SPATIAL", "CHECK"}
+                  "INDEX", "FULLTEXT", "SPATIAL", "CHECK", "NAME", "PHONE", "EMAIL", "ADDRESS", "CITY", "STATE", "ZIP", "COUNTRY"}
 
 
 def _split_top_level(s: str, sep: str) -> List[str]:

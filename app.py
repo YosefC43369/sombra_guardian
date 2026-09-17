@@ -33,6 +33,8 @@ import osint_db
 import osint_es
 import search_es
 import airports
+import notes
+import reputation
 import nethealth
 import tor_launcher
 import username_osint
@@ -105,8 +107,29 @@ import member_report as mrep
 
 import config
 
+# Modular platform layer (plugins + workflow engine + DB migrations). Imported
+# at top level but self-contained: its subsystems isolate their own failures,
+# so this import cannot break app.py's existing behaviour. See sg_platform.py.
+import sg_platform
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "bot.db"
+
+# The live Platform, created in main(). None until then (and if platform init
+# fails for a non-migration reason it stays None and the bot runs unchanged).
+PLATFORM = None
+
+
+def _platform_emit(event_type: str, payload: dict) -> None:
+    """Best-effort: publish an event onto the workflow event bus. Never raises
+    into the caller — a workflow problem must never affect moderation."""
+    platform = PLATFORM
+    if platform is None:
+        return
+    try:
+        platform.emit(event_type, payload)
+    except Exception:
+        logger.debug("PLATFORM emit skipped for %s", event_type, exc_info=True)
 
 SPAM_MESSAGE_LIMIT = 5
 SPAM_TIME_WINDOW = 10
@@ -537,7 +560,18 @@ _HELP_BODIES = {
         "/resetwarn\n🔄 รีเซ็ต Warning — ใช้กับ Reply\n\n"
         "/mute 10m\n🔇 Mute สมาชิก — ใช้กับ Reply\n\n"
         "/unmute\n🔊 ปลด Mute\n\n"
-        "/id\n🆔 ดู Chat ID"
+        "/id\n🆔 ดู Chat ID\n\n"
+        "📁 คลังบันทึกกลุ่ม\n"
+        "/note <คำ>\n📌 เรียกดูบันทึก\n\n"
+        "/notes\n📋 รายการบันทึกทั้งหมด\n\n"
+        "/note add <คำ> <ข้อความ>\n➕ บันทึก (Admin) — reply ข้อความก็ได้\n\n"
+        "/note del <คำ>\n🗑️ ลบบันทึก (Admin)\n\n"
+        "⭐ ระบบชื่อเสียง/คะแนนน้ำใจ\n"
+        "/rep [เหตุผล]\n➕ ให้คะแนนน้ำใจ — reply ข้อความคนนั้น\n\n"
+        "/karma\n🪪 ดูโปรไฟล์ชื่อเสียง (reply เพื่อดูของคนอื่น)\n\n"
+        "/toprep\n🏅 กระดานผู้นำน้ำใจ\n\n"
+        "/repdigest\n📊 สรุปน้ำใจประจำสัปดาห์\n\n"
+        "/repundo\n↩️ ถอนคืนการให้ล่าสุด"
     ),
     "ai": (
         "🤖 AI\n" + _HELP_DIVIDER + "\n"
@@ -571,7 +605,9 @@ _HELP_BODIES = {
         "🗂️ Reference Data (Google Drive)\n"
         "/refdata [status]\n"
         "/refdata sync\n"
-        "/refdata reindex"
+        "/refdata reindex\n\n"
+        "⭐ ระบบชื่อเสียง\n"
+        "/repconfig [show|<key> <value>|reset|tiers]"
     ),
     "osint": (
         "🔎 OSINT\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
@@ -1514,11 +1550,12 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ตัวอย่าง: /airport BKK  |  /airport VTBS  |  /airport Suvarnabhumi\n"
             "Admin: /airport reindex เพื่อทำดัชนีลง Elasticsearch")
 
-    if not airports.load_airports():
+    # เช็คว่ามีไฟล์ให้ค้นไหม แบบเบา ๆ (ไม่โหลดทั้งไฟล์เข้า RAM — รองรับไฟล์ใหญ่)
+    if not airports.source_available():
         return await update.message.reply_text(
             "⚠️ ยังไม่มีไฟล์ฐานข้อมูลสนามบิน (resource/airports.json) หรืออ่านไม่ได้")
 
-    # ค้นผ่าน ES ก่อน (ถ้ามี) แล้ว fallback ไปค้นในไฟล์
+    # ค้นผ่าน ES ก่อน (ถ้ามี) แล้ว fallback ไปค้นในไฟล์แบบ streaming (memory-safe)
     hits = None
     via = ""
     if airports.es_configured():
@@ -1530,9 +1567,8 @@ async def cmd_airport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hits is not None:
             via = "Elasticsearch"
     if hits is None:
-        recs = airports.load_airports()
-        hits = airports.search_airports(recs, query, 5)
-        via = "ไฟล์ JSON"
+        hits = await asyncio.to_thread(airports.search_stream, query, 5)
+        via = "ไฟล์ (streaming)"
 
     text = airports.format_results(hits, query, via=via)
     # ไม่พบผล + ค้นผ่าน ES -> เสนอ "did you mean" (แก้คำสะกดผิด)
@@ -1664,6 +1700,176 @@ async def cmd_refdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /refdata status — ดูสถานะ Drive/ES/ไฟล์ที่อนุญาต\n"
         "• /refdata sync — ดึงเวอร์ชันล่าสุดจาก Google Drive\n"
         "• /refdata reindex — clean+dedupe แล้วทำดัชนี Elasticsearch ใหม่")
+
+
+async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """แสดงรายการ keyword ในคลังบันทึกของกลุ่ม (ทุกคนดูได้)"""
+    chat_id = update.effective_chat.id
+    keys = await asyncio.to_thread(notes.list_notes, chat_id)
+    await update.message.reply_text(notes.format_list(chat_id, keys))
+
+
+async def cmd_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """คลังบันทึกกลุ่ม: /note <key> ดู | /note add <key> <ข้อความ> | /note del <key> | /note list
+
+    - เรียกดู: ทุกคน
+    - เพิ่ม/ลบ: เฉพาะ Admin (ตรวจสิทธิ์ตอนสั่งงานจริง)
+    - /note add <key> โดย reply ข้อความ = บันทึกข้อความที่ reply
+    """
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        return await update.message.reply_text(
+            "📁 คลังบันทึกกลุ่ม\n"
+            f"{notes._DIVIDER}\n"
+            "• /note <คำ> — เรียกดู\n"
+            "• /notes หรือ /note list — ดูรายการทั้งหมด\n"
+            "• /note add <คำ> <ข้อความ> — บันทึก (Admin)\n"
+            "• /note del <คำ> — ลบ (Admin)\n"
+            "เคล็ดลับ: reply ข้อความแล้วพิมพ์ /note add <คำ> เพื่อบันทึกข้อความนั้น")
+
+    sub = args[0].lower()
+
+    if sub == "list":
+        keys = await asyncio.to_thread(notes.list_notes, chat_id)
+        return await update.message.reply_text(notes.format_list(chat_id, keys))
+
+    if sub == "add":
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ เพิ่มบันทึกได้เฉพาะ Admin")
+        if len(args) < 2:
+            return await update.message.reply_text("ใช้งาน: /note add <คำ> <ข้อความ>")
+        key = args[1]
+        text = " ".join(args[2:]).strip()
+        # ถ้าไม่พิมพ์ข้อความ แต่ reply ข้อความอยู่ -> ใช้ข้อความที่ reply
+        if not text and update.message.reply_to_message:
+            text = (update.message.reply_to_message.text
+                    or update.message.reply_to_message.caption or "").strip()
+        author = update.effective_user.username or update.effective_user.full_name \
+            if update.effective_user else None
+        res = await asyncio.to_thread(notes.add_note, chat_id, key, text, author)
+        if res["ok"]:
+            verb = "อัปเดตบันทึก" if res.get("replaced") else "บันทึก"
+            return await update.message.reply_text(f"✅ {verb} #{res['key']} แล้ว")
+        errmsg = {
+            "bad_key": "❌ คำไม่ถูกต้อง (ใช้ตัวอักษร/ตัวเลข/ไทย/_-. ไม่มีช่องว่าง)",
+            "empty_text": "❌ ไม่มีข้อความให้บันทึก (พิมพ์ข้อความ หรือ reply ข้อความ)",
+            "too_long": f"❌ ข้อความยาวเกิน ({notes.MAX_TEXT_LEN} ตัวอักษร)",
+            "limit": f"❌ กลุ่มนี้มีบันทึกครบเพดานแล้ว ({notes.MAX_NOTES_PER_CHAT})",
+        }.get(res.get("error"), "❌ บันทึกไม่สำเร็จ")
+        return await update.message.reply_text(errmsg)
+
+    if sub in ("del", "delete", "rm", "remove"):
+        if not await is_admin(update, context):
+            return await update.message.reply_text("❌ ลบบันทึกได้เฉพาะ Admin")
+        if len(args) < 2:
+            return await update.message.reply_text("ใช้งาน: /note del <คำ>")
+        ok = await asyncio.to_thread(notes.del_note, chat_id, args[1])
+        return await update.message.reply_text(
+            f"🗑️ ลบบันทึก #{notes.normalize_key(args[1]) or args[1]} แล้ว" if ok
+            else f"🔎 ไม่พบบันทึก #{args[1]}")
+
+    # ไม่ใช่ subcommand -> ถือเป็น key เรียกดู
+    key = args[0]
+    note = await asyncio.to_thread(notes.get_note, chat_id, key, True)
+    if note:
+        return await _reply_chunked(update, notes.format_note(notes.normalize_key(key), note))
+    return await update.message.reply_text(
+        f"🔎 ไม่พบบันทึก #{key}\nพิมพ์ /notes เพื่อดูรายการที่มี")
+
+
+# ==================== ระบบชื่อเสียง/คะแนนน้ำใจ (reputation) ====================
+
+async def cmd_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ให้คะแนนน้ำใจ: reply ข้อความของสมาชิก แล้วพิมพ์ /rep [จำนวน] [เหตุผล]"""
+    msg = update.message
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        return await msg.reply_text(
+            "💡 ให้คะแนนน้ำใจด้วยการ reply ข้อความของคนนั้น แล้วพิมพ์ /rep\n"
+            "ตัวอย่าง: reply แล้วพิมพ์  /rep ขอบคุณที่ช่วยตอบ")
+    target = msg.reply_to_message.from_user
+    giver = update.effective_user
+    args = context.args or []
+    amount, reason = 1, ""
+    if args and args[0].lstrip("+-").isdigit():
+        amount = int(args[0])
+        reason = " ".join(args[1:])
+    else:
+        reason = " ".join(args)
+    res = await asyncio.to_thread(
+        reputation.give, update.effective_chat.id, giver.id, target.id, amount, reason,
+        (giver.username and "@" + giver.username) or giver.full_name,
+        (target.username and "@" + target.username) or target.full_name,
+        False, bool(target.is_bot))
+    await msg.reply_text(reputation.format_give_result(
+        res, (giver.username and "@" + giver.username) or giver.full_name,
+        (target.username and "@" + target.username) or target.full_name))
+
+
+async def cmd_karma(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ดูโปรไฟล์ชื่อเสียง (ของตัวเอง หรือ reply เพื่อดูของคนอื่น)"""
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        u = update.message.reply_to_message.from_user
+    else:
+        u = update.effective_user
+    name = (u.username and "@" + u.username) or u.full_name
+    prof = await asyncio.to_thread(reputation.get_profile, update.effective_chat.id, u.id, name)
+    await _reply_chunked(update, reputation.format_profile(prof))
+
+
+async def cmd_toprep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """กระดานผู้นำน้ำใจของกลุ่ม"""
+    rows = await asyncio.to_thread(reputation.leaderboard, update.effective_chat.id, 10)
+    await update.message.reply_text(reputation.format_leaderboard(rows))
+
+
+async def cmd_repdigest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """สรุปน้ำใจประจำสัปดาห์"""
+    text = await asyncio.to_thread(reputation.format_digest, update.effective_chat.id)
+    await _reply_chunked(update, text)
+
+
+async def cmd_repundo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ถอนคืนการให้คะแนนล่าสุดของตัวเอง (ภายในเวลาที่กำหนด)"""
+    res = await asyncio.to_thread(
+        reputation.undo_last, update.effective_chat.id, update.effective_user.id)
+    if res["ok"]:
+        return await update.message.reply_text(f"↩️ ถอนคืนการให้ล่าสุด ({res['amount']:+d}) แล้ว")
+    if res.get("error") == "expired":
+        return await update.message.reply_text("⌛ เลยเวลาถอนคืนแล้ว")
+    await update.message.reply_text("🔎 ไม่มีการให้ล่าสุดให้ถอนคืน")
+
+
+async def cmd_repconfig(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ตั้งค่าระบบชื่อเสียง (Admin): /repconfig [show|<key> <value>|reset|tiers]"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ ตั้งค่าระบบชื่อเสียงได้เฉพาะ Admin")
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args or args[0].lower() == "show":
+        cfg = await asyncio.to_thread(reputation.get_config, chat_id)
+        return await update.message.reply_text(reputation.format_config(chat_id, cfg))
+    sub = args[0].lower()
+    if sub == "tiers":
+        return await update.message.reply_text(reputation.format_tiers())
+    if sub == "reset":
+        await asyncio.to_thread(reputation.reset_config, chat_id)
+        cfg = await asyncio.to_thread(reputation.get_config, chat_id)
+        return await update.message.reply_text("♻️ รีเซ็ตค่าเริ่มต้นแล้ว\n\n"
+                                               + reputation.format_config(chat_id, cfg))
+    if len(args) < 2:
+        return await update.message.reply_text(
+            "ใช้งาน: /repconfig <key> <value>\nดูค่าทั้งหมด: /repconfig show")
+    res = await asyncio.to_thread(reputation.set_config, chat_id, args[0], args[1])
+    if res["ok"]:
+        return await update.message.reply_text(f"✅ ตั้ง {res['key']} = {res['value']}")
+    errmsg = {
+        "unknown_key": f"❌ ไม่รู้จักคีย์ '{args[0]}' (ดู /repconfig show)",
+        "bad_bool": "❌ ค่าบูลีนต้องเป็น on/off",
+        "bad_value": "❌ ค่าไม่ถูกต้อง",
+        "negative": "❌ ค่าติดลบไม่ได้",
+    }.get(res.get("error"), "❌ ตั้งค่าไม่สำเร็จ")
+    await update.message.reply_text(errmsg)
 
 
 async def cmd_deepsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4466,6 +4672,17 @@ def _open_incident_from_detection(update: Update, worst, all_results):
         if result.ok and result.incident_id and triggered != worst.detection_type:
             mic.add_incident_note(result.incident_id, user.id,
                                   f"detection ทั้งหมดที่ตรวจพบ: {triggered}")
+        if result.ok and result.incident_id:
+            # Notify the workflow engine that an incident was opened. The
+            # shipped workflow only alerts/logs (no incident mutation), so it
+            # cannot feed back into itself; the engine's depth guard backs
+            # that up regardless.
+            _platform_emit("incident.created", {
+                "chat_id": chat.id, "user_id": user.id,
+                "category": worst.detection_type, "severity": worst.severity,
+                "reason": worst.reason, "incident_id": result.incident_id,
+                "username": user.username, "display_name": user.full_name,
+            })
         return result
     except Exception:
         logger.exception("MEMBER INCIDENT ERROR | chat=%s user=%s", chat.id, user.id)
@@ -4513,6 +4730,31 @@ def _open_incident_from_forbidden_word(update: Update, message, matched_word):
     except Exception:
         logger.exception("MEMBER INCIDENT ERROR (word) | chat=%s user=%s", chat.id, user.id)
         return None
+
+
+_WELCOME_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _welcome_text(name: str) -> str:
+    """ข้อความต้อนรับสมาชิกใหม่ — เรียบร้อย อ่านสบายตา ใช้อิโมจินำสายตาแต่พอดี"""
+    return (
+        f"👋 ยินดีต้อนรับ {name} สู่กลุ่ม\n"
+        f"{_WELCOME_DIVIDER}\n"
+        "🤖 JOSEPH SECRET BOT พร้อมช่วยดูแลความเรียบร้อยของกลุ่ม\n"
+        "📋 พิมพ์ /help เพื่อดูคำสั่งที่ใช้ได้\n"
+        "🙏 โปรดอ่านกติกากลุ่มและพูดคุยกันด้วยความเคารพ — ขอให้สนุกนะ"
+    )
+
+
+async def _send_welcome(context: ContextTypes.DEFAULT_TYPE, chat, target) -> None:
+    """ส่งข้อความต้อนรับเข้ากลุ่ม (ไม่ทำให้ flow อื่นพังถ้าส่งไม่ได้)"""
+    # ใช้ @username ถ้ามี ไม่งั้นใช้ชื่อที่แสดง — เป็นข้อความล้วน (ไม่ parse_mode) กัน markup พัง
+    name = (("@" + target.username) if getattr(target, "username", None)
+            else (getattr(target, "full_name", None) or "เพื่อนใหม่"))
+    try:
+        await context.bot.send_message(chat.id, _welcome_text(name))
+    except TelegramError as e:
+        logger.info("WELCOME SEND FAILED | chat=%s user=%s (%s)", chat.id, target.id, e)
 
 
 async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4604,6 +4846,14 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
         _record_member_action(
             chat.id, action, target_user_id=target.id, admin_user_id=admin_user_id,
             reason=f"{result['old_status']} -> {result['new_status']}", executed=True)
+
+    # ยินดีต้อนรับสมาชิกใหม่ (คนจริงเท่านั้น) — ส่งเฉพาะตอน "เพิ่งเข้ากลุ่ม"
+    # (สถานะก่อนหน้าเป็น left/banned/ยังไม่เคยอยู่ -> กลายเป็น member)
+    joined = (result["new_status"] == mi.MembershipStatus.MEMBER.value
+              and result["old_status"] in (mi.MembershipStatus.LEFT.value,
+                                            mi.MembershipStatus.BANNED.value, None))
+    if joined and not target.is_bot:
+        await _send_welcome(context, chat, target)
 
 
 # ---------------- Red Team Assessment (Phase 11, RoE-gated) ----------------
@@ -5528,6 +5778,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 detection_results,
                 key=lambda r: {"low": 0, "medium": 1, "high": 2}.get(r.severity, 0),
             )
+            # Emit a detection.triggered event for any subscribed workflow.
+            # Additive and best-effort: it runs alongside — never instead of —
+            # the existing incident/evidence/delete flow below.
+            _platform_emit("detection.triggered", {
+                "chat_id": chat.id, "user_id": user.id,
+                "detection_type": worst.detection_type, "severity": worst.severity,
+                "reason": worst.reason,
+            })
             # Capture evidence and open/extend an incident BEFORE deleting:
             # once the message is gone the snapshot cannot be taken, and the
             # sender's username at this moment is what the record needs.
@@ -5627,6 +5885,14 @@ def _start_background_task(app, key: str, coro_factory):
 
 
 async def post_init(app):
+    # Wire the workflow engine's Services to the live bot now that app.bot
+    # exists (send_message / send_admin_alert / incident bridges). Best-effort:
+    # a failure here leaves those actions as safe logged stubs.
+    if PLATFORM is not None:
+        try:
+            sg_platform.configure_telegram_services(PLATFORM, app.bot, is_admin)
+        except Exception:
+            logger.exception("PLATFORM: could not configure telegram services")
     _start_background_task(app, "news_task", lambda: news_background_loop(app.bot))
     # github_sweep_loop() existed but was never scheduled, so
     # github_repo.py's DEFAULT_REPOSITORY_TTL_SECONDS never took effect and
@@ -5817,6 +6083,25 @@ def main():
     ex.expense_db_init()
     logger.info("DATABASE: OK")
 
+    # ---- Modular platform: DB migrations + workflow engine + plugins ----
+    # Runs AFTER the legacy *_db_init() calls above (which stay the
+    # compatibility layer for pre-existing schema). A genuine migration
+    # failure is fatal by design — the framework must not let the bot start on
+    # a half-migrated database. Any other platform problem (a bad workflow
+    # file, a broken plugin) is isolated inside init_platform and leaves the
+    # rest of the bot fully functional.
+    global PLATFORM
+    try:
+        PLATFORM = sg_platform.init_platform(DB_PATH)
+    except sg_platform.migrations.MigrationError:
+        logger.critical("MIGRATION: startup aborted — database left consistent, "
+                        "not continuing on a half-migrated schema")
+        raise
+    except Exception:
+        logger.exception("PLATFORM: init failed for a non-migration reason — the "
+                         "bot continues WITHOUT plugins/workflows")
+        PLATFORM = None
+
     # ซิงก์ dataset อ้างอิง (airports.json / programming-languages.json) จาก Google Drive
     # ครั้งเดียวตอน startup ถ้าตั้งค่า Drive ไว้ — best-effort ไม่ทำให้บอตล่มถ้า Drive ล่ม
     # (ถ้าไม่ได้ตั้งค่า Drive จะใช้ไฟล์ในเครื่องเหมือนเดิม ไม่มีอะไรเกิดขึ้น)
@@ -5860,6 +6145,14 @@ def main():
     app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("airport", cmd_airport))
     app.add_handler(CommandHandler("refdata", cmd_refdata))
+    app.add_handler(CommandHandler("note", cmd_note))
+    app.add_handler(CommandHandler("notes", cmd_notes))
+    app.add_handler(CommandHandler("rep", cmd_rep))
+    app.add_handler(CommandHandler("karma", cmd_karma))
+    app.add_handler(CommandHandler("toprep", cmd_toprep))
+    app.add_handler(CommandHandler("repdigest", cmd_repdigest))
+    app.add_handler(CommandHandler("repundo", cmd_repundo))
+    app.add_handler(CommandHandler("repconfig", cmd_repconfig))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
@@ -5937,6 +6230,16 @@ def main():
         & ~filters.CaptionRegex(IMAGINE_CAPTION_RE) & ~filters.COMMAND,
         handle_media_message,
     ))
+    # Platform admin commands (/plugins, /workflow, /migration) and any
+    # plugin-contributed commands, registered through the same is_admin gate
+    # the rest of the bot uses. Isolated: a failure here never blocks the
+    # existing handlers already added above.
+    if PLATFORM is not None:
+        try:
+            sg_platform.register_handlers(app, PLATFORM, is_admin)
+        except Exception:
+            logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
+
     app.add_error_handler(error_handler)
 
     logger.info("HANDLERS: OK")

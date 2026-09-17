@@ -22,9 +22,11 @@
 ทั้งหมดเป็น pure-python (ไม่มี dependency ภายนอก) และไม่ throw ระดับคำค้น
 """
 
+import os
 import re
 import unicodedata
 from collections import OrderedDict, defaultdict
+from itertools import islice
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import dataset_manager
@@ -38,6 +40,11 @@ _RE_TOKEN = re.compile(r"[a-z0-9฀-๿]+")
 _DEFAULT_TEXT_FIELDS = ("name", "city", "title", "label", "country", "state",
                         "code", "iata", "icao", "id", "key")
 
+# ตัวเลือก: คัดแยกฟิลด์ค้นได้ "อัตโนมัติ" จากข้อมูลเอง (ไม่ต้องกำหนดในโค้ด)
+# เปิดด้วย env REFERENCE_AUTO_FIELDS=1 หรือส่ง text_fields="auto" ให้ for_dataset()
+AUTO_FIELDS = os.getenv("REFERENCE_AUTO_FIELDS", "").strip().lower() in (
+    "1", "true", "yes", "on")
+_AUTO_SAMPLE = int(os.getenv("REFERENCE_AUTO_SAMPLE", "2000") or "2000")
 
 def _deaccent(text: str) -> str:
     # ตัดเฉพาะ "เครื่องหมายกำกับเสียงของอักษรละติน" (Combining Diacritical Marks
@@ -162,6 +169,8 @@ class FastIndex:
             return []
         candidates = self._candidates(q_tris, max_candidates)
         q_set = set(q_tris)
+        q_tokens = set(_RE_TOKEN.findall(qn))
+        multi = len(q_tokens) >= 2       # คำค้นหลายคำ -> เข้มเรื่องความครอบคลุมคำ
 
         scored: List[Tuple[float, int, int]] = []
         for doc_id, shared in candidates:
@@ -169,12 +178,18 @@ class FastIndex:
             precise = _precise_score(text_n, qn)
             # คะแนน trigram แบบ normalize (สัดส่วน trigram ของคำค้นที่ doc มี)
             tri_score = shared / max(1, len(q_set))
-            score = precise + tri_score * 30      # ให้ความตรงเป๊ะ/ขึ้นต้นนำ, trigram เสริม
+            # ความครอบคลุมคำ: สัดส่วนโทเคนของคำค้นที่ปรากฏเป็น "คำเต็ม" ใน doc (แม่นขึ้น)
+            coverage = (len(q_tokens & set(text_n.split())) / len(q_tokens)) if q_tokens else 0.0
+            score = precise + tri_score * 20 + coverage * 20
             if score <= 0:
                 continue
-            # เกณฑ์กันขยะ: ถ้าไม่ตรงเชิงข้อความเลย ต้องมี trigram ตรงพอสมควร
-            if precise == 0 and tri_score < 0.34:
-                continue
+            # เกณฑ์กันขยะ: ถ้าไม่ตรงเชิงข้อความเลย —
+            #   คำเดียว: ต้องมี trigram ตรงพอ; หลายคำ: ต้องครอบคลุมคำหรือ trigram สูงจริง
+            if precise == 0:
+                if multi and coverage < 0.5 and tri_score < 0.5:
+                    continue
+                if not multi and tri_score < 0.34:
+                    continue
             scored.append((score, len(text_n), doc_id))
 
         scored.sort(key=lambda x: (-x[0], x[1]))
@@ -197,10 +212,38 @@ class FastIndex:
 _INDEX_CACHE: Dict[str, Tuple[str, FastIndex]] = {}
 
 
-def for_dataset(name: str, text_fields: Optional[Sequence[str]] = _DEFAULT_TEXT_FIELDS,
-                **opts) -> Optional[FastIndex]:
+_UNSET = object()   # "ไม่ได้ระบุ text_fields" (ต่างจาก None ที่แปลว่า 'ใช้ทุก string')
+
+
+def _resolve_text_fields(name, text_fields, opts):
+    """แปลง text_fields ให้เป็นรายชื่อฟิลด์จริง — รองรับ "auto" (คัดแยกอัตโนมัติจากข้อมูล)
+
+    - ไม่ระบุ (_UNSET): auto ถ้าเปิด env REFERENCE_AUTO_FIELDS, ไม่งั้นใช้ค่าดีฟอลต์
+    - "auto": สุ่มตัวอย่างมาคัดแยกฟิลด์ค้นได้อัตโนมัติผ่าน schema.detect_text_fields
+    - None: ใช้ค่า string ทั้งหมดของ record (พฤติกรรมของ FastIndex เอง)
+    - รายการฟิลด์: ใช้ตามนั้น
+    """
+    if text_fields is _UNSET:
+        text_fields = "auto" if AUTO_FIELDS else _DEFAULT_TEXT_FIELDS
+    if text_fields == "auto":
+        try:
+            from . import schema
+            sample = list(islice(dataset_manager.get_records(name, **opts), _AUTO_SAMPLE))
+            detected = schema.detect_text_fields(sample)
+            return detected or None      # ไม่พบฟิลด์ -> ถอยไปใช้ทุก string ใน record
+        except Exception:
+            return None
+    return None if text_fields is None else text_fields
+
+
+def for_dataset(name: str, text_fields=_UNSET, **opts) -> Optional[FastIndex]:
     """สร้าง/คืน FastIndex ของ dataset ใน whitelist (.json/.csv/.sql) — None ถ้านอก whitelist
 
+    text_fields:
+      - รายชื่อฟิลด์ (ดีฟอลต์) — กำหนดเอง
+      - "auto" — คัดแยกฟิลด์ค้นได้อัตโนมัติจากข้อมูล (ไม่ต้องกำหนดในโค้ด)
+      - None — ใช้ทุกค่า string ใน record
+    (เปิด env REFERENCE_AUTO_FIELDS=1 จะทำ auto ให้เมื่อไม่ได้ระบุ text_fields)
     แคช index ไว้ต่อไฟล์และสร้างใหม่เมื่อ path/ไฟล์เปลี่ยน (ข้อมูลอนุพันธ์ rebuild ได้เสมอ)
     """
     if not dataset_manager.is_allowed(name):
@@ -211,8 +254,9 @@ def for_dataset(name: str, text_fields: Optional[Sequence[str]] = _DEFAULT_TEXT_
     cached = _INDEX_CACHE.get(name)
     if cached and cached[0] == path:
         return cached[1]
+    fields = _resolve_text_fields(name, text_fields, opts)
     try:
-        idx = FastIndex(text_fields=text_fields).build(
+        idx = FastIndex(text_fields=fields).build(
             dataset_manager.get_records(name, **opts))
     except Exception:
         return None

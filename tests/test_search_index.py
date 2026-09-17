@@ -32,7 +32,8 @@ check("whitelist: มี 2 stem อ้างอิง", si._allowed_stems() == {
 
 # ---------- 3. build_query โครงหลายสัญญาณ ----------
 q = si.build_query("BKK", 7)
-shoulds = q["query"]["bool"]["should"]
+# ใช้ dis_max + tie_breaker (แม่นขึ้น) แทน bool.should (รวมคะแนน)
+shoulds = q["query"]["dis_max"]["queries"]
 
 def _clauses(shoulds, kind, field):
     """คืนพารามิเตอร์ของ clause ตามชนิด (match/match_phrase/...) + field ที่ยิง"""
@@ -43,6 +44,9 @@ def _clauses(shoulds, kind, field):
                 out.append(body[field])
     return out
 
+check("query: ใช้ dis_max + tie_breaker (0.3)", q["query"]["dis_max"]["tie_breaker"] == 0.3)
+check("query: _source ตัดฟิลด์ช่วยค้นออก (เบา/เร็ว)",
+      set(si._HELPER_FIELDS).issubset(set(q["_source"]["excludes"])))
 check("query: term ยิงที่ _codes (รหัสตรง) boost สูงสุด", shoulds[0]["term"]["_codes"]["boost"] == 12)
 check("query: วลีตรง (match_phrase _all_text) boost สูง (แม่นขึ้น)",
       bool(_clauses(shoulds, "match_phrase", "_all_text")) and
@@ -61,7 +65,7 @@ check("query(thai): มีสัญญาณคำไทย _all_thai (phrase + 
 check("query(thai): match _all_thai ใช้ minimum_should_match 70%",
       _clauses(shoulds, "match", "_all_thai")[0]["minimum_should_match"] == "70%")
 qth = si.build_query("กรุงเทพ", 5)
-th_match = _clauses(qth["query"]["bool"]["should"], "match", "_all_thai")
+th_match = _clauses(qth["query"]["dis_max"]["queries"], "match", "_all_thai")
 check("query(thai): คำค้นภาษาไทย boost _all_thai สูงขึ้น (is_thai)",
       th_match and th_match[0]["boost"] == 4, th_match)
 

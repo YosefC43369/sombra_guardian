@@ -1,0 +1,15 @@
+{
+  "name": "critical-incident-escalation",
+  "description": "When a CRITICAL/high incident is opened, alert admins and log it. Safe by default: it only reads the event and notifies — it does not mutate the incident, so it cannot feed back into itself.",
+  "enabled": true,
+  "trigger": {"event": "incident.created"},
+  "conditions": [
+    {"field": "severity", "operator": "in", "value": ["high", "critical"]}
+  ],
+  "actions": ["log_event", "send_admin_alert"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 30,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id", "category"]
+}

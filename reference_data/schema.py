@@ -120,6 +120,120 @@ def dominant_types(profile: dict) -> Dict[str, str]:
     return out
 
 
+# ---------------- คัดแยกบทบาทฟิลด์อัตโนมัติ (auto field classification) ----------------
+#
+# เดา "บทบาท" ของแต่ละฟิลด์จากข้อมูลเอง โดยไม่ต้องกำหนดชื่อฟิลด์ในโค้ด:
+#   text   = ข้อความค้นได้ (ชื่อ/เมือง/คำอธิบาย — string ยาว/มีช่องว่าง)
+#   code   = รหัสสั้น (เช่น IATA/ICAO) — ตัวอักษร+ตัวเลขสั้น ๆ ใช้ค้นแบบตรง/ขึ้นต้น
+#   id     = ตัวระบุที่แทบไม่ซ้ำทั้งชุด (คีย์)
+#   number = ตัวเลข (พิกัด/ความสูง ฯลฯ)
+#   bool   = จริง/เท็จ
+#   ignore = ว่างเป็นส่วนใหญ่/ไม่รู้จัก
+_CODE_MAX_LEN = 6         # ความยาวสูงสุดของ "รหัสสั้น"
+_CARD_CAP = 20000         # เพดานนับค่าไม่ซ้ำ (กันแรมพองกับไฟล์ใหญ่)
+
+
+def classify_fields(records: Iterable[dict], sample_limit: int = DEFAULT_SAMPLE) -> dict:
+    """คัดแยกบทบาทของแต่ละฟิลด์อัตโนมัติจากตัวอย่างข้อมูล (สุ่มมีเพดานเพื่อความเร็ว)
+
+    คืน {"roles": {ฟิลด์: บทบาท}, "field_order": [...], "rows": จำนวนแถวที่ดู}
+    ไม่ throw: record ที่ไม่ใช่ dict ถูกข้าม
+    """
+    stats: Dict[str, dict] = {}
+    order: List[str] = []
+    rows = 0
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rows += 1
+        for key, value in rec.items():
+            st = stats.get(key)
+            if st is None:
+                st = stats[key] = {"nonnull": 0, "types": {}, "sumlen": 0, "maxlen": 0,
+                                   "space": 0, "short_alnum": 0, "distinct": set()}
+                order.append(key)
+            t = infer_type(value)
+            st["types"][t] = st["types"].get(t, 0) + 1
+            if value is None or t in ("null", "empty"):
+                continue
+            st["nonnull"] += 1
+            sval = value if isinstance(value, str) else str(value)
+            ln = len(sval)
+            st["sumlen"] += ln
+            if ln > st["maxlen"]:
+                st["maxlen"] = ln
+            if " " in sval.strip():
+                st["space"] += 1
+            if 2 <= ln <= _CODE_MAX_LEN and sval.replace(" ", "").isalnum():
+                st["short_alnum"] += 1
+            if len(st["distinct"]) < _CARD_CAP:
+                st["distinct"].add(sval.lower())
+        if rows >= sample_limit:
+            break
+
+    roles: Dict[str, str] = {}
+    for key in order:
+        st = stats[key]
+        nn = st["nonnull"]
+        if nn == 0:
+            roles[key] = "ignore"
+            continue
+        dom = max(st["types"], key=st["types"].get)
+        if dom in ("int", "float"):
+            roles[key] = "number"
+            continue
+        if dom == "bool":
+            roles[key] = "bool"
+            continue
+        uniq = len(st["distinct"]) / nn
+        space_ratio = st["space"] / nn
+        short_ratio = st["short_alnum"] / nn
+        # รหัสสั้น: ส่วนใหญ่เป็น alnum สั้น และไม่ยาวเกิน
+        if short_ratio >= 0.7 and st["maxlen"] <= _CODE_MAX_LEN:
+            roles[key] = "code"
+            continue
+        # id: ค่าไม่ซ้ำเกือบทั้งหมด + ไม่ใช่ข้อความอิสระ (ไม่ค่อยมีช่องว่าง) + ไม่ยาว
+        if uniq >= 0.95 and space_ratio < 0.1 and st["maxlen"] <= 40:
+            roles[key] = "id"
+            continue
+        # ข้อความค้นได้: string อื่น ๆ
+        roles[key] = "text" if dom == "str" else "ignore"
+    return {"roles": roles, "field_order": order, "rows": rows}
+
+
+def _fields_with_roles(records, wanted, sample_limit) -> List[str]:
+    c = classify_fields(records, sample_limit=sample_limit)
+    return [k for k in c["field_order"] if c["roles"].get(k) in wanted]
+
+
+def detect_text_fields(records: Iterable[dict], sample_limit: int = DEFAULT_SAMPLE) -> List[str]:
+    """ฟิลด์ที่ "ค้นได้" อัตโนมัติ (text + code) — ใช้แทนการกำหนด text_fields เองในโค้ด"""
+    return _fields_with_roles(records, ("text", "code"), sample_limit)
+
+
+def detect_code_fields(records: Iterable[dict], sample_limit: int = DEFAULT_SAMPLE) -> List[str]:
+    """ฟิลด์รหัสสั้นอัตโนมัติ (เช่น iata/icao/code)"""
+    return _fields_with_roles(records, ("code",), sample_limit)
+
+
+def detect_id_fields(records: Iterable[dict], sample_limit: int = DEFAULT_SAMPLE) -> List[str]:
+    """ฟิลด์ตัวระบุ (คีย์) อัตโนมัติ"""
+    return _fields_with_roles(records, ("id", "code"), sample_limit)
+
+
+def classify_dataset(name: str, sample_limit: int = DEFAULT_SAMPLE, **opts) -> Optional[dict]:
+    """คัดแยกฟิลด์อัตโนมัติของ dataset ใน whitelist — None ถ้านอก whitelist/โหลดไม่ได้"""
+    if not dataset_manager.is_allowed(name):
+        return None
+    try:
+        c = classify_fields(dataset_manager.get_records(name, **opts), sample_limit=sample_limit)
+    except Exception as e:
+        logger.warning("SCHEMA | classify %s ล้มเหลว (%s)", name, e)
+        return None
+    c["dataset"] = name
+    return c
+
+
 # ---------------- entry point ระดับ dataset (whitelist-gated) ----------------
 
 def profile_dataset(name: str, sample_limit: int = DEFAULT_SAMPLE,
