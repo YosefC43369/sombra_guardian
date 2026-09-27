@@ -96,8 +96,8 @@ import purpleteam_report as ptr
 import debt_ledger as dl
 import debt_report as dr
 
-import wallet as wt
-import wallet_report as wr
+import integrity_ledger as il
+import integrity_report as ir
 
 import expense as ex
 
@@ -527,6 +527,7 @@ _HELP_CATEGORIES = [
     ("general", "🛠️", "ทั่วไป", False),
     ("ai", "🤖", "AI", False),
     ("admin", "🛡️", "Admin", True),
+    ("integrity", "🔐", "Integrity", True),
     ("osint", "🔎", "OSINT", True),
     ("bugbounty", "🐞", "Bug Bounty", True),
     ("redteam", "🔴", "Red Team", True),
@@ -608,6 +609,18 @@ _HELP_BODIES = {
         "/refdata reindex\n\n"
         "⭐ ระบบชื่อเสียง\n"
         "/repconfig [show|<key> <value>|reset|tiers]"
+    ),
+    "integrity": (
+        "🔐 Integrity Ledger\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
+        "สมุดตรวจสอบความถูกต้องแบบแก้ไขไม่ได้ (Merkle transparency log) —\n"
+        "ผนึกหลักฐาน/เหตุการณ์ด้านความปลอดภัยให้พิสูจน์ได้ว่าไม่ถูกแก้ย้อนหลัง\n\n"
+        "/integrity\n📊 สรุปสถานะ (จำนวนรายการ, root, จุดตรวจล่าสุด)\n\n"
+        "/integrity verify\n🔍 ตรวจความสมบูรณ์ทั้งห่วงโซ่ + ลายเซ็นจุดตรวจ\n\n"
+        "/integrity checkpoint\n📌 ผนึกจุดตรวจ (anchor) พร้อมลายเซ็น HMAC\n\n"
+        "/integrity proof <seq>\n🧾 สร้าง+ตรวจหลักฐานการรวมอยู่ (inclusion proof)\n\n"
+        "/integrity log [หน้า]\n📒 ดูรายการล่าสุดในสมุด\n\n"
+        "/integrity checkpoints\n🗂️ รายการจุดตรวจที่ผ่านมา\n\n"
+        "/integrity record <ข้อความ>\n✍️ บันทึกโน้ตลงสมุดแบบแก้ไขไม่ได้"
     ),
     "osint": (
         "🔎 OSINT\n⚠️ หมวดนี้เป็น Admin-only\n" + _HELP_DIVIDER + "\n"
@@ -3635,365 +3648,87 @@ async def github_sweep_loop():
         await asyncio.sleep(GITHUB_INTERVAL_SECONDS)
 
 
-# ---------------- Wallet / Payment / Transaction Ledger Commands ----------------
-# Wired on top of wallet.py (data layer, atomic ledger) / wallet_report.py
-# (Thai formatting). Every command here follows the same conventions as
-# the debt-ledger commands right above: Admin-gated subcommands dispatch
-# on args[0] (matches /bbprogram's new/active/pause/archive/list style),
-# money is parsed once via wt.parse_amount_to_satang() and never touched
-# again as a float, and cross-user targeting uses Reply-to-message (same
-# convention as /mute, /unmute) since Telegram's Bot API has no way to
-# resolve an arbitrary @username to a user_id on its own.
+# ---------------- Integrity Ledger (Tamper-Evident Merkle Audit Log) ----------------
+# Wired on top of integrity_ledger.py (data layer: hash chain + RFC 6962 Merkle
+# tree with inclusion/consistency proofs) and integrity_report.py (Thai
+# formatting). This subsystem replaces the former wallet + blockchain modules
+# with one cohesive, in-process, verifiable forensic audit trail. Admin-gated,
+# same convention as the OSINT / red-team commands, and dispatched on args[0]
+# like /bbprogram and the platform commands.
 
-def _wallet_label(user) -> str:
-    if user.first_name:
-        return user.first_name
-    if user.username:
-        return f"@{user.username}"
-    return str(user.id)
-    
-async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/wallet -- ดูยอดเงินคงเหลือในกระเป๋าของตัวเอง
-    /wallet (Reply ข้อความสมาชิก) -- Admin ดูยอดของสมาชิกคนนั้น"""
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    if update.message.reply_to_message and await is_admin(update, context):
-        target = update.message.reply_to_message.from_user
-        wt.remember_user(chat_id, target.id, target.username, target.full_name)
-        wallet_row = wt.get_wallet(chat_id, target.id)
-        return await update.message.reply_text(
-            f"{_wallet_label(target)}\n{wr.format_balance(wallet_row)}"
-        )
-
-    wallet_row = wt.get_wallet(chat_id, user.id)
-    await update.message.reply_text(wr.format_balance(wallet_row))
-
-
-async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/deposit <จำนวนเงิน> -- ขอฝากเงินเข้ากระเป๋า (ยอดยังไม่เข้าจนกว่า Admin
-    จะยืนยันว่าได้รับเงินจริง -- ข้อความ/การกดปุ่มของผู้ใช้เองไม่ใช่หลักฐาน)
-    /deposit confirm <เลขที่รายการ> -- Admin ยืนยันการฝาก
-    /deposit reject <เลขที่รายการ> [เหตุผล...] -- Admin ปฏิเสธการฝาก
-    /deposit pending -- Admin: ดูคำขอฝากเงินที่รอดำเนินการ"""
-    args = context.args or []
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    if not args:
-        return await update.message.reply_text(
-            "ใช้งาน: /deposit <จำนวนเงิน>\nตัวอย่าง: /deposit 100"
-        )
-    sub = args[0].lower()
-
-    if sub == "confirm":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /deposit confirm <เลขที่รายการ>")
-        result = wt.confirm_deposit(chat_id, int(args[1]), admin_id=user.id)
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(wr.format_deposit_confirmed(result.data))
-
-    if sub == "reject":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text(
-                "ใช้งาน: /deposit reject <เลขที่รายการ> [เหตุผล...]"
-            )
-        result = wt.reject_deposit(chat_id, int(args[1]), admin_id=user.id,
-                                    reason=" ".join(args[2:]))
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(f"❌ ปฏิเสธคำขอฝากเงิน #{args[1]} แล้ว")
-
-    if sub == "pending":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        items = wt.list_pending_deposits(chat_id)
-        return await _reply_chunked(update, wr.format_pending_deposits(items))
-
-    amount_satang = wt.parse_amount_to_satang(args[0])
-    if amount_satang is None:
-        return await update.message.reply_text(wr.deny_text("INVALID_AMOUNT"))
-    result = wt.request_deposit(chat_id, user.id, amount_satang)
-    if not result.ok:
-        return await update.message.reply_text(wr.deny_text(result.reason))
-    await update.message.reply_text(wr.format_deposit_requested(result.data["transaction"]))
-
-
-async def cmd_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/withdraw <จำนวนเงิน> -- ขอถอนเงิน (ยอดถูกกันไว้ทันทีกันขอซ้ำ รอ Admin
-    อนุมัติ)
-    /withdraw approve <เลขที่คำขอ> -- Admin อนุมัติ (ยืนยันว่าจ่ายเงินสด/โอน
-    ให้แล้วนอกระบบ)
-    /withdraw reject <เลขที่คำขอ> [เหตุผล...] -- Admin ปฏิเสธ (คืนยอด)
-    /withdraw cancel <เลขที่คำขอ> -- ยกเลิกคำขอของตัวเอง (คืนยอด)
-    /withdraw pending -- Admin: ดูคำขอถอนเงินที่รอดำเนินการ"""
-    args = context.args or []
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    if not args:
-        return await update.message.reply_text(
-            "ใช้งาน: /withdraw <จำนวนเงิน>\nตัวอย่าง: /withdraw 100"
-        )
-    sub = args[0].lower()
-
-    if sub == "approve":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /withdraw approve <เลขที่คำขอ>")
-        result = wt.approve_withdrawal(chat_id, int(args[1]), admin_id=user.id)
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(f"✅ อนุมัติคำขอถอนเงิน #{args[1]} แล้ว")
-
-    if sub == "reject":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text(
-                "ใช้งาน: /withdraw reject <เลขที่คำขอ> [เหตุผล...]"
-            )
-        result = wt.reject_withdrawal(chat_id, int(args[1]), admin_id=user.id,
-                                       reason=" ".join(args[2:]))
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(
-            f"❌ ปฏิเสธคำขอถอนเงิน #{args[1]} แล้ว (คืนยอดเงินแล้ว)"
-        )
-
-    if sub == "cancel":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /withdraw cancel <เลขที่คำขอ>")
-        result = wt.cancel_withdrawal(chat_id, int(args[1]), user_id=user.id)
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(
-            f"✅ ยกเลิกคำขอถอนเงิน #{args[1]} แล้ว (คืนยอดเงินแล้ว)"
-        )
-
-    if sub == "pending":
-        if not await is_admin(update, context):
-            return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-        items = wt.list_pending_withdrawals(chat_id)
-        return await _reply_chunked(update, wr.format_pending_withdrawals(items))
-
-    amount_satang = wt.parse_amount_to_satang(args[0])
-    if amount_satang is None:
-        return await update.message.reply_text(wr.deny_text("INVALID_AMOUNT"))
-    result = wt.request_withdrawal(chat_id, user.id, amount_satang)
-    if not result.ok:
-        return await update.message.reply_text(wr.deny_text(result.reason))
-    await update.message.reply_text(wr.format_withdrawal_requested(result.data))
-
-
-async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/transfer <จำนวนเงิน> [ข้อความ...] -- โอนเงินให้สมาชิกอีกคนในกลุ่มนี้
-    ต้อง Reply ข้อความของผู้รับเสมอ (Telegram Bot API ไม่มีทางค้นหา user_id
-    จาก @username โดยตรง เหมือนกับ /mute, /unmute)."""
-    if not update.message.reply_to_message:
-        return await update.message.reply_text(
-            "ใช้งาน: Reply ข้อความของผู้รับแล้วพิมพ์ /transfer <จำนวนเงิน> [ข้อความ]"
-        )
-    args = context.args or []
-    if not args:
-        return await update.message.reply_text(
-            "ใช้งาน: Reply ข้อความของผู้รับแล้วพิมพ์ /transfer <จำนวนเงิน> [ข้อความ]"
-        )
-    chat_id = update.effective_chat.id
-    sender = update.effective_user
-    target = update.message.reply_to_message.from_user
-    wt.remember_user(chat_id, sender.id, sender.username, sender.full_name)
-    wt.remember_user(chat_id, target.id, target.username, target.full_name)
-
-    if target.id == sender.id:
-        return await update.message.reply_text(wr.deny_text("SELF_TRANSFER_NOT_ALLOWED"))
-    if target.is_bot:
-        return await update.message.reply_text("❌ โอนเงินให้ Bot ไม่ได้")
-
-    amount_satang = wt.parse_amount_to_satang(args[0])
-    if amount_satang is None:
-        return await update.message.reply_text(wr.deny_text("INVALID_AMOUNT"))
-    note = " ".join(args[1:])
-    result = wt.transfer(chat_id, sender.id, target.id, amount_satang, note=note,
-                          idempotency_key=f"upd-{update.update_id}")
-    if not result.ok:
-        return await update.message.reply_text(wr.deny_text(result.reason))
-    out_tx = result.data["out_tx"]
-    await update.message.reply_text(wr.format_transfer_result(out_tx, _wallet_label(target)))
-
-
-async def cmd_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/payment <จำนวนเงิน> [รายละเอียด...] -- สร้างบิล/คำขอรับชำระเงิน
-    Reply ข้อความของผู้ที่ต้องจ่ายได้ (ไม่บังคับ -- ไม่ Reply = เปิดให้ใครก็
-    จ่ายได้). ผู้จ่ายใช้ /bill pay <เลขที่บิล>"""
-    args = context.args or []
-    if not args:
-        return await update.message.reply_text(
-            "ใช้งาน: /payment <จำนวนเงิน> [รายละเอียด...]\n"
-            "Reply ข้อความผู้จ่ายได้ (ไม่บังคับ)"
-        )
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    amount_satang = wt.parse_amount_to_satang(args[0])
-    if amount_satang is None:
-        return await update.message.reply_text(wr.deny_text("INVALID_AMOUNT"))
-    description = " ".join(args[1:])
-
-    payer_user_id = None
-    if update.message.reply_to_message:
-        target = update.message.reply_to_message.from_user
-        wt.remember_user(chat_id, target.id, target.username, target.full_name)
-        payer_user_id = target.id
-
-    result = wt.create_payment_request(chat_id, user.id, amount_satang,
-                                        description=description, payer_user_id=payer_user_id)
-    if not result.ok:
-        return await update.message.reply_text(wr.deny_text(result.reason))
-    await update.message.reply_text(
-        wr.format_bill_created(result.data["payment_id"], amount_satang, description)
-    )
-
-
-async def cmd_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/bill -- ดูบิลที่รอให้ตัวเองจ่าย
-    /bill mine -- ดูบิลที่ตัวเองสร้าง (เป็นผู้ขอรับเงิน)
-    /bill pay <เลขที่บิล> -- จ่ายบิล
-    /bill cancel <เลขที่บิล> -- ยกเลิกบิล (เจ้าของบิลหรือ Admin เท่านั้น)"""
-    args = context.args or []
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    if args and args[0].lower() == "pay":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bill pay <เลขที่บิล>")
-        payment_id = int(args[1])
-        result = wt.pay_payment_request(chat_id, payment_id, payer_user_id=user.id,
-                                         idempotency_key=f"upd-{update.update_id}")
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        # pay_payment_request returns {"debit_tx","credit_tx"} normally, or
-        # {"transaction","already_processed"} on an idempotent replay -- both
-        # shapes carry amount_satang, just under a different key.
-        paid_tx = result.data.get("debit_tx") or result.data.get("transaction")
-        return await update.message.reply_text(
-            wr.format_bill_paid(payment_id, paid_tx["amount_satang"])
-        )
-
-    if args and args[0].lower() == "cancel":
-        if len(args) < 2 or not args[1].isdigit():
-            return await update.message.reply_text("ใช้งาน: /bill cancel <เลขที่บิล>")
-        is_admin_actor = await is_admin(update, context)
-        result = wt.cancel_payment_request(chat_id, int(args[1]), actor_id=user.id,
-                                            is_admin_actor=is_admin_actor)
-        if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(f"✅ ยกเลิกบิล #{args[1]} แล้ว")
-
-    if args and args[0].lower() == "mine":
-        items = wt.list_payment_requests(chat_id, user.id, role="requester")
-        return await _reply_chunked(update, wr.format_bill_list(items, title="บิลที่ฉันสร้าง"))
-
-    items = wt.list_payment_requests(chat_id, user.id, role="payer")
-    await _reply_chunked(update, wr.format_bill_list(items, title="บิลที่รอฉันจ่าย"))
-
-
-async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/history [หน้า] -- ดูประวัติธุรกรรมของตัวเอง (เรียงล่าสุดก่อน)"""
-    args = context.args or []
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    page = int(args[0]) if args and args[0].isdigit() else 1
-    page_data = wt.list_transactions(chat_id, user.id, page=page)
-    await _reply_chunked(update, wr.format_history(page_data))
-
-
-async def cmd_debt_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/debt_pay <เลขที่รายการค้างชำระ> -- จ่ายหนี้ (จาก /sign) ด้วยยอดเงินใน
-    กระเป๋าของตัวเอง -- Wallet debit + Debt update ผูกกันแบบ Atomic (Requirement
-    #8). เปิดให้สมาชิกทุกคนใช้ได้ ไม่ต้องเป็น Admin เหมือน /paid: จ่ายด้วยเงิน
-    ตัวเองไม่เสี่ยงยอดของคนอื่น."""
-    args = context.args or []
-    if not args or not args[0].isdigit():
-        return await update.message.reply_text("ใช้งาน: /debt_pay <เลขที่รายการค้างชำระ>")
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    wt.remember_user(chat_id, user.id, user.username, user.full_name)
-
-    entry_id = int(args[0])
-    result = wt.pay_debt_with_wallet(chat_id, entry_id, payer_user_id=user.id,
-                                      idempotency_key=f"upd-{update.update_id}")
-    if not result.ok:
-        return await update.message.reply_text(wr.deny_text(result.reason))
-    tx = result.data["transaction"]
-    await update.message.reply_text(wr.format_debt_paid_via_wallet(entry_id, tx["amount_satang"]))
-
-
-async def cmd_wallet_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/wallet_admin adjust <+/-จำนวนเงิน> <เหตุผล...> -- Admin ปรับยอดเงินด้วย
-    มือ ต้อง Reply ข้อความสมาชิกเป้าหมาย (Requirement #10: บันทึก admin/
-    target/amount/reason/timestamp/transaction_id ครบทุกครั้ง)
-    /wallet_admin transactions [หน้า] -- Admin ดูธุรกรรมทั้งหมดในกลุ่มนี้
-    (Reply ข้อความสมาชิกเพื่อกรองเฉพาะคนนั้น, ไม่บังคับ)"""
+async def cmd_integrity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/integrity [status] -- สรุปสถานะสมุดตรวจสอบความถูกต้อง (จำนวนรายการ, root,
+    จุดตรวจล่าสุด)
+    /integrity verify -- ตรวจความสมบูรณ์ทั้งห่วงโซ่แฮช + ลายเซ็นจุดตรวจ + append-only
+    /integrity checkpoint -- ผนึกจุดตรวจ (anchor) พร้อมลายเซ็น HMAC ครอบคลุมรายการปัจจุบัน
+    /integrity proof <seq> -- สร้างและตรวจหลักฐานการรวมอยู่ (Merkle inclusion proof)
+    /integrity log [หน้า] -- ดูรายการล่าสุดในสมุด (เรียงใหม่ก่อน)
+    /integrity checkpoints -- รายการจุดตรวจที่ผ่านมา
+    /integrity record <ข้อความ> -- บันทึกโน้ตลงสมุดแบบแก้ไขไม่ได้ (tamper-evident)"""
     if not await is_admin(update, context):
         return await update.message.reply_text("❌ คำสั่งนี้ใช้ได้เฉพาะ Admin")
-    args = context.args or []
     chat_id = update.effective_chat.id
-    admin_user = update.effective_user
+    user = update.effective_user
+    args = context.args or []
+    sub = (args[0].lower() if args else "status")
 
-    if not args:
-        return await update.message.reply_text(
-            "ใช้งาน:\n"
-            "/wallet_admin adjust <+/-จำนวนเงิน> <เหตุผล...> (Reply ข้อความเป้าหมาย)\n"
-            "/wallet_admin transactions [หน้า] (Reply เพื่อกรองเฉพาะคนเดียว, ไม่บังคับ)"
-        )
-    sub = args[0].lower()
+    if sub in ("status", ""):
+        count = il.entry_count(chat_id)
+        ckpt = il.latest_checkpoint(chat_id)
+        root = il.current_root(chat_id)
+        return await _reply_chunked(update, ir.format_status(count, ckpt, root))
 
-    if sub == "adjust":
-        if not update.message.reply_to_message:
-            return await update.message.reply_text(
-                "ใช้งาน: Reply ข้อความสมาชิกเป้าหมายแล้วพิมพ์ "
-                "/wallet_admin adjust <+/-จำนวนเงิน> <เหตุผล...>"
-            )
-        if len(args) < 3:
-            return await update.message.reply_text(
-                "ใช้งาน: /wallet_admin adjust <+/-จำนวนเงิน> <เหตุผล...>"
-            )
-        delta_satang = wt.parse_signed_amount_to_satang(args[1])
-        if delta_satang is None:
-            return await update.message.reply_text(wr.deny_text("INVALID_AMOUNT"))
-        target = update.message.reply_to_message.from_user
-        wt.remember_user(chat_id, target.id, target.username, target.full_name)
-        result = wt.admin_adjust(chat_id, target.id, delta_satang, admin_id=admin_user.id,
-                                  reason=" ".join(args[2:]))
+    if sub == "verify":
+        result = il.verify_chain(chat_id)
+        return await _reply_chunked(update, ir.format_verify(result))
+
+    if sub == "checkpoint":
+        result = il.create_checkpoint(chat_id, created_by=user.id)
         if not result.ok:
-            return await update.message.reply_text(wr.deny_text(result.reason))
-        return await update.message.reply_text(
-            wr.format_admin_adjust(result.data["transaction"], _wallet_label(target))
-        )
+            return await update.message.reply_text(ir.deny_text(result.reason))
+        return await _reply_chunked(update, ir.format_checkpoint(
+            result.data["checkpoint"], unchanged=result.data.get("unchanged", False)))
 
-    if sub == "transactions":
+    if sub == "proof":
+        if len(args) < 2 or not args[1].isdigit():
+            return await update.message.reply_text("ใช้งาน: /integrity proof <seq>")
+        result = il.inclusion_proof(chat_id, int(args[1]))
+        if not result.ok:
+            return await update.message.reply_text(ir.deny_text(result.reason))
+        d = result.data
+        # Verify the proof we just built with the standalone verifier, so the
+        # reply states an independently re-checked verdict, not just "here is a
+        # proof" -- exactly how an external auditor would use the API.
+        verified = il.verify_inclusion(
+            d["leaf_index"], d["tree_size"], bytes.fromhex(d["leaf_hash"]),
+            [bytes.fromhex(h) for h in d["audit_path"]], bytes.fromhex(d["root"]))
+        return await _reply_chunked(update, ir.format_inclusion_proof(d, verified))
+
+    if sub == "log":
         page = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 1
-        target_user_id = None
-        if update.message.reply_to_message:
-            target_user_id = update.message.reply_to_message.from_user.id
-        page_data = wt.list_all_transactions_admin(chat_id, user_id=target_user_id, page=page)
-        return await _reply_chunked(update, wr.format_admin_transactions(page_data))
+        return await _reply_chunked(
+            update, ir.format_log(il.list_entries(chat_id, page=page)))
 
-    await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (adjust/transactions)")
+    if sub == "checkpoints":
+        return await _reply_chunked(
+            update, ir.format_checkpoints(il.list_checkpoints(chat_id)))
+
+    if sub == "record":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            return await update.message.reply_text("ใช้งาน: /integrity record <ข้อความ>")
+        result = il.record_event(
+            chat_id, il.EventType.MANUAL_NOTE,
+            {"note": text[:il.MAX_NOTE_LEN], "by": user.id},
+            actor=str(user.id), idempotency_key=f"upd-{update.update_id}")
+        if not result.ok:
+            return await update.message.reply_text(ir.deny_text(result.reason))
+        return await _reply_chunked(update, ir.format_recorded(
+            result.data["entry"], already=result.data.get("already_recorded", False)))
+
+    return await update.message.reply_text(
+        "ใช้งาน: /integrity [status|verify|checkpoint|proof <seq>|log [หน้า]|"
+        "checkpoints|record <ข้อความ>]")
 
 # ---------------- Member Intelligence / Incident / Evidence (Phase 9) ----------------
 #
@@ -6079,7 +5814,7 @@ def main():
     mic.member_incident_db_init()
     github_repo_db_init()
     dl.debt_ledger_db_init()
-    wt.wallet_db_init()
+    il.integrity_db_init()
     ex.expense_db_init()
     logger.info("DATABASE: OK")
 
@@ -6202,15 +5937,7 @@ def main():
     app.add_handler(CommandHandler("debt", cmd_debt))
     app.add_handler(CommandHandler("debt_summary", cmd_debt_summary))
     app.add_handler(CommandHandler("paid", cmd_paid))
-    app.add_handler(CommandHandler("wallet", cmd_wallet))
-    app.add_handler(CommandHandler("deposit", cmd_deposit))
-    app.add_handler(CommandHandler("withdraw", cmd_withdraw))
-    app.add_handler(CommandHandler("transfer", cmd_transfer))
-    app.add_handler(CommandHandler("payment", cmd_payment))
-    app.add_handler(CommandHandler("bill", cmd_bill))
-    app.add_handler(CommandHandler("history", cmd_history))
-    app.add_handler(CommandHandler("debt_pay", cmd_debt_pay))
-    app.add_handler(CommandHandler("wallet_admin", cmd_wallet_admin))
+    app.add_handler(CommandHandler("integrity", cmd_integrity))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
     app.add_handler(CallbackQueryHandler(osint_db_callback_handler, pattern=r"^osintdb:"))
     app.add_handler(CallbackQueryHandler(help_callback_handler, pattern=r"^help:"))
