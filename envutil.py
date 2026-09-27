@@ -8,7 +8,7 @@ envutil.py — ตัวอ่าน environment variable ที่ทน "ค�
 ที่ถูกต้องกับไฟล์ .env ที่ commit ไว้จริง (มีคีย์ค่าว่างหลายตัว)
 
 nethealth.py มีชุดเดียวกันอยู่แล้วสำหรับ search/scrape — ไฟล์นี้แยกออกมาให้
-โมดูลอื่น (quota, news, repository_sandbox, app, blockchain) ใช้ร่วมได้โดยไม่ต้อง
+โมดูลอื่น (quota, news, repository_sandbox, app, integrity_ledger) ใช้ร่วมได้โดยไม่ต้อง
 ผูกกับ nethealth ซึ่งเป็นคนละความรับผิดชอบ
 """
 

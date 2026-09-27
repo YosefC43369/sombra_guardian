@@ -21,8 +21,8 @@ single warning naming the canonical replacement.
 Scope
 -----
 AI provider configuration only. Modules with unambiguous, single-name
-settings (news.py, github_repo.py, repository_sandbox.py, chain.py,
-quota.py, search.py, scrape.py, coordinator.py) keep their own
+settings (news.py, github_repo.py, repository_sandbox.py,
+integrity_ledger.py, quota.py, search.py, scrape.py, coordinator.py) keep their own
 os.getenv() calls; centralising those would be churn with no defect to
 fix. ENV_REGISTRY below documents them so .env.example can be checked
 against the code.
@@ -222,19 +222,12 @@ ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
     EnvVar("REPO_MAX_CONCURRENT_TEST_RUNS", "repository_sandbox.py",
            "concurrent sandboxed runs", False, "module default"),
 
-    # Blockchain anchoring (optional; bot runs without it)
-    EnvVar("CHAIN_ENABLED", "blockchain/src/chain.py", "enable anchoring",
-           False, "off"),
-    EnvVar("CHAIN_BINARY", "blockchain/src/chain.py", "path to sombra-chain",
-           False, "module default"),
-    EnvVar("CHAIN_TIMEOUT", "blockchain/src/chain.py", "subprocess timeout",
-           False, "module default"),
-    EnvVar("CHAIN_ANCHOR_INTERVAL", "blockchain/src/chain.py",
-           "seconds between anchors", False, "module default"),
-    EnvVar("CHAIN_MAX_TX_PER_BLOCK", "blockchain/src/chain.py",
-           "transactions per block", False, "module default"),
-    EnvVar("CHAIN_STARTUP_DELAY", "blockchain/src/chain.py",
-           "delay before first anchor", False, "module default"),
+    # Integrity Ledger (tamper-evident Merkle audit log; optional HMAC key)
+    EnvVar("INTEGRITY_SECRET", "integrity_ledger.py",
+           "HMAC key that signs checkpoints; keep it out of bot.db for the "
+           "strongest guarantee. If unset, a stable per-database random secret "
+           "is generated automatically", False,
+           "auto-generated per database"),
 ]}
 
 

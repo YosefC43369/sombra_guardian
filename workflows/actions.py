@@ -259,6 +259,32 @@ class GenerateReportAction(WorkflowAction):
         return ActionResult.success(self.name, "report generated")
 
 
+class AnchorIntegrityAction(WorkflowAction):
+    """Append the triggering event to the tamper-evident integrity ledger.
+
+    This is what turns a live security event (evidence captured, an incident
+    opened or closed) into a cryptographically verifiable, append-only record
+    automatically — no operator action required. It talks to integrity_ledger
+    only through the wired ``anchor_integrity`` service, so with no service set
+    (unit tests, a minimal deploy) it degrades to a logged stub like every
+    other action here and never crashes the engine."""
+    name = "anchor_integrity"
+
+    async def execute(self, context):
+        event = context["event"]
+        p = event.payload
+        chat_id = p.get("chat_id")
+        available, result = await _call_service(
+            context, "anchor_integrity", chat_id, event.type, dict(p),
+        )
+        if not available:
+            context["logger"].info("WORKFLOW anchor_integrity (stub) | chat=%s type=%s",
+                                   chat_id, event.type)
+            return ActionResult.success(self.name, "stub (no anchor_integrity service)")
+        seq = result.get("seq") if isinstance(result, dict) else None
+        return ActionResult.success(self.name, f"anchored seq={seq}")
+
+
 def build_default_registry() -> ActionRegistry:
     """A registry pre-loaded with every built-in action. Plugins add more
     via the plugin context; sg_platform wires the services."""
@@ -266,7 +292,7 @@ def build_default_registry() -> ActionRegistry:
     for action_cls in (
         LogEventAction, SendMessageAction, SendAdminAlertAction,
         CreateIncidentAction, UpdateIncidentAction, CreateEvidenceAction,
-        RunDetectionAction, GenerateReportAction,
+        RunDetectionAction, GenerateReportAction, AnchorIntegrityAction,
     ):
         registry.register(action_cls())
     return registry

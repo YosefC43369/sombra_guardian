@@ -1,0 +1,41 @@
+[
+  {
+    "name": "integrity-anchor-evidence",
+    "description": "Anchor every captured evidence record into the tamper-evident integrity ledger, so its existence and ordering can later be proven with a Merkle inclusion proof and can never be silently edited or deleted. Append-only: it writes to the integrity log alone and never mutates the evidence/incident tables, so it cannot feed back into itself.",
+    "enabled": true,
+    "trigger": {"event": "evidence.created"},
+    "conditions": [],
+    "actions": ["anchor_integrity"],
+    "max_retries": 1,
+    "timeout_seconds": 15,
+    "cooldown_seconds": 0,
+    "max_depth": 3,
+    "dedup_fields": ["chat_id", "evidence_id"]
+  },
+  {
+    "name": "integrity-anchor-incident-open",
+    "description": "Anchor each newly opened incident into the integrity ledger, recording that it existed at this point in the verifiable timeline. Notification/record-only; performs no moderation and does not modify the incident.",
+    "enabled": true,
+    "trigger": {"event": "incident.created"},
+    "conditions": [],
+    "actions": ["anchor_integrity"],
+    "max_retries": 1,
+    "timeout_seconds": 15,
+    "cooldown_seconds": 0,
+    "max_depth": 3,
+    "dedup_fields": ["chat_id", "incident_id"]
+  },
+  {
+    "name": "integrity-anchor-incident-update",
+    "description": "Anchor each incident status change into the integrity ledger so the whole lifecycle (open -> triaged -> resolved ...) is provably append-only. Record-only.",
+    "enabled": true,
+    "trigger": {"event": "incident.updated"},
+    "conditions": [],
+    "actions": ["anchor_integrity"],
+    "max_retries": 1,
+    "timeout_seconds": 15,
+    "cooldown_seconds": 0,
+    "max_depth": 3,
+    "dedup_fields": ["chat_id", "incident_id", "status"]
+  }
+]

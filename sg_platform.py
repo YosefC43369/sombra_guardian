@@ -150,6 +150,7 @@ def configure_telegram_services(platform: Platform, bot,
     # Feature-module services: imported lazily and wrapped so a signature or
     # availability change degrades to a stub rather than crashing a workflow.
     _wire_incident_services(platform)
+    _wire_integrity_service(platform)
     logger.info("PLATFORM | telegram services configured")
 
 
@@ -178,6 +179,38 @@ def _wire_incident_services(platform: Platform) -> None:
 
     platform.services.set("create_incident", _create_incident)
     platform.services.set("update_incident", _update_incident)
+
+
+def _wire_integrity_service(platform: Platform) -> None:
+    """Wire the anchor_integrity action to the tamper-evident ledger, so
+    evidence.created / incident.created / incident.updated events are recorded
+    into a verifiable, append-only log automatically. Wrapped so any failure
+    degrades the workflow run rather than propagating."""
+    try:
+        import integrity_ledger as il
+    except Exception:
+        logger.info("PLATFORM | integrity_ledger unavailable; anchor stays a stub")
+        return
+
+    def _anchor(chat_id, event_type, payload):
+        if chat_id is None:
+            return {"ok": False}
+        try:
+            # Anchor a compact, deterministic fingerprint of the event rather
+            # than the whole payload: the ledger commits to *what happened*,
+            # not to a copy of every field (which may hold message content).
+            slim = {k: payload.get(k) for k in
+                    ("chat_id", "user_id", "incident_id", "evidence_id",
+                     "category", "severity", "detection_type")
+                    if payload.get(k) is not None}
+            result = il.record_event(chat_id, event_type, slim, actor="workflow")
+            entry = result.data.get("entry") if result.ok else None
+            return {"ok": result.ok, "seq": entry["seq"] if entry else None}
+        except Exception:
+            logger.exception("PLATFORM | integrity anchor failed for %s", event_type)
+            return {"ok": False}
+
+    platform.services.set("anchor_integrity", _anchor)
 
 
 # ---------------- Handler registration ----------------
