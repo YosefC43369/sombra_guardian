@@ -131,6 +131,23 @@ def _platform_emit(event_type: str, payload: dict) -> None:
     except Exception:
         logger.debug("PLATFORM emit skipped for %s", event_type, exc_info=True)
 
+
+def _entities_to_dicts(message) -> list:
+    """Convert a Telegram message's entities to plain dicts for the Blue Team
+    Link Guard (so it sees url + text_link href without importing telegram).
+    Best-effort: any failure yields an empty list."""
+    out = []
+    try:
+        for ent in (message.entities or []):
+            etype = getattr(ent, "type", "")
+            etype = getattr(etype, "value", etype)  # enum -> str if needed
+            if etype in ("url", "text_link"):
+                out.append({"type": str(etype), "offset": ent.offset,
+                            "length": ent.length, "url": getattr(ent, "url", "") or ""})
+    except Exception:
+        return []
+    return out
+
 SPAM_MESSAGE_LIMIT = 5
 SPAM_TIME_WINDOW = 10
 MAX_WARNINGS = 3
@@ -4587,6 +4604,19 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
     joined = (result["new_status"] == mi.MembershipStatus.MEMBER.value
               and result["old_status"] in (mi.MembershipStatus.LEFT.value,
                                             mi.MembershipStatus.BANNED.value, None))
+    # Blue Team Join Guard: publish join/leave onto the event bus (additive,
+    # best-effort) so the anti-raid subscriber can track join-rate and issue
+    # verification challenges. Never affects the welcome/observe flow above.
+    if joined:
+        _platform_emit("member.joined", {
+            "chat_id": chat.id, "user_id": target.id,
+            "username": target.username, "display_name": target.full_name,
+            "is_bot": bool(target.is_bot),
+            "invite": getattr(invite, "invite_link", None) or "",
+        })
+    elif result["new_status"] == mi.MembershipStatus.LEFT.value:
+        _platform_emit("member.left", {"chat_id": chat.id, "user_id": target.id})
+
     if joined and not target.is_bot:
         await _send_welcome(context, chat, target)
 
@@ -5506,6 +5536,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       message_id=message.message_id)
         except Exception:
             logger.exception("MEMBER PATTERN ERROR | chat=%s user=%s", chat.id, user.id)
+
+        # Blue Team Suite (v0.7.0): publish the message onto the workflow event
+        # bus so the passive Link Guard / Scam Guard subscribers can analyse it
+        # off the moderation path. Best-effort and additive — never blocks or
+        # replaces the existing detection/incident flow below.
+        _platform_emit("message.received", {
+            "chat_id": chat.id, "user_id": user.id,
+            "message_id": message.message_id, "text": text,
+            "entities": _entities_to_dicts(message),
+            "username": user.username, "display_name": user.full_name,
+            "mention_count": text.count("@"),
+        })
 
         detection_results = detection.analyze_message(chat.id, user.id, text)
         if detection_results:

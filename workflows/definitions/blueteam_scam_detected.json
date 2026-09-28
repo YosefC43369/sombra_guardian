@@ -1,0 +1,15 @@
+{
+  "name": "blueteam-scam-detected",
+  "description": "Blue Team Scam/Impersonation: on a HIGH/CRITICAL scam or impersonation detection, open an incident and anchor it. The plugin enqueues the item for admin review; permanent action stays human-confirmed unless an admin enabled auto mode.",
+  "enabled": true,
+  "trigger": {"event": "scam.detected"},
+  "conditions": [
+    {"field": "verdict", "operator": "in", "value": ["HIGH", "CRITICAL"]}
+  ],
+  "actions": ["create_incident", "anchor_integrity"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 5,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id", "subject"]
+}

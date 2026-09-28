@@ -1,0 +1,15 @@
+{
+  "name": "blueteam-link-flagged",
+  "description": "Blue Team Link Guard: when a HIGH/CRITICAL malicious link is flagged, open an incident and anchor it to the tamper-evident ledger. Moderation (delete/warn) is done by the Link Guard plugin per the group's policy; this playbook is the evidence/incident trail only.",
+  "enabled": true,
+  "trigger": {"event": "link.flagged"},
+  "conditions": [
+    {"field": "verdict", "operator": "in", "value": ["HIGH", "CRITICAL"]}
+  ],
+  "actions": ["create_incident", "anchor_integrity"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 5,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id", "subject"]
+}

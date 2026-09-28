@@ -151,7 +151,71 @@ def configure_telegram_services(platform: Platform, bot,
     # availability change degrades to a stub rather than crashing a workflow.
     _wire_incident_services(platform)
     _wire_integrity_service(platform)
+    _wire_blueteam_actions(platform, bot)
     logger.info("PLATFORM | telegram services configured")
+
+
+def _wire_blueteam_actions(platform: "Platform", bot) -> None:
+    """Wire the Blue Team runtime's Telegram side-effects (delete/restrict/ban/
+    permissions/challenge). Fully defensive: if the blueteam package or the bot
+    API is unavailable the runtime keeps its no-op stubs and nothing breaks."""
+    try:
+        from blueteam.runtime import TelegramActions, attach_bot
+    except Exception:
+        logger.info("PLATFORM | blueteam unavailable; actions stay stubs")
+        return
+
+    async def _send_message(chat_id, text, reply_markup=None):
+        # plain text only (no parse_mode) — user content is never parsed
+        return await bot.send_message(chat_id=chat_id, text=text,
+                                      reply_markup=reply_markup,
+                                      disable_web_page_preview=True)
+
+    async def _delete_message(chat_id, message_id):
+        return await bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+    async def _restrict_user(chat_id, user_id, permissions, until=None):
+        from telegram import ChatPermissions
+        perms = ChatPermissions(**(permissions or {"can_send_messages": False}))
+        return await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id,
+                                              permissions=perms, until_date=until)
+
+    async def _ban_user(chat_id, user_id):
+        return await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+
+    async def _unban_user(chat_id, user_id):
+        return await bot.unban_chat_member(chat_id=chat_id, user_id=user_id,
+                                           only_if_banned=True)
+
+    async def _get_admins(chat_id):
+        admins = await bot.get_chat_administrators(chat_id)
+        return [{"user_id": a.user.id, "username": a.user.username or "",
+                 "display_name": a.user.full_name or ""} for a in admins]
+
+    async def _set_permissions(chat_id, permissions):
+        from telegram import ChatPermissions
+        return await bot.set_chat_permissions(
+            chat_id=chat_id, permissions=ChatPermissions(**(permissions or {})))
+
+    async def _get_permissions(chat_id):
+        chat = await bot.get_chat(chat_id)
+        perms = getattr(chat, "permissions", None)
+        return perms.to_dict() if perms is not None else {}
+
+    async def _send_challenge(chat_id, user_id, text, emoji, buttons):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(lbl, callback_data=cb)]
+                                   for (lbl, cb) in buttons])
+        return await bot.send_message(chat_id=chat_id, text=f"{text}\n\n{emoji}",
+                                      reply_markup=kb)
+
+    actions = TelegramActions(
+        send_message=_send_message, delete_message=_delete_message,
+        restrict_user=_restrict_user, ban_user=_ban_user, unban_user=_unban_user,
+        get_chat_administrators=_get_admins, set_chat_permissions=_set_permissions,
+        get_chat_permissions=_get_permissions, send_challenge=_send_challenge)
+    attach_bot(platform.db_path, actions)
+    logger.info("PLATFORM | blueteam telegram actions wired")
 
 
 def _wire_incident_services(platform: Platform) -> None:
@@ -249,6 +313,33 @@ def register_handlers(app, platform: Platform, is_admin: Callable) -> List[str]:
         except Exception:
             logger.exception("PLATFORM | could not register plugin command /%s",
                              spec.name)
+
+    # Blue Team Join Guard verification-challenge callbacks (^bt1:). Defensive:
+    # if blueteam or the CallbackQueryHandler is unavailable, skip silently.
+    try:
+        from telegram.ext import CallbackQueryHandler
+        from blueteam.runtime import get_runtime
+
+        async def _bt_challenge_cb(update, context):
+            query = update.callback_query
+            if query is None:
+                return
+            chat = update.effective_chat
+            presser = update.effective_user
+            rt = get_runtime(platform.db_path)
+            try:
+                text = await rt.handle_challenge_callback(
+                    chat.id if chat else 0, presser.id if presser else 0,
+                    query.data or "")
+                await query.answer()
+                await query.message.reply_text(text)
+            except Exception:
+                logger.exception("PLATFORM | blueteam challenge callback failed")
+
+        app.add_handler(CallbackQueryHandler(_bt_challenge_cb, pattern=r"^bt1:"))
+        registered.append("cb:bt1")
+    except Exception:
+        logger.info("PLATFORM | blueteam challenge callback not registered")
 
     logger.info("PLATFORM HANDLERS | %s", ", ".join("/" + c for c in registered))
     return registered
