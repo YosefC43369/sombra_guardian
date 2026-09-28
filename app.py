@@ -5941,6 +5941,16 @@ def main():
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
     app.add_handler(CallbackQueryHandler(osint_db_callback_handler, pattern=r"^osintdb:"))
     app.add_handler(CallbackQueryHandler(help_callback_handler, pattern=r"^help:"))
+    # Behavioral Intelligence Engine — passive, public-data behavioural analysis.
+    # register_all is collision-safe (skips any command already registered, e.g.
+    # the member-incident /timeline) and fully guarded, so a failure here never
+    # prevents the bot from starting.
+    try:
+        from behavioral_intelligence.telegram import register_all as _bi_register
+        _bi_register(app)
+    except Exception:
+        logging.getLogger("modbot").exception(
+            "behavioral_intelligence commands not registered (non-fatal)")
     # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
     # members' join/leave/ban transitions and the only source of
     # invite-link attribution. run_polling already requests

@@ -1,0 +1,200 @@
+# SOMBRA GUARDIAN
+
+## Proprietary Source Code License and End User License Agreement
+
+Copyright (c) 2026 [YOSCRYPT]. All rights reserved.
+
+**IMPORTANT: READ THIS AGREEMENT CAREFULLY.** This Proprietary Source Code License and End User License Agreement (the "Agreement") is a legal agreement between [YOSCRYPT] ("Licensor") and the individual or legal entity that obtains, installs, or uses the Software ("Licensee"). By signing the Order Form attached as Schedule A, clicking an acceptance button, or downloading, copying, installing, or using the Software, Licensee agrees to be bound by this Agreement. If Licensee does not agree, Licensee must not obtain or use the Software.
+
+---
+
+## 1. Definitions
+
+1.1 **"Software"** means the software known as Sombra Guardian, including all Source Code, scripts, configuration templates, database migrations, plugins, workflow definitions, tests, and Documentation delivered by Licensor, together with all updates that Licensor elects to provide, but excluding Third-Party Components.
+
+1.2 **"Source Code"** means the human-readable form of the Software.
+
+1.3 **"Documentation"** means the README files, manuals, guides, and other written materials that accompany the Software.
+
+1.4 **"Derivative Works"** means any modification, adaptation, translation, or other work that is based on or incorporates any portion of the Software.
+
+1.5 **"Third-Party Components"** means any software library, dataset, framework, or other material in or used with the Software that is owned by a third party and licensed under that party's own terms, including open-source components.
+
+1.6 **"Authorized Deployment"** means one production installation of the Software, running one Telegram bot identity, operated by or for Licensee. The number of Authorized Deployments granted to Licensee is stated in the Order Form and is one (1) if not stated.
+
+1.7 **"Order Form"** means the document in the form of Schedule A, or any other written or electronic order that identifies Licensee, the Fees, and the license scope, and that Licensor has accepted.
+
+1.8 **"Fees"** means the amounts payable by Licensee under the Order Form.
+
+---
+
+## 2. License Grant
+
+2.1 **Grant.** Subject to Licensee's compliance with this Agreement and payment of all Fees, Licensor grants Licensee a limited, non-exclusive, non-transferable, non-sublicensable license, effective on the date stated in the Order Form and continuing until terminated under Section 13, to:
+
+(a) install and run the Software in the number of Authorized Deployments stated in the Order Form;
+
+(b) read, compile, and modify the Source Code, and create Derivative Works, solely for Licensee's own internal business or personal purposes; and
+
+(c) make a reasonable number of backup copies of the Software solely for archival and disaster-recovery purposes.
+
+2.2 **Derivative Works.** Derivative Works remain subject to this Agreement. As between the parties, Licensee owns the original portions that Licensee itself authors in a Derivative Work, but Licensee obtains no ownership of, and may not use or distribute, the underlying Software except as this Agreement permits.
+
+2.3 **No Sale.** The Software is licensed, not sold. Nothing in this Agreement transfers to Licensee any ownership of the Software or of any intellectual property right in it.
+
+---
+
+## 3. Restrictions
+
+3.1 Except as expressly permitted in Section 2 or in the Order Form, Licensee shall not, and shall not permit any third party to:
+
+(a) sell, resell, rent, lease, lend, sublicense, assign, distribute, or otherwise transfer or make available the Software, the Source Code, or any Derivative Work to any third party;
+
+(b) publish or disclose the Software, the Source Code, or any Derivative Work in any public or shared location, including public code repositories, file-sharing sites, forums, code marketplaces, and paste services;
+
+(c) use the Software or the Source Code to develop, market, or provide a product or service that is substantially similar to, or competes with, the Software;
+
+(d) offer the Software, or the functionality of any Derivative Work, to third parties as a hosted, managed, or "bot-as-a-service" offering, unless the Order Form expressly grants service-provider use;
+
+(e) remove, obscure, or alter any copyright, proprietary rights, or attribution notice in the Software;
+
+(f) use the Source Code to train, fine-tune, or evaluate any machine-learning model that is made available to third parties; or
+
+(g) use the Software in violation of applicable law or in violation of Section 6.
+
+3.2 **Permitted Contractors.** Licensee may give access to the Source Code to its employees and individual contractors who (a) need access to operate or modify the Software for Licensee and (b) are bound by written obligations of confidentiality and use restriction at least as protective as this Agreement ("Permitted Contractors"). Licensee is liable for any act or omission of a Permitted Contractor that would breach this Agreement if committed by Licensee.
+
+---
+
+## 4. Ownership and Reservation of Rights
+
+4.1 As between the parties, Licensor retains all right, title, and interest that it holds in and to the Software, including all copyrights, trade secrets, and other intellectual property rights, and all rights not expressly granted in this Agreement are reserved. No license is granted by implication, estoppel, or otherwise.
+
+4.2 If Licensee provides suggestions or feedback about the Software, Licensor may use that feedback without restriction and without obligation to Licensee.
+
+---
+
+## 5. Third-Party Components and Services
+
+5.1 **Third-Party Components.** The Software depends on or may contain Third-Party Components, including, for example, the python-telegram-bot library and reference or username datasets. Third-Party Components are not licensed under this Agreement. Each is governed by its own license terms, which continue to apply and are not modified by this Agreement. Licensee is responsible for reviewing and complying with those terms. A list of known Third-Party Components and their licenses may be provided in a separate notices file.
+
+5.2 **Third-Party Services.** The Software is designed to interoperate with third-party services, which may include Telegram, artificial-intelligence model providers, the Tor network, RSS and news sources, and code-hosting services. Licensee must obtain its own accounts, credentials, and API keys, bears all related fees, and must comply with each provider's terms of service and acceptable-use policies. Licensor does not control and is not responsible for the availability, pricing, policies, or conduct of any third-party service, including any suspension or restriction of Licensee's bot, groups, or accounts.
+
+---
+
+## 6. Authorized Use and Compliance with Laws
+
+6.1 **Lawful Use.** Licensee is solely responsible for its use of the Software and for ensuring that its use complies with all laws and regulations that apply to Licensee, including laws governing privacy, data protection, computer access and misuse, electronic communications, and consumer protection (for example, Thailand's Personal Data Protection Act, the European Union's General Data Protection Regulation, and the California Consumer Privacy Act, as applicable).
+
+6.2 **Security-Testing and OSINT Functionality.** The Software includes open-source intelligence, reconnaissance, and security-assessment functionality. Licensee shall use that functionality only (a) against systems, accounts, and assets that Licensee owns or for which Licensee holds current, written authorization from the owner, and (b) within the scope of that authorization.
+
+6.3 **Prohibited Conduct.** Licensee shall not use the Software to (a) gain or attempt to gain unauthorized access to any system, network, or account; (b) stalk, harass, threaten, or intimidate any person; (c) collect, compile, or publish personal information about any individual without a lawful basis; (d) conduct unlawful surveillance; (e) send unsolicited bulk messages or distribute malware; or (f) violate the rights of any third party.
+
+6.4 **Data.** Licensee is the controller or responsible party for all data that its deployment collects or processes. Licensor does not receive, host, or have access to that data through Licensee's use of the Software.
+
+---
+
+## 7. Support and Updates
+
+Licensor has no obligation to provide support, maintenance, bug fixes, or updates unless the Order Form expressly states otherwise. Any updates that Licensor elects to provide are part of the Software and are governed by this Agreement.
+
+---
+
+## 8. Fees and Taxes
+
+8.1 Licensee shall pay the Fees stated in the Order Form on the terms stated there. Except as stated in the Order Form or as required by applicable law, all Fees are non-refundable.
+
+8.2 Fees are exclusive of taxes, duties, and similar charges, which Licensee shall pay, other than taxes on Licensor's net income.
+
+---
+
+## 9. Confidentiality
+
+9.1 The Source Code and non-public Documentation are Licensor's confidential information and trade secrets. Licensee shall protect them using at least the same degree of care that Licensee uses for its own most sensitive information, and no less than reasonable care, and shall use them only as permitted by this Agreement.
+
+9.2 Section 9.1 does not apply to information that Licensee can show (a) is or becomes public through no act or omission of Licensee or any Permitted Contractor, (b) was lawfully known to Licensee without restriction before receipt, or (c) is independently developed without use of the Software. Licensee may disclose confidential information to the extent required by law, after giving Licensor prompt notice where legally permitted.
+
+---
+
+## 10. Disclaimer of Warranties
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITH ALL FAULTS, AND WITHOUT WARRANTY OF ANY KIND. LICENSOR DISCLAIMS ALL WARRANTIES, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. LICENSOR DOES NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE, SECURE, OR UNINTERRUPTED, THAT ANY DEFECT WILL BE CORRECTED, OR THAT THE SOFTWARE'S DETECTION, RISK-SCORING, OR ANALYSIS OUTPUT, INCLUDING ANY OUTPUT GENERATED BY ARTIFICIAL INTELLIGENCE, IS ACCURATE OR COMPLETE. LICENSEE IS RESPONSIBLE FOR VERIFYING ALL OUTPUT BEFORE RELYING ON IT OR TAKING ACTION AGAINST ANY PERSON.
+
+---
+
+## 11. Limitation of Liability
+
+11.1 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, LICENSOR WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, GOODWILL, OR BUSINESS OPPORTUNITY, ARISING OUT OF OR RELATED TO THIS AGREEMENT OR THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+11.2 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, LICENSOR'S TOTAL CUMULATIVE LIABILITY ARISING OUT OF OR RELATED TO THIS AGREEMENT OR THE SOFTWARE, UNDER ANY THEORY OF LIABILITY, WILL NOT EXCEED THE FEES ACTUALLY PAID BY LICENSEE TO LICENSOR FOR THE SOFTWARE.
+
+11.3 Licensor is not responsible for any consequence of Licensee's operation or use of the Software, including data loss, service interruption, suspension of Telegram accounts or groups, or claims by third parties arising from Licensee's use.
+
+11.4 Nothing in this Agreement excludes or limits any liability that cannot be excluded or limited under applicable law.
+
+---
+
+## 12. Indemnification
+
+Licensee shall defend, indemnify, and hold harmless Licensor and its affiliates, owners, and personnel from and against any claim, loss, liability, damage, and expense (including reasonable attorneys' fees) arising out of or related to (a) Licensee's or any Permitted Contractor's use of the Software, (b) any breach of Section 3, Section 6, or Section 9, or (c) any data that Licensee's deployment collects, processes, or discloses.
+
+---
+
+## 13. Term and Termination
+
+13.1 **Term.** This Agreement begins on the effective date stated in the Order Form and continues until terminated as provided in this Section.
+
+13.2 **Termination for Breach.** This Agreement and all licenses granted under it terminate automatically, without notice, if Licensee breaches Section 3, Section 6, or Section 9. Licensor may also terminate this Agreement on written notice if Licensee breaches any other provision and does not cure the breach within thirty (30) days after receiving notice.
+
+13.3 **Effect of Termination.** Upon termination, Licensee shall immediately stop using the Software, and within ten (10) days shall delete or destroy all copies of the Software, the Source Code, and all Derivative Works in its possession or control, and shall certify in writing that it has done so. Termination does not relieve Licensee of accrued payment obligations.
+
+13.4 **Survival.** Sections 1, 3, 4, 5, 6, 9, 10, 11, 12, 13.3, 13.4, 14, and 15 survive termination or expiration.
+
+---
+
+## 14. Verification
+
+Upon Licensor's reasonable written request, made no more than once per year, Licensee shall certify in writing that it is using the Software in compliance with this Agreement, including the number of Authorized Deployments in operation and the identity of any Permitted Contractors.
+
+---
+
+## 15. General Provisions
+
+15.1 **Governing Law.** This Agreement is governed by the laws of [GOVERNING JURISDICTION], without regard to its conflict-of-laws principles.
+
+15.2 **Venue.** The parties submit to the exclusive jurisdiction of the courts located in [VENUE], except that Licensor may seek injunctive or other equitable relief in any court of competent jurisdiction to protect its intellectual property or confidential information.
+
+15.3 **Entire Agreement.** This Agreement, together with the Order Form, is the entire agreement between the parties regarding the Software and supersedes all prior or contemporaneous understandings on that subject. If the Order Form conflicts with this Agreement, the Order Form controls only as to the Fees, the number of Authorized Deployments, and any support terms it expressly states.
+
+15.4 **Amendment and Waiver.** This Agreement may be amended only in a writing signed or electronically accepted by both parties. A failure or delay in enforcing any provision is not a waiver of that provision.
+
+15.5 **Assignment.** Licensee may not assign or transfer this Agreement or any right under it, by operation of law or otherwise, without Licensor's prior written consent. Any attempted assignment in violation of this Section is void. Licensor may assign this Agreement to a successor to its rights in the Software.
+
+15.6 **Severability.** If any provision of this Agreement is held unenforceable, that provision will be enforced to the maximum extent permissible and the remaining provisions will remain in full force and effect.
+
+15.7 **Notices.** Notices must be in writing and sent to the contact addresses in the Order Form, or to any updated address a party designates by notice. Notices sent by email are effective when sent, absent a bounce-back message.
+
+15.8 **Electronic Acceptance and Counterparts.** The parties may accept this Agreement and the Order Form electronically, and may sign in counterparts, each of which is an original and all of which together are one instrument.
+
+15.9 **Language.** This Agreement is written in English, and the English version controls. Any translation is provided for convenience only.
+
+15.10 **Contact.** Questions about this Agreement may be directed to Licensor at [LICENSOR EMAIL].
+
+---
+
+## Schedule A: License Order Form
+
+| Item | Details |
+| --- | --- |
+| Licensee legal name | [ YOSCRYPT ] |
+| Licensee contact email | [ syafiqazlaniskandar@gmail.com ] |
+| Effective date | [ 28-09-2026 ] |
+| Number of Authorized Deployments | [ 1 ] |
+| Permitted Contractors (names) | [ YOSCRYPT ] |
+| Service-provider (hosted) use permitted | [ ] No  [ 1 ] Yes |
+| Fees and payment terms | [ Full payment is required before receiving the project; if using a trial version, half of the full price must be paid upfront. ] |
+| Support and updates | [ 1 ] None  [ ] As follows: [ ] |
+
+**Licensor**
+
+Name: [ YOSCRYPT ]
