@@ -72,6 +72,7 @@ from .engine import GeoOSINTEngine, GeoResult, TargetKind
 from .pipeline import GeoPipeline, PipelineResult
 from .orchestrator import GeoOrchestrator, OrchestrationResult
 from .scoring import GeoFootprintScorer, FootprintScore
+from . import integration
 
 __version__ = "1.0.0"
 
@@ -85,5 +86,6 @@ __all__ = [
     "GeoPipeline", "PipelineResult",
     "GeoOrchestrator", "OrchestrationResult",
     "GeoFootprintScorer", "FootprintScore",
+    "integration",
     "__version__",
 ]
