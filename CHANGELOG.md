@@ -1,5 +1,29 @@
 # Changelog
 
+## News Intelligence Engine v2.0.0
+
+New public-source Cyber OSINT / news-intelligence subsystem
+(`news_intelligence/`): continuously collects, normalizes, deduplicates,
+enriches, correlates, scores, stores and visualizes public cybersecurity news and
+intelligence reporting about threat actors, malware, infrastructure,
+vulnerabilities, campaigns, organizations, governments, vendors, public incidents
+and geopolitical cyber events. Every conclusion is traceable to cited public
+sources — no fabricated news, sources or attribution — collection/analysis only
+(no credential harvesting, paywall bypass, malware download, exploit or phishing
+automation). Reuses the CTI engine's evidence/confidence/indicator primitives.
+Async-friendly, SQLite persistence, streaming/incremental ingestion (RSS/Atom/
+JSON Feed, vendor blogs, CISA + KEV, CERT, NVD, GitHub advisories, exploit blogs,
+podcasts), SimHash/MinHash/TF-IDF deduplication, explainable event/campaign
+clustering, cross-source IOC correlation, source-corroboration + contradiction
+tracking, trend detection (with sample size + window), evidence-dated timelines,
+provenance-carrying graphs (JSON/GraphML/GEXF/DOT), daily/weekly briefs and
+actor/malware/CVE/campaign/executive profiles (Markdown/HTML/JSON/CSV), internal
+search + filters, and best-effort bridges to Threat Actor Intelligence, Web
+Footprint, Geo-OSINT, Entity Fusion and Behavioral Intelligence. 86 offline tests.
+Wired into the bot (`register_all`) with `/news /news_today /news_week
+/news_search /news_actor /news_campaign /news_cve /news_malware /news_org
+/news_country /news_graph /news_brief /news_report`. See `docs/news_intelligence/`.
+
 ## Threat Actor Intelligence Engine v1.0.0
 
 New public-source CTI subsystem (`threat_actor_intelligence/`): collects,

@@ -6004,6 +6004,18 @@ def main():
     except Exception:
         logging.getLogger("modbot").exception(
             "threat_actor_intelligence commands not registered (non-fatal)")
+    # News Intelligence Engine — passive, public-source cyber news OSINT.
+    # register_all is collision-safe (skips any command already registered) and
+    # fully guarded, so a failure here never prevents the bot from starting.
+    # Commands: /news /news_today /news_week /news_search /news_actor
+    # /news_campaign /news_cve /news_malware /news_org /news_country /news_graph
+    # /news_brief /news_report.
+    try:
+        from news_intelligence.telegram import register_all as _ni_register
+        _ni_register(app)
+    except Exception:
+        logging.getLogger("modbot").exception(
+            "news_intelligence commands not registered (non-fatal)")
     # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
     # members' join/leave/ban transitions and the only source of
     # invite-link attribution. run_polling already requests

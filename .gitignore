@@ -12,3 +12,7 @@ cache/
 threat_actor_intelligence.db
 threat_actor_intelligence.db-*
 .tai_cache/
+# News Intelligence Engine (runtime, derived)
+news_intelligence.db
+news_intelligence.db-*
+.ni_cache/
