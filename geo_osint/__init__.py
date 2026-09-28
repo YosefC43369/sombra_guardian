@@ -67,6 +67,11 @@ from .models import (
     Evidence, EvidenceLedger, ResolvedLocation, BoundingBox, Geofence,
     Airport, City, Country, Facility, geodesic_km, haversine_km,
 )
+from .configuration import GeoConfig, GeoMode, GeoLimits
+from .engine import GeoOSINTEngine, GeoResult, TargetKind
+from .pipeline import GeoPipeline, PipelineResult
+from .orchestrator import GeoOrchestrator, OrchestrationResult
+from .scoring import GeoFootprintScorer, FootprintScore
 
 __version__ = "1.0.0"
 
@@ -75,5 +80,10 @@ __all__ = [
     "Coordinate", "GeoObservation", "ObservationSet", "LocationType",
     "Evidence", "EvidenceLedger", "ResolvedLocation", "BoundingBox", "Geofence",
     "Airport", "City", "Country", "Facility", "geodesic_km", "haversine_km",
+    "GeoConfig", "GeoMode", "GeoLimits",
+    "GeoOSINTEngine", "GeoResult", "TargetKind",
+    "GeoPipeline", "PipelineResult",
+    "GeoOrchestrator", "OrchestrationResult",
+    "GeoFootprintScorer", "FootprintScore",
     "__version__",
 ]
