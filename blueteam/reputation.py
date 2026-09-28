@@ -22,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Protocol
 
 from .urlkit import ExtractedURL, etld1
 
@@ -43,9 +43,18 @@ class RepResult:
     source: str = ""
 
 
+class IntelProvider(Protocol):
+    """Optional bridge to the v0.8 Threat-Intel platform. Returns
+    (confidence 0-100, severity, source) for a URL that matches an IOC, else None."""
+    def lookup_url(self, url: str) -> Optional[tuple]: ...
+
+
 class ReputationChecker:
-    def __init__(self, store):
+    def __init__(self, store, intel_provider: Optional[IntelProvider] = None,
+                 intel_min_confidence: int = 60):
         self._store = store
+        self._intel = intel_provider          # additive; None keeps legacy behavior
+        self._intel_min = intel_min_confidence
 
     def check(self, chat_id: int, eu: ExtractedURL) -> RepResult:
         host = eu.ascii_host or eu.host
@@ -69,6 +78,19 @@ class ReputationChecker:
             src = self._store.feed_contains(value)
             if src:
                 return RepResult(RepVerdict.FEED, f"listed on {src} feed", src)
+
+        # 4) v0.8 Threat-Intel platform (optional; advisory, never raises)
+        if self._intel is not None and eu.url:
+            try:
+                hit = self._intel.lookup_url(eu.url)
+            except Exception:
+                hit = None
+            if hit is not None:
+                conf, severity, source = (list(hit) + [0, "medium", "intel"])[:3]
+                if int(conf or 0) >= self._intel_min:
+                    return RepResult(RepVerdict.FEED,
+                                     f"threat-intel match ({source}, conf {conf})",
+                                     f"intel:{source}")
         return RepResult(RepVerdict.UNKNOWN)
 
 
