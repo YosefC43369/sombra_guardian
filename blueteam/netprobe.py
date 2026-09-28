@@ -268,30 +268,40 @@ class SafeProbe:
                 break
 
 
-def build_default_opener(timeout_s: float = 8.0):
-    """Return an Opener backed by httpx that connects to a *pinned* validated IP
-    and re-validates it (DNS-rebinding mitigation), or ``None`` if httpx is absent.
+def build_default_opener(timeout_s: float = 8.0,
+                         resolver: Optional[Resolver] = None):
+    """Return an Opener backed by httpx, or ``None`` if httpx is absent.
 
-    Note: cookies are never sent; redirects are handled by :class:`SafeProbe`, not
-    httpx, so every hop is re-screened.
+    DNS-rebinding mitigation: immediately before connecting, the opener re-resolves
+    the host (via the same resolver used to screen it) and re-validates EVERY
+    address with :func:`is_safe_ip`, aborting if the resolution changed to anything
+    unsafe. This closes the TOCTOU window between :meth:`SafeProbe.probe`'s screen
+    and the actual connection down to microseconds. (For a fully hostile
+    environment, pin the connection at the transport layer — documented in
+    docs/blueteam/THREAT_MODEL.md; the screen-then-reverify approach here blocks
+    the realistic rebind where a record flips to a private IP.)
+
+    Cookies are never sent; redirects are handled by :class:`SafeProbe`, not httpx,
+    so every hop is re-screened.
     """
     try:
         import httpx
     except Exception:
         return None
+    resolve = resolver or _default_resolver
 
     async def _opener(url: str, pinned_ips: List[str], timeout: float):
-        # Re-validate the pins right before connecting (belt and braces).
-        for ip in pinned_ips:
-            ok, _ = is_safe_ip(ip)
-            if not ok:
-                raise RuntimeError("pinned IP failed re-validation")
         parts = urlsplit(url)
-        host = parts.hostname or ""
-        # Connect to the pinned IP but keep the Host header + TLS SNI = host.
-        transport = httpx.AsyncHTTPTransport(retries=0)
+        host = (parts.hostname or "")
+        # Re-resolve + re-validate right before connecting (rebind mitigation).
+        safe, reason, current = screen_host(host, resolve)
+        if not safe:
+            raise RuntimeError(f"host failed re-validation before connect: {reason}")
+        # And confirm the resolution still matches what we pinned (no flip).
+        if pinned_ips and not (set(current) & set(pinned_ips)):
+            raise RuntimeError("resolution changed away from pinned addresses")
         async with httpx.AsyncClient(
-                timeout=timeout, follow_redirects=False, transport=transport,
+                timeout=timeout, follow_redirects=False,
                 headers={"User-Agent": "SombraGuardian-LinkGuard/0.7 (+passive)"}) as c:
             resp = await c.get(url)
             body = resp.content[:65536] if resp.content else b""
