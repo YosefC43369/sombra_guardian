@@ -1,0 +1,77 @@
+{
+  "_comment": "Threat-feed registry for v0.8.0 Intel. Passive/defensive only. A feed whose license terms are uncertain for this deployment ships license_ok=false and enabled_default=false; an operator must opt it in explicitly. abuse.ch feeds (URLhaus/ThreatFox/MalwareBazaar/Feodo) now require a free Auth-Key header on some endpoints — set BLUETEAM_INTEL_ABUSECH_AUTHKEY and the service adds it; without a key those feeds stay disabled. All URLs are https and pass the SSRF guard before every fetch.",
+  "feeds": [
+    {
+      "name": "urlhaus",
+      "url": "https://urlhaus.abuse.ch/downloads/csv_online/",
+      "fmt": "urlhaus_csv",
+      "license": "CC0 1.0 (abuse.ch) — free reuse incl. commercial",
+      "license_ok": true,
+      "enabled_default": true,
+      "source_weight": 0.85,
+      "severity": "high",
+      "default_ttl_days": 30,
+      "notes": "Malicious URLs, updated frequently. May require abuse.ch Auth-Key."
+    },
+    {
+      "name": "threatfox",
+      "url": "https://threatfox.abuse.ch/export/csv/recent/",
+      "fmt": "threatfox_csv",
+      "license": "CC0 1.0 (abuse.ch)",
+      "license_ok": true,
+      "enabled_default": true,
+      "source_weight": 0.85,
+      "severity": "high",
+      "default_ttl_days": 14,
+      "notes": "Mixed IOC types (url/domain/ip/hash) with malware family. May require Auth-Key."
+    },
+    {
+      "name": "malwarebazaar",
+      "url": "https://bazaar.abuse.ch/export/csv/recent/",
+      "fmt": "malwarebazaar_csv",
+      "license": "CC0 1.0 (abuse.ch)",
+      "license_ok": true,
+      "enabled_default": true,
+      "source_weight": 0.9,
+      "severity": "high",
+      "default_ttl_days": 90,
+      "notes": "SHA-256 of recent malware samples with signature. May require Auth-Key."
+    },
+    {
+      "name": "feodotracker",
+      "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
+      "fmt": "threatfox_json",
+      "license": "CC0 1.0 (abuse.ch)",
+      "license_ok": true,
+      "enabled_default": false,
+      "source_weight": 0.85,
+      "severity": "high",
+      "default_ttl_days": 30,
+      "notes": "Botnet C2 IP blocklist. Off by default; JSON shape mapped via threatfox_json."
+    },
+    {
+      "name": "cisa_kev",
+      "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+      "fmt": "cisa_kev_json",
+      "license": "US Government public domain",
+      "license_ok": true,
+      "enabled_default": true,
+      "source_weight": 0.95,
+      "severity": "high",
+      "default_ttl_days": 365,
+      "notes": "Known Exploited Vulnerabilities. ADVISORY IOCs — reporting only, never matched against messages."
+    },
+    {
+      "name": "openphish",
+      "url": "https://openphish.com/feed.txt",
+      "fmt": "plaintext_urls",
+      "license": "Community feed — free for non-commercial; commercial use needs a paid license",
+      "license_ok": false,
+      "enabled_default": false,
+      "source_weight": 0.8,
+      "severity": "high",
+      "default_ttl_days": 7,
+      "notes": "DISABLED by default: license uncertain for commercial deployments. Operator must confirm terms and opt in."
+    }
+  ]
+}
