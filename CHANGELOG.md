@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.8.0 — Blue Team Intelligence & Governance
+
+เพิ่มโมดูลป้องกันเชิงรับ (passive) อีก 3 ตัวบนแพลตฟอร์มร่วม (`blueteam/platform/`)
+ต่อเข้าระบบเดิมแบบ additive ด้วยปลั๊กอินเดียว (`plugins/builtin/blueteam_v08.py`)
+สถาปัตยกรรมแบบชั้น (domain บริสุทธิ์ → services → adapters → handlers) พร้อม
+architecture fitness tests ห้าม cycle/ห้าม domain นำเข้า telegram/sqlite
+
+### Added
+
+- **Threat Intel & IOC platform** (`blueteam/intel/`)
+  - โมเดล IOC กลาง (url/domain/ip/cidr/hash/email/t.me/wallet/advisory) +
+    canonicalization ร่วมกับ Link Guard, โมเดลความมั่นใจอธิบายได้ (noisy-OR ×
+    freshness decay), ส่งออก STIX 2.1-lite แบบ deterministic (UUIDv5)
+  - เอนจินค้นหาสมรรถนะสูง: exact set + reverse-label trie (จับ subdomain) +
+    ช่วง CIDR เรียง + bisect + Bloom filter เขียนเอง + LRU + สลับ snapshot แบบ
+    double-buffer (อ่านไม่ต้องล็อก) — พิสูจน์ถูกต้องเทียบ brute force
+  - เฟรมเวิร์กฟีด (URLhaus/ThreatFox/MalwareBazaar/CISA-KEV/OpenPhish): SSRF guard,
+    conditional GET, กันระเบิดบีบอัด, ingest แบบ staged/atomic, กัน feed poisoning
+    (whitelist + growth quarantine), เช็กเงื่อนไข license (ไม่ชัวร์ = ปิดเป็นค่าเริ่ม)
+  - คำสั่ง `/intel status|feeds|sync|lookup|add|del|whitelist|sightings|export|stats|health`
+- **Detection-as-Code engine** (`blueteam/dac/`)
+  - กฎ Sigma-lite JSON คอมไพล์เป็น closure — **ไม่มี eval/exec/compile** เด็ดขาด
+    (lexer → recursive-descent parser → AST → optimizer → closure), มี field
+    modifiers, ReDoS lint, งบจำนวนโหนด AST
+  - Aho-Corasick prefilter, aggregation แบบ stateful (count/distinct บน ring buffer
+    ตามเวลา), วงจร lifecycle (shadow→canary→enabled + rollback + version hash-chain),
+    circuit breaker ต่อกฎ, ชุดกฎเริ่มต้น 37 กฎ (ไทย/อังกฤษ)
+  - คำสั่ง `/rule list|show|import|enable|disable|shadow|canary|rollback|lint|backtest|history|stats|pack`
+- **Security Posture Score & Client Report** (`blueteam/posture/`)
+  - คะแนนโปร่งใส `Σ(w·s·c)/Σ(w·c)` (UNKNOWN ไม่นับในตัวหาร), deterministic +
+    monotonic + gating, อธิบายได้ (`explain`/`whatif`), rollup รายชั่วโมง (ไม่สแกน
+    เหตุการณ์ดิบ), พอร์ตโฟลิโอหลายกลุ่ม
+  - รายงาน HTML แบบ self-contained (CSS inline + SVG วาดเอง, ไม่มี JS, CSP, `@page`
+    สำหรับ PDF, ฟอนต์ไทย) + MD/JSON/CSV, โปรไฟล์ client (ปกปิด)/internal, ผนึก
+    SHA-256 ลง integrity ledger + `/posture verify`, white-label branding
+  - คำสั่ง `/posture status|score|explain|whatif|trend|report|brand|portfolio|verify|export`
+- **Shared platform** (`blueteam/platform/`): event contracts มีเวอร์ชัน, metrics
+  registry, write-behind batcher, scheduler (lease/jitter/catch-up-once),
+  circuit breaker, tenancy (isolation ระดับ repository), typed config, DI container
+- Migration `m0004` (15 ตาราง `bt_*`, ย้อนกลับได้), เอกสาร `docs/blueteam/` + ADR
+  `docs/adr/`, benchmark `tests/bench_intel_dac_posture.py`
+
+### Changed (additive, จุดเชื่อมเท่านั้น)
+
+- `blueteam/reputation.py`: hook `IntelProvider` (ออปชัน; ค่าเริ่ม None = พฤติกรรมเดิม)
+- `purpleteam_report.py`: ส่วนสรุป DAC rule coverage (รับข้อมูลเข้า, ไม่ผูกพันเพิ่ม)
+- `config.py` + `.env.example`: ตัวแปร env ของ v0.8, `__version__` → 0.8.0
+
+### Security
+
+- ไม่มี eval/exec/compile กับกฎ · SSRF guard บนทุกฟีด · กันระเบิดบีบอัด · ReDoS lint ·
+  กัน XSS/CSV/CSS injection ในรายงาน · defang IOC ทุกครั้งใน event/ข้อความ · SQL
+  พารามิเตอร์ล้วน · แยก tenant ต่อกลุ่ม · detection แบบ fail-open, สิทธิ์แบบ fail-closed ·
+  ไม่ส่งเนื้อหาข้อความออกนอกระบบ (egress opt-in, ปิดค่าเริ่ม)
+
+### Tests
+
+175 เคสใหม่ (offline, stdlib, deterministic): arch 5, platform 24, intel 55, dac 48,
+posture 33, wiring 10 — ผ่านทั้งหมด; ไม่กระทบของเดิม (reputation 38, linkguard 26)
+
 ## v0.7.0 — Blue Team Suite
 
 เพิ่มชุดโมดูลป้องกันเชิงรับ (passive) 3 ตัว ในแพ็กเกจ `blueteam/` ต่อเข้าแพลตฟอร์มเดิม

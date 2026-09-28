@@ -466,6 +466,26 @@ Sombra Guardian มีไว้สำหรับ **การดูแลกล�
 เปิดใช้งานต่อกลุ่มด้วย `/blueteam setup` แล้วปรับผ่านคำสั่งแต่ละโมดูล เอกสารเต็มที่
 [`docs/blueteam/`](docs/blueteam/) (สถาปัตยกรรม, threat model, คู่มือแอดมิน, ตารางตั้งค่า+ข้อจำกัด)
 
+## 🧠 Blue Team Intelligence &amp; Governance (v0.8.0)
+
+โมดูลป้องกันเชิงรับอีก 3 ตัวบนแพลตฟอร์มร่วม (`blueteam/platform/`) สถาปัตยกรรมแบบชั้น
+(domain บริสุทธิ์ → services → adapters → handlers) มี architecture fitness tests บังคับ
+ต่อเข้าระบบด้วยปลั๊กอินเดียวแบบ additive สวิตช์หลัก `BLUETEAM_V08_ENABLED`
+
+- **🛰️ Threat Intel / IOC** — โมเดล IOC กลาง + เอนจินค้นหาสมรรถนะสูง (trie โดเมน +
+  ช่วง CIDR + Bloom + snapshot สลับแบบ double-buffer), ฟีด URLhaus/ThreatFox/
+  MalwareBazaar/CISA-KEV (SSRF guard, กันระเบิดบีบอัด, กัน feed poisoning, เช็ก license),
+  ส่งออก STIX 2.1-lite คำสั่ง `/intel`
+- **📏 Detection-as-Code** — กฎ Sigma-lite คอมไพล์เป็น closure **ไม่มี eval/exec/compile**,
+  Aho-Corasick prefilter, aggregation ตามเวลา, lifecycle shadow→canary→enabled +
+  version hash-chain + rollback, ชุดกฎเริ่มต้น 37 กฎ คำสั่ง `/rule`
+- **📊 Security Posture** — คะแนนโปร่งใส `Σ(w·s·c)/Σ(w·c)` (deterministic/monotonic/gated),
+  อธิบายได้ + what-if + แนวโน้ม, รายงาน HTML self-contained (SVG วาดเอง, ไม่มี JS) +
+  MD/JSON/CSV, ผนึก SHA-256 ลง integrity ledger + `verify`, white-label คำสั่ง `/posture`
+
+ทั้งหมด passive/defensive, defang IOC ทุกครั้ง, ไม่ส่งเนื้อหาข้อความออกนอกระบบ เอกสาร
++ ADR ที่ [`docs/blueteam/`](docs/blueteam/) และ [`docs/adr/`](docs/adr/)
+
 ---
 
 ## 🙏 Credits
