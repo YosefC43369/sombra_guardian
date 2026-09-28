@@ -5993,6 +5993,17 @@ def main():
     except Exception:
         logging.getLogger("modbot").exception(
             "behavioral_intelligence commands not registered (non-fatal)")
+    # Threat Actor Intelligence Engine — passive, public-source CTI analysis.
+    # register_all is collision-safe (skips any command already registered) and
+    # fully guarded, so a failure here never prevents the bot from starting.
+    # Commands: /actor /campaign /malware /ioc /attack /capec /report /timeline
+    # /actor_graph /campaign_graph /ioc_report.
+    try:
+        from threat_actor_intelligence.telegram import register_all as _tai_register
+        _tai_register(app)
+    except Exception:
+        logging.getLogger("modbot").exception(
+            "threat_actor_intelligence commands not registered (non-fatal)")
     # CHAT_MEMBER (not MY_CHAT_MEMBER) is the update that carries other
     # members' join/leave/ban transitions and the only source of
     # invite-link attribution. run_polling already requests

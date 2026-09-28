@@ -1,5 +1,17 @@
 # Changelog
 
+## Threat Actor Intelligence Engine v1.0.0
+
+New public-source CTI subsystem (`threat_actor_intelligence/`): collects,
+normalizes, correlates, scores, stores and visualizes public threat intelligence
+about actors, malware families, campaigns, IOCs, infrastructure, aliases,
+ATT&CK/CAPEC TTPs, reports and historical activity — every conclusion traceable
+to cited evidence, no fabricated attribution, analysis-only (no offensive
+tooling). Async-friendly, SQLite persistence, streaming/incremental ingestion,
+84 offline tests. Wired into the bot (`register_all`) with the commands
+`/actor /campaign /malware /ioc /attack /capec /report /timeline /actor_graph
+/campaign_graph /ioc_report`. See `docs/threat_actor/`.
+
 ## v0.8.0 — Blue Team Intelligence & Governance
 
 เพิ่มโมดูลป้องกันเชิงรับ (passive) อีก 3 ตัวบนแพลตฟอร์มร่วม (`blueteam/platform/`)

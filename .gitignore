@@ -8,3 +8,7 @@ venv/
 resource/osint_db.json
 # Google Drive reference-data cache (runtime, derived from Drive)
 cache/
+# Threat Actor Intelligence Engine (runtime, derived)
+threat_actor_intelligence.db
+threat_actor_intelligence.db-*
+.tai_cache/
