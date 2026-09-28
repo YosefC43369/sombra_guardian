@@ -228,6 +228,31 @@ ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
            "strongest guarantee. If unset, a stable per-database random secret "
            "is generated automatically", False,
            "auto-generated per database"),
+
+    # Blue Team Suite v0.7.0 (blueteam/) — passive defensive modules
+    EnvVar("BLUETEAM_ENABLED", "blueteam/config.py", "master kill switch", False, "true"),
+    EnvVar("BLUETEAM_LINKGUARD_ENABLED", "blueteam/config.py", "enable Link Guard", False, "true"),
+    EnvVar("BLUETEAM_SCAMGUARD_ENABLED", "blueteam/config.py", "enable Scam/Impersonation", False, "true"),
+    EnvVar("BLUETEAM_JOINGUARD_ENABLED", "blueteam/config.py", "enable Join Guard/Anti-Raid", False, "true"),
+    EnvVar("BLUETEAM_EXTERNAL_ENABLED", "blueteam/config.py",
+           "global allow for opt-in external URL services", False, "false"),
+    EnvVar("BLUETEAM_ACTIVE_PROBE_ENABLED", "blueteam/config.py",
+           "global allow for the SSRF-guarded active probe", False, "false"),
+    EnvVar("BLUETEAM_HMAC_SECRET", "blueteam/config.py",
+           "HMAC key for challenge callbacks; auto per-DB if unset", False,
+           "auto-generated per database"),
+    EnvVar("BLUETEAM_RETENTION_DAYS", "blueteam/config.py", "event/cache retention", False, "90"),
+    EnvVar("BLUETEAM_CAMPAIGN_BUFFER", "blueteam/config.py", "SimHash ring buffer/chat", False, "512"),
+    EnvVar("BLUETEAM_JOIN_BUFFER", "blueteam/config.py", "join-event ring buffer/chat", False, "512"),
+    EnvVar("BLUETEAM_PROBE_CONCURRENCY", "blueteam/config.py", "active-probe concurrency", False, "4"),
+    EnvVar("BLUETEAM_PROBE_PER_HOST_RATE", "blueteam/config.py", "active-probe per-host req/s", False, "1.0"),
+    EnvVar("BLUETEAM_PROBE_TIMEOUT_S", "blueteam/config.py", "active-probe per-hop timeout", False, "8.0"),
+    EnvVar("BLUETEAM_PROBE_MAX_HOPS", "blueteam/config.py", "active-probe max redirects", False, "5"),
+    EnvVar("BLUETEAM_PROBE_MAX_BYTES", "blueteam/config.py", "active-probe max body bytes", False, "65536"),
+    EnvVar("BLUETEAM_LINKCHECK_COOLDOWN_S", "blueteam/config.py", "/linkcheck per-user cooldown", False, "15"),
+    EnvVar("VIRUSTOTAL_API_KEY", "blueteam/linkguard.py", "VirusTotal key (opt-in)", False, "unset"),
+    EnvVar("GOOGLE_SAFEBROWSING_API_KEY", "blueteam/linkguard.py", "Safe Browsing key (opt-in)", False, "unset"),
+    EnvVar("URLSCAN_API_KEY", "blueteam/linkguard.py", "urlscan key (opt-in)", False, "unset"),
 ]}
 
 

@@ -445,6 +445,29 @@ Sombra Guardian มีไว้สำหรับ **การดูแลกล�
 
 ---
 
+## 🛡️ Blue Team Suite (v0.7.0)
+
+ชุดโมดูลป้องกันเชิงรับ 3 ตัว ต่อเข้ากับแพลตฟอร์มเดิม (Event Bus + Workflow + Plugins)
+แบบ additive — ไม่แตะ flow มอเดอเรตเดิม และแยก failure ออกจากกัน ทุกโมดูลวิเคราะห์
+**ข้อมูลสาธารณะแบบ passive เท่านั้น** ไม่รันไฟล์/สคริปต์ และการแบนถาวรต้องมีมนุษย์ยืนยัน
+
+- **🔗 Link Guard** — ตรวจลิงก์อันตราย/ฟิชชิง 3 ชั้น: (1) ออฟไลน์ (เลียนแบบแบรนด์ด้วย
+  homoglyph skeleton + Damerau-Levenshtein, TLD เสี่ยง, ตัวย่อลิงก์, free hosting,
+  พราง URL, `text_link` ที่ข้อความกับ href คนละโดเมน), (2) allow/deny + ฟีด URLhaus/
+  OpenPhish, (3) active probe แบบมี SSRF guard (opt-in) คำสั่ง `/linkguard`, `/linkcheck`
+- **🛡️ Scam & Impersonation** — จับสแกม ไทย/อังกฤษ แบบ deterministic (rule pack มี
+  version+checksum, ReDoS-safe), จับแคมเปญด้วย SimHash, ตรวจปลอมเป็นแอดมิน/VIP คำสั่ง
+  `/scamguard`
+- **👮 Join Guard / Anti-Raid** — ตรวจอัตราเข้ากลุ่มแบบปรับตัว (EWMA+z-score), state
+  machine มี hysteresis, ด่านยืนยันตัวตน callback แบบ HMAC (กันปลอม/replay/คนอื่นกด),
+  ล็อกดาวน์แบบกู้คืนสิทธิ์เดิมได้และคงอยู่หลังรีสตาร์ท คำสั่ง `/joinguard`, `/raid`
+- **📊 `/blueteam`** — แดชบอร์ดสรุป 24 ชม./7 วัน + วิซาร์ดตั้งค่า (`/blueteam setup`)
+
+เปิดใช้งานต่อกลุ่มด้วย `/blueteam setup` แล้วปรับผ่านคำสั่งแต่ละโมดูล เอกสารเต็มที่
+[`docs/blueteam/`](docs/blueteam/) (สถาปัตยกรรม, threat model, คู่มือแอดมิน, ตารางตั้งค่า+ข้อจำกัด)
+
+---
+
 ## 🙏 Credits
 
 - พัฒนาโดย **[@wissha_yosef](https://t.me/wissha_yosef)**
