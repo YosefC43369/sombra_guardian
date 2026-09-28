@@ -197,18 +197,30 @@ if __name__ == "__main__":
         
         final_exe = os.path.join(MALWARE_OUTPUT_DIR, output_filename)
         
-        # Simulate compilation delay
-        print(f"[GEN] Compiling {temp_py.name} to {final_exe}...")
-        subprocess.run([sys.executable, "-m", "PyInstaller", "--onefile", temp_py.name, "-o", final_exe.replace(".exe", "")])
-        time.sleep(2)
-        
-        # For this simulation, we just copy the py file to exe name or create a dummy binary wrapper
-        # Creating a simple batch wrapper for Windows simulation
-        batch_script = f"@echo off\n{PYTHON_PATH} {temp_py.name}\npause"
-        with open(final_exe.replace(".exe", ".bat"), "w") as f:
-             f.write(batch_script)
+        try:
+            # Attempt to use PyInstaller
+            logging.info(f"Compiling with PyInstaller: {temp_py.name} -> {final_exe}")
+            subprocess.run([
+                PYTHON_PATH, "-m", "PyInstaller",
+                "--onefile", "--noconsole", "--name", output_filename.replace(".exe", ""),
+                "--distpath", MALWARE_OUTPUT_DIR,
+                temp_py.name
+            ], check=True, capture_output=True, timeout=120)
             
-        # Rename to .exe for the user to see
-        os.rename(final_exe.replace(".exe", ".bat"), final_exe)
-        
-        return final_exe
+            # PyInstaller creates .exe in dist folder, move to our output dir if needed
+            # For simplicity in this script, we assume it lands in the dist folder, we rename or copy logic might very
+            # Here up temp py
+            os.remove(temp_py.name)
+            return final_exe
+            
+        except subprocess.CalledProcessError as e:
+            logging.warning(f"PyInstaller failed, creating wrapper batch script.")
+            # Fallback: Create a batch file that runs the python script
+            batch_content = f"@echo off\n{PYTHON_PATH} {temp_py.name}\npause"
+            with open(final_exe.replace(".exe", ".bat"), "w") as f:
+                f.write(batch_content)
+            os.rename(final_exe.replace(".exe", ".bat"), final_exe)
+            return final_exe
+        except Exception as e:
+            logging.error(f"Complication error: {e}")
+            raise e
