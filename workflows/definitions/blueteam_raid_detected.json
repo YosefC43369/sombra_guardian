@@ -1,0 +1,13 @@
+{
+  "name": "blueteam-raid-detected",
+  "description": "Blue Team Join Guard: when a raid is detected, alert admins, open an incident and anchor it to the integrity ledger. Lockdown/verification is performed by the Join Guard plugin; this playbook records the episode.",
+  "enabled": true,
+  "trigger": {"event": "raid.detected"},
+  "conditions": [],
+  "actions": ["send_admin_alert", "create_incident", "anchor_integrity"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 30,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "raid_id"]
+}

@@ -1,0 +1,144 @@
+{
+  "schema": "scam_rules_en",
+  "version": "1.1.0",
+  "updated": "2026-01",
+  "checksum": "fa11a48a54751ca33073659622fc59c65b4de4db918c52ec929d77b42b9fae87",
+  "data": [
+    {
+      "id": "en_invest_profit",
+      "pattern": "\\b(profit|return|roi)\\b[^\\n]{0,20}\\d{2,}\\s*%",
+      "weight": 30,
+      "category": "investment",
+      "desc": "Unrealistic advertised returns",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_invest_crypto",
+      "pattern": "\\b(invest|trading|crypto|bitcoin|forex|airdrop|presale)\\b",
+      "weight": 12,
+      "category": "investment",
+      "desc": "Crypto/forex investment lure",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_invest_guarantee",
+      "pattern": "\\b(guaranteed|risk[- ]?free|no risk|double your)\\b",
+      "weight": 25,
+      "category": "investment",
+      "desc": "Guaranteed/risk-free claims",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_job_parttime",
+      "pattern": "\\b(part[- ]?time|work from home|easy (money|income)|earn (from home|online))\\b",
+      "weight": 22,
+      "category": "job",
+      "desc": "Fake part-time job",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_job_income",
+      "pattern": "\\b(earn|make)\\b[^\\n]{0,15}\\$?\\d{2,}[^\\n]{0,10}\\b(per day|/day|a day|daily|per week)\\b",
+      "weight": 20,
+      "category": "job",
+      "desc": "High income claim",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_congrats",
+      "pattern": "\\b(congratulations|you (are|'re)( a)? (winner|the lucky)|you have been selected)\\b",
+      "weight": 22,
+      "category": "giveaway",
+      "desc": "Winner/selected bait",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_claim_prize",
+      "pattern": "\\b(claim your (prize|reward|gift|money)|you (have )?won|redeem your)\\b",
+      "weight": 23,
+      "category": "giveaway",
+      "desc": "Prize-claim bait",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_free_money",
+      "pattern": "(\\bfree \\$?\\d{2,}|\\$\\d{3,}\\b|\\bfree (money|gift|cash)\\b)",
+      "weight": 12,
+      "category": "giveaway",
+      "desc": "Free money bait",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_account_alert",
+      "pattern": "\\baccount (is |has been )?(suspended|locked|limited|restricted|on hold|disabled)\\b",
+      "weight": 25,
+      "category": "bank_impersonation",
+      "desc": "Account suspended/locked lure",
+      "attack": "T1566.002"
+    },
+    {
+      "id": "en_verify_identity",
+      "pattern": "\\b(verify your (account|identity)|confirm your (identity|account)|update your (details|information|account))\\b",
+      "weight": 22,
+      "category": "bank_impersonation",
+      "desc": "Verify/confirm identity lure",
+      "attack": "T1566.002"
+    },
+    {
+      "id": "en_otp",
+      "pattern": "\\b(otp|one[- ]?time (password|code)|verification code|6[- ]digit code|send[^\\n]{0,10}code)\\b",
+      "weight": 45,
+      "category": "otp_phish",
+      "desc": "OTP/credential phish",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_loan",
+      "pattern": "\\b(instant loan|quick cash|fast approval|no credit check|low interest loan)\\b",
+      "weight": 20,
+      "category": "loan",
+      "desc": "Predatory loan offer",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_gambling",
+      "pattern": "\\b(casino|baccarat|slots?|betting|jackpot|free spins)\\b",
+      "weight": 22,
+      "category": "gambling",
+      "desc": "Gambling promotion",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_lure_dm",
+      "pattern": "\\b(dm me|inbox me|message me (privately|directly)|contact me on|add me on)\\b",
+      "weight": 12,
+      "category": "lure_dm",
+      "desc": "Lure to private message",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_click",
+      "pattern": "\\b(click here|tap here|click the link|link below)\\b",
+      "weight": 8,
+      "category": "lure",
+      "desc": "Click-the-link lure",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_urgent",
+      "pattern": "\\b(urgent|act now|within \\d+ (minutes|hours)|today only|expires? (soon|today)|limited time)\\b",
+      "weight": 8,
+      "category": "urgency",
+      "desc": "Manufactured urgency",
+      "attack": "T1566"
+    },
+    {
+      "id": "en_recovery",
+      "pattern": "\\b(recover your account|unlock your account|account (hacked|compromised)|restore access)\\b",
+      "weight": 30,
+      "category": "account_recovery",
+      "desc": "Account-recovery scam",
+      "attack": "T1566"
+    }
+  ]
+}

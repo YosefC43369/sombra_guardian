@@ -1,0 +1,298 @@
+{
+  "schema": "brands",
+  "version": "1.0.0",
+  "updated": "2026-01",
+  "checksum": "816e1b5ee805b117295686a616b06882f4156f4c11eacc14b1003ba2ab8d1531",
+  "data": [
+    {
+      "name": "SCB",
+      "category": "bank",
+      "domains": [
+        "scb.co.th",
+        "scbeasy.com"
+      ],
+      "skeletons": [
+        "scb",
+        "scbeasy"
+      ]
+    },
+    {
+      "name": "Kasikornbank",
+      "category": "bank",
+      "domains": [
+        "kasikornbank.com",
+        "kbank.co.th"
+      ],
+      "skeletons": [
+        "kasikornbank",
+        "kbank"
+      ]
+    },
+    {
+      "name": "Bangkok Bank",
+      "category": "bank",
+      "domains": [
+        "bangkokbank.com",
+        "bualuang.co.th"
+      ],
+      "skeletons": [
+        "bangkokbank",
+        "bualuang"
+      ]
+    },
+    {
+      "name": "Krungthai",
+      "category": "bank",
+      "domains": [
+        "krungthai.com",
+        "ktb.co.th"
+      ],
+      "skeletons": [
+        "krungthai",
+        "ktb"
+      ]
+    },
+    {
+      "name": "Krungsri",
+      "category": "bank",
+      "domains": [
+        "krungsri.com"
+      ],
+      "skeletons": [
+        "krungsri"
+      ]
+    },
+    {
+      "name": "TTB",
+      "category": "bank",
+      "domains": [
+        "ttbbank.com"
+      ],
+      "skeletons": [
+        "ttbbank",
+        "ttb"
+      ]
+    },
+    {
+      "name": "GSB",
+      "category": "bank",
+      "domains": [
+        "gsb.or.th"
+      ],
+      "skeletons": [
+        "gsb"
+      ]
+    },
+    {
+      "name": "BAAC",
+      "category": "bank",
+      "domains": [
+        "baac.or.th"
+      ],
+      "skeletons": [
+        "baac"
+      ]
+    },
+    {
+      "name": "PayPal",
+      "category": "payment",
+      "domains": [
+        "paypal.com"
+      ],
+      "skeletons": [
+        "paypal"
+      ]
+    },
+    {
+      "name": "TrueMoney",
+      "category": "payment",
+      "domains": [
+        "truemoney.com"
+      ],
+      "skeletons": [
+        "truemoney"
+      ]
+    },
+    {
+      "name": "Wise",
+      "category": "payment",
+      "domains": [
+        "wise.com"
+      ],
+      "skeletons": [
+        "wise"
+      ]
+    },
+    {
+      "name": "PromptPay",
+      "category": "payment",
+      "domains": [
+        "promptpay.io"
+      ],
+      "skeletons": [
+        "promptpay"
+      ]
+    },
+    {
+      "name": "Shopee",
+      "category": "payment",
+      "domains": [
+        "shopee.co.th",
+        "shopee.com"
+      ],
+      "skeletons": [
+        "shopee"
+      ]
+    },
+    {
+      "name": "Lazada",
+      "category": "payment",
+      "domains": [
+        "lazada.co.th",
+        "lazada.com"
+      ],
+      "skeletons": [
+        "lazada"
+      ]
+    },
+    {
+      "name": "Binance",
+      "category": "crypto",
+      "domains": [
+        "binance.com"
+      ],
+      "skeletons": [
+        "binance"
+      ]
+    },
+    {
+      "name": "Bitkub",
+      "category": "crypto",
+      "domains": [
+        "bitkub.com"
+      ],
+      "skeletons": [
+        "bitkub"
+      ]
+    },
+    {
+      "name": "Coinbase",
+      "category": "crypto",
+      "domains": [
+        "coinbase.com"
+      ],
+      "skeletons": [
+        "coinbase"
+      ]
+    },
+    {
+      "name": "OKX",
+      "category": "crypto",
+      "domains": [
+        "okx.com"
+      ],
+      "skeletons": [
+        "okx"
+      ]
+    },
+    {
+      "name": "Bybit",
+      "category": "crypto",
+      "domains": [
+        "bybit.com"
+      ],
+      "skeletons": [
+        "bybit"
+      ]
+    },
+    {
+      "name": "Kraken",
+      "category": "crypto",
+      "domains": [
+        "kraken.com"
+      ],
+      "skeletons": [
+        "kraken"
+      ]
+    },
+    {
+      "name": "Telegram",
+      "category": "messaging",
+      "domains": [
+        "telegram.org",
+        "t.me",
+        "telegram.me"
+      ],
+      "skeletons": [
+        "telegram"
+      ]
+    },
+    {
+      "name": "LINE",
+      "category": "messaging",
+      "domains": [
+        "line.me"
+      ],
+      "skeletons": [
+        "line"
+      ]
+    },
+    {
+      "name": "WhatsApp",
+      "category": "messaging",
+      "domains": [
+        "whatsapp.com"
+      ],
+      "skeletons": [
+        "whatsapp"
+      ]
+    },
+    {
+      "name": "Facebook",
+      "category": "tech",
+      "domains": [
+        "facebook.com",
+        "fb.com"
+      ],
+      "skeletons": [
+        "facebook"
+      ]
+    },
+    {
+      "name": "Google",
+      "category": "tech",
+      "domains": [
+        "google.com",
+        "accounts.google.com"
+      ],
+      "skeletons": [
+        "google"
+      ]
+    },
+    {
+      "name": "Apple",
+      "category": "tech",
+      "domains": [
+        "apple.com",
+        "icloud.com"
+      ],
+      "skeletons": [
+        "apple",
+        "icloud"
+      ]
+    },
+    {
+      "name": "Microsoft",
+      "category": "tech",
+      "domains": [
+        "microsoft.com",
+        "live.com",
+        "office.com"
+      ],
+      "skeletons": [
+        "microsoft",
+        "office"
+      ]
+    }
+  ]
+}

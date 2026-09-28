@@ -1,0 +1,117 @@
+{
+  "_comment": "Detection-as-Code starter pack (v0.8.0). Passive/defensive Sigma-lite rules for Telegram group abuse. All keyword tests use the pre-lowercased 'text_lower' field with lowercase needles so the Aho-Corasick prefilter and the predicate agree. Rules load as 'shadow' by default; an admin promotes to canary/enabled. attack = loose ATT&CK-style tag.",
+  "rules": [
+    {"id": "scam_crypto_giveaway", "title": "Crypto giveaway scam", "level": "high", "tags": ["scam", "crypto"], "attack": "impersonation",
+     "detection": {"kw": {"text_lower|contains": ["giveaway", "airdrop", "แจกฟรี", "แจกเหรียญ"]}, "act": {"text_lower|contains": ["claim", "รับเลย", "send", "โอน"]}, "url": {"has_url": true}, "condition": "kw and (act or url)"}},
+
+    {"id": "scam_double_money", "title": "Double-your-money scheme", "level": "high", "tags": ["scam", "fraud"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["double your", "x2", "คืนทุน", "กำไร 100", "รับประกันกำไร", "ปันผล"]}, "condition": "kw"}, "cooldown_s": 300, "dedupe_field": "user_id"},
+
+    {"id": "phish_verify_account", "title": "Account-verification phishing", "level": "high", "tags": ["phishing"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains|all": ["verify", "account"]}, "th": {"text_lower|contains": ["ยืนยันบัญชี", "ยืนยันตัวตน"]}, "url": {"has_url": true}, "condition": "url and (kw or th)"}},
+
+    {"id": "phish_seed_phrase", "title": "Seed phrase / private key request", "level": "critical", "tags": ["phishing", "crypto"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains": ["seed phrase", "recovery phrase", "private key", "รหัสกู้คืน", "วลีกู้", "12 คำ", "24 คำ"]}, "condition": "kw"}},
+
+    {"id": "phish_bank_otp", "title": "Bank / OTP credential harvest", "level": "high", "tags": ["phishing", "banking"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains": ["otp", "รหัสผ่าน", "pin", "cvv", "เลขหลังบัตร", "one-time"]}, "ask": {"text_lower|contains": ["send", "แจ้ง", "กรอก", "confirm", "ยืนยัน"]}, "condition": "kw and ask"}},
+
+    {"id": "impersonate_admin_dm", "title": "Fake admin / support contact", "level": "high", "tags": ["impersonation"], "attack": "impersonation",
+     "detection": {"kw": {"text_lower|contains": ["official admin", "customer support", "แอดมิน", "ฝ่ายซัพพอร์ต", "contact support", "dm me", "ทักแชท"]}, "url": {"text_lower|contains": ["t.me/", "wa.me/", "whatsapp"]}, "condition": "kw and url"}},
+
+    {"id": "scam_investment_signal", "title": "Investment / pump signal", "level": "medium", "tags": ["scam", "investment"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["pump", "signal group", "insider", "guaranteed profit", "สัญญาณ", "หุ้นเด็ด", "ล็อตเตอรี่"]}, "condition": "kw"}, "cooldown_s": 600, "dedupe_field": "user_id"},
+
+    {"id": "scam_job_offer", "title": "Fake job / task scam", "level": "medium", "tags": ["scam", "job"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["work from home", "easy money", "งานออนไลน์", "รายได้เสริม", "part time job", "กดไลค์รับเงิน", "รับสมัครงาน"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "susp_tld_link", "title": "Suspicious TLD link", "level": "medium", "tags": ["link"], "attack": "malicious-link",
+     "detection": {"d": {"domains|endswith": [".ru", ".top", ".tk", ".xyz", ".cn", ".gq", ".ml", ".cf", ".buzz", ".click"]}, "condition": "d"}},
+
+    {"id": "susp_url_shortener", "title": "URL shortener in message", "level": "low", "tags": ["link"], "attack": "malicious-link",
+     "detection": {"d": {"registrable_domains|contains": ["bit.ly", "tinyurl.com", "t.co", "goo.gl", "cutt.ly", "is.gd", "rebrand.ly", "shorturl.at", "ow.ly"]}, "condition": "d"}},
+
+    {"id": "spam_mass_mention", "title": "Mass-mention spam", "level": "medium", "tags": ["spam"], "attack": "flooding",
+     "detection": {"m": {"mention_count|gte": 8}, "condition": "m"}},
+
+    {"id": "spam_many_links", "title": "Many links in one message", "level": "medium", "tags": ["spam"], "attack": "flooding",
+     "detection": {"u": {"url_count|gte": 4}, "condition": "u"}},
+
+    {"id": "newmember_link_blast", "title": "New member posting links", "level": "medium", "tags": ["spam", "onboarding"], "attack": "malicious-link",
+     "detection": {"nm": {"is_new_member": true}, "url": {"has_url": true}, "condition": "nm and url"}},
+
+    {"id": "newmember_no_username_link", "title": "New no-username account with link", "level": "high", "tags": ["spam"], "attack": "malicious-link",
+     "detection": {"nm": {"is_new_member": true}, "nu": {"has_username": false}, "url": {"has_url": true}, "condition": "nm and nu and url"}},
+
+    {"id": "young_account_link", "title": "Very young account posting link", "level": "medium", "tags": ["spam"], "attack": "malicious-link",
+     "detection": {"age": {"account_age_days|lt": 3}, "url": {"has_url": true}, "condition": "age and url"}},
+
+    {"id": "scam_romance_opener", "title": "Romance-scam opener", "level": "low", "tags": ["scam", "social"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["lonely", "widow", "my dear", "god fearing", "หาคู่", "คนรู้ใจ", "เหงา"]}, "condition": "kw"}, "cooldown_s": 900, "dedupe_field": "user_id"},
+
+    {"id": "scam_loan_offer", "title": "Predatory loan offer", "level": "medium", "tags": ["scam", "finance"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["เงินกู้", "เงินด่วน", "อนุมัติไว", "quick loan", "no collateral", "ดอกเบี้ยต่ำ", "กู้ง่าย"]}, "condition": "kw"}},
+
+    {"id": "scam_gambling_promo", "title": "Gambling / casino promo", "level": "low", "tags": ["spam", "gambling"], "attack": "spam",
+     "detection": {"kw": {"text_lower|contains": ["บาคาร่า", "สล็อต", "เว็บพนัน", "casino", "แทงบอล", "สมัครสมาชิก", "โบนัส 100"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "malware_apk_link", "title": "Direct APK / executable link", "level": "high", "tags": ["malware"], "attack": "execution",
+     "detection": {"ext": {"text_lower|contains": [".apk", ".exe", ".scr", ".bat", ".vbs"]}, "url": {"has_url": true}, "condition": "ext and url"}},
+
+    {"id": "phish_qr_login", "title": "QR-code login lure", "level": "medium", "tags": ["phishing"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains": ["scan qr", "สแกน qr", "qr code login", "สแกนเพื่อเข้าสู่ระบบ"]}, "condition": "kw"}},
+
+    {"id": "scam_nitro_gift", "title": "Free Nitro / gift card lure", "level": "medium", "tags": ["phishing"], "attack": "malicious-link",
+     "detection": {"kw": {"text_lower|contains": ["free nitro", "gift card", "steam gift", "บัตรของขวัญฟรี", "แจกโค้ด"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "urgency_link", "title": "Urgency + link (act-now lure)", "level": "medium", "tags": ["phishing", "social"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["within 24", "act now", "ด่วน", "ภายใน 24", "หมดเขต", "รีบ", "expire"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "spam_emoji_flood", "title": "Emoji flood", "level": "low", "tags": ["spam"], "attack": "flooding",
+     "detection": {"e": {"emoji_count|gte": 15}, "condition": "e"}},
+
+    {"id": "scam_fake_support_number", "title": "Fake support phone number", "level": "medium", "tags": ["scam"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["call now", "โทรด่วน", "สายด่วน", "hotline", "ติดต่อเจ้าหน้าที่"]}, "re": {"text|re": ["\\b0\\d{8,9}\\b"]}, "condition": "kw and re"}},
+
+    {"id": "impersonate_brand_lookalike", "title": "Brand look-alike domain", "level": "high", "tags": ["phishing", "impersonation"], "attack": "impersonation",
+     "detection": {"d": {"text_lower|contains": ["binance-", "-binance", "metamask-", "telegram-verify", "line-support", "kbank-", "scb-", "-airdrop", "wallet-connect"]}, "condition": "d"}},
+
+    {"id": "scam_whatsapp_redirect", "title": "Redirect to WhatsApp/off-platform", "level": "low", "tags": ["spam"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["wa.me/", "whatsapp me", "add me on whatsapp", "ไลน์ไอดี", "line id", "แอดไลน์"]}, "condition": "kw"}},
+
+    {"id": "scam_forward_channel_link", "title": "Forwarded channel promo with link", "level": "low", "tags": ["spam"], "attack": "spam",
+     "detection": {"fw": {"is_forward": true}, "url": {"has_url": true}, "kw": {"text_lower|contains": ["join", "subscribe", "เข้าร่วม", "สมัคร", "channel"]}, "condition": "fw and url and kw"}},
+
+    {"id": "scam_tme_invite_spam", "title": "t.me invite spam", "level": "medium", "tags": ["spam"], "attack": "spam",
+     "detection": {"u": {"text_lower|contains": ["t.me/+", "t.me/joinchat", "telegram.me/"]}, "condition": "u"}, "cooldown_s": 300, "dedupe_field": "user_id"},
+
+    {"id": "phish_wallet_connect", "title": "Wallet-connect drainer lure", "level": "critical", "tags": ["phishing", "crypto"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains": ["connect wallet", "validate wallet", "sync wallet", "เชื่อมกระเป๋า", "verify wallet", "claim tokens"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "scam_pump_group_invite", "title": "Pump-group recruitment", "level": "medium", "tags": ["scam", "investment"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["vip signal", "free signal", "join our pump", "กลุ่มวีไอพี", "กลุ่มลับ", "profit daily"]}, "condition": "kw"}},
+
+    {"id": "scam_tax_customs", "title": "Fake tax / customs fee", "level": "medium", "tags": ["scam"], "attack": "financial-fraud",
+     "detection": {"kw": {"text_lower|contains": ["customs fee", "ค่าภาษี", "พัสดุตกค้าง", "clearance fee", "กรมศุลกากร", "ชำระค่าธรรมเนียม"]}, "condition": "kw"}},
+
+    {"id": "scam_prize_notification", "title": "You-won-a-prize notification", "level": "medium", "tags": ["scam"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["you won", "คุณได้รับรางวัล", "congratulations you", "ยินดีด้วยคุณคือผู้โชคดี", "selected winner"]}, "condition": "kw"}},
+
+    {"id": "burst_same_user", "title": "Message burst from one user", "level": "low", "tags": ["spam"], "attack": "flooding",
+     "detection": {"any": {"text_len|gte": 1}, "condition": "any"},
+     "aggregation": {"type": "count", "gte": 6, "window_s": 15, "group_by": "user_id"}, "cooldown_s": 60, "dedupe_field": "user_id"},
+
+    {"id": "distinct_link_spread", "title": "Same link spread by many users", "level": "medium", "tags": ["spam", "coordinated"], "attack": "coordinated-inauthentic",
+     "detection": {"url": {"has_url": true}, "condition": "url"},
+     "aggregation": {"type": "distinct", "field": "user_id", "gte": 5, "window_s": 120, "group_by": "chat_id"}},
+
+    {"id": "scam_charity_appeal", "title": "Fake charity / donation appeal", "level": "low", "tags": ["scam"], "attack": "social-engineering",
+     "detection": {"kw": {"text_lower|contains": ["donate now", "บริจาค", "ช่วยเหลือผู้ป่วย", "urgent help", "ระดมทุน"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "phish_login_harvest", "title": "Generic login-credential harvest", "level": "high", "tags": ["phishing"], "attack": "credential-access",
+     "detection": {"kw": {"text_lower|contains|all": ["login", "password"]}, "url": {"has_url": true}, "condition": "kw and url"}},
+
+    {"id": "scam_adult_link", "title": "Adult-content bait link", "level": "low", "tags": ["spam", "adult"], "attack": "spam",
+     "detection": {"kw": {"text_lower|contains": ["hot girls", "18+", "onlyfans", "คลิปหลุด", "สาวสวย", "adult content"]}, "url": {"has_url": true}, "condition": "kw and url"}}
+  ]
+}

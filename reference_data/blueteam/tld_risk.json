@@ -1,0 +1,62 @@
+{
+  "schema": "tld_risk",
+  "version": "1.0.0",
+  "updated": "2026-01",
+  "checksum": "3f522a32caf8f55df153b0e9cab09bee7ef3bc7adbcf3f19fc361b3bad2d630b",
+  "data": {
+    "high": {
+      ".zip": 25,
+      ".mov": 22,
+      ".tk": 22,
+      ".ml": 22,
+      ".ga": 22,
+      ".cf": 22,
+      ".gq": 22,
+      ".top": 18,
+      ".xyz": 15,
+      ".work": 18,
+      ".click": 18,
+      ".link": 18,
+      ".loan": 20,
+      ".men": 18,
+      ".rest": 16,
+      ".country": 16,
+      ".kim": 16,
+      ".gdn": 18,
+      ".download": 18,
+      ".review": 16,
+      ".stream": 16,
+      ".date": 16,
+      ".racing": 16,
+      ".win": 18
+    },
+    "medium": {
+      ".info": 8,
+      ".online": 10,
+      ".site": 10,
+      ".buzz": 12,
+      ".icu": 12,
+      ".su": 14,
+      ".ru": 8,
+      ".cn": 8,
+      ".live": 8,
+      ".shop": 6,
+      ".fun": 10,
+      ".monster": 14,
+      ".cyou": 14,
+      ".sbs": 14,
+      ".autos": 12,
+      ".bond": 16,
+      ".cam": 14
+    },
+    "low": {
+      ".com": 0,
+      ".net": 0,
+      ".org": 0,
+      ".co": 0,
+      ".io": 0,
+      ".th": 0,
+      ".dev": 0
+    }
+  }
+}

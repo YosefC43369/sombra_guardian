@@ -275,3 +275,54 @@ def export_attack_navigator_layer(exercise_id: int) -> Optional[str]:
         ],
     }
     return json.dumps(layer, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# v0.8 additive: Detection-as-Code rule coverage hand-off.
+#
+# Takes rule records as data (list of dicts from blueteam.dac's public reads) so
+# this module gains no new import/coupling and stays stdlib-only. Groups active
+# rules by ATT&CK-style tag and lifecycle state for the purple-team hand-off.
+# ---------------------------------------------------------------------------
+
+def render_dac_rule_coverage(rules: List[Dict[str, Any]]) -> str:
+    """Render a plain-text section summarizing Detection-as-Code rule coverage.
+
+    ``rules`` is a list of dicts with keys: rule_id, title, level, state, tags,
+    and optionally 'attack'. Purely presentational; no analysis of its own.
+    """
+    lines = ["7) DETECTION-AS-CODE RULE COVERAGE", ""]
+    if not rules:
+        lines.append("  (ยังไม่มีกฎ Detection-as-Code)")
+        return "\n".join(lines)
+
+    by_state: Dict[str, int] = {}
+    by_attack: Dict[str, List[str]] = {}
+    for r in rules:
+        state = str(r.get("state", "disabled"))
+        by_state[state] = by_state.get(state, 0) + 1
+        attack = str(r.get("attack") or "").strip() or "unmapped"
+        by_attack.setdefault(attack, []).append(str(r.get("rule_id", "?")))
+
+    active = sum(v for k, v in by_state.items() if k in ("shadow", "canary", "enabled"))
+    lines.append(f"  รวมกฎ: {len(rules)} | ทำงาน (shadow/canary/enabled): {active}")
+    lines.append("  ตามสถานะ: " + ", ".join(f"{k}={v}" for k, v in sorted(by_state.items())))
+    lines.append("")
+    lines.append("  ครอบคลุมตามเทคนิค (ATT&CK-style tag):")
+    for attack in sorted(by_attack):
+        ids = by_attack[attack]
+        shown = ", ".join(ids[:6]) + ("…" if len(ids) > 6 else "")
+        lines.append(f"    • {attack}: {len(ids)} กฎ ({shown})")
+    return "\n".join(lines)
+
+
+def dac_rule_coverage_json(rules: List[Dict[str, Any]]) -> str:
+    """Machine-readable counterpart of :func:`render_dac_rule_coverage`."""
+    by_state: Dict[str, int] = {}
+    by_attack: Dict[str, int] = {}
+    for r in rules:
+        by_state[str(r.get("state", "disabled"))] = by_state.get(str(r.get("state", "disabled")), 0) + 1
+        attack = str(r.get("attack") or "").strip() or "unmapped"
+        by_attack[attack] = by_attack.get(attack, 0) + 1
+    return json.dumps({"total": len(rules), "by_state": by_state, "by_attack": by_attack},
+                      ensure_ascii=False, sort_keys=True, indent=2)

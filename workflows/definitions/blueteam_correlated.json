@@ -1,0 +1,13 @@
+{
+  "name": "blueteam-correlated-incident",
+  "description": "Blue Team correlator: a cross-module correlation (e.g. a brand-new member posting a malicious link within seconds of joining) is a high-confidence incident. Alert admins, open an incident and anchor it.",
+  "enabled": true,
+  "trigger": {"event": "blueteam.correlated"},
+  "conditions": [],
+  "actions": ["send_admin_alert", "create_incident", "anchor_integrity"],
+  "max_retries": 1,
+  "timeout_seconds": 15,
+  "cooldown_seconds": 10,
+  "max_depth": 3,
+  "dedup_fields": ["chat_id", "user_id", "correlation_kind"]
+}

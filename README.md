@@ -445,6 +445,49 @@ Sombra Guardian มีไว้สำหรับ **การดูแลกล�
 
 ---
 
+## 🛡️ Blue Team Suite (v0.7.0)
+
+ชุดโมดูลป้องกันเชิงรับ 3 ตัว ต่อเข้ากับแพลตฟอร์มเดิม (Event Bus + Workflow + Plugins)
+แบบ additive — ไม่แตะ flow มอเดอเรตเดิม และแยก failure ออกจากกัน ทุกโมดูลวิเคราะห์
+**ข้อมูลสาธารณะแบบ passive เท่านั้น** ไม่รันไฟล์/สคริปต์ และการแบนถาวรต้องมีมนุษย์ยืนยัน
+
+- **🔗 Link Guard** — ตรวจลิงก์อันตราย/ฟิชชิง 3 ชั้น: (1) ออฟไลน์ (เลียนแบบแบรนด์ด้วย
+  homoglyph skeleton + Damerau-Levenshtein, TLD เสี่ยง, ตัวย่อลิงก์, free hosting,
+  พราง URL, `text_link` ที่ข้อความกับ href คนละโดเมน), (2) allow/deny + ฟีด URLhaus/
+  OpenPhish, (3) active probe แบบมี SSRF guard (opt-in) คำสั่ง `/linkguard`, `/linkcheck`
+- **🛡️ Scam & Impersonation** — จับสแกม ไทย/อังกฤษ แบบ deterministic (rule pack มี
+  version+checksum, ReDoS-safe), จับแคมเปญด้วย SimHash, ตรวจปลอมเป็นแอดมิน/VIP คำสั่ง
+  `/scamguard`
+- **👮 Join Guard / Anti-Raid** — ตรวจอัตราเข้ากลุ่มแบบปรับตัว (EWMA+z-score), state
+  machine มี hysteresis, ด่านยืนยันตัวตน callback แบบ HMAC (กันปลอม/replay/คนอื่นกด),
+  ล็อกดาวน์แบบกู้คืนสิทธิ์เดิมได้และคงอยู่หลังรีสตาร์ท คำสั่ง `/joinguard`, `/raid`
+- **📊 `/blueteam`** — แดชบอร์ดสรุป 24 ชม./7 วัน + วิซาร์ดตั้งค่า (`/blueteam setup`)
+
+เปิดใช้งานต่อกลุ่มด้วย `/blueteam setup` แล้วปรับผ่านคำสั่งแต่ละโมดูล เอกสารเต็มที่
+[`docs/blueteam/`](docs/blueteam/) (สถาปัตยกรรม, threat model, คู่มือแอดมิน, ตารางตั้งค่า+ข้อจำกัด)
+
+## 🧠 Blue Team Intelligence &amp; Governance (v0.8.0)
+
+โมดูลป้องกันเชิงรับอีก 3 ตัวบนแพลตฟอร์มร่วม (`blueteam/platform/`) สถาปัตยกรรมแบบชั้น
+(domain บริสุทธิ์ → services → adapters → handlers) มี architecture fitness tests บังคับ
+ต่อเข้าระบบด้วยปลั๊กอินเดียวแบบ additive สวิตช์หลัก `BLUETEAM_V08_ENABLED`
+
+- **🛰️ Threat Intel / IOC** — โมเดล IOC กลาง + เอนจินค้นหาสมรรถนะสูง (trie โดเมน +
+  ช่วง CIDR + Bloom + snapshot สลับแบบ double-buffer), ฟีด URLhaus/ThreatFox/
+  MalwareBazaar/CISA-KEV (SSRF guard, กันระเบิดบีบอัด, กัน feed poisoning, เช็ก license),
+  ส่งออก STIX 2.1-lite คำสั่ง `/intel`
+- **📏 Detection-as-Code** — กฎ Sigma-lite คอมไพล์เป็น closure **ไม่มี eval/exec/compile**,
+  Aho-Corasick prefilter, aggregation ตามเวลา, lifecycle shadow→canary→enabled +
+  version hash-chain + rollback, ชุดกฎเริ่มต้น 37 กฎ คำสั่ง `/rule`
+- **📊 Security Posture** — คะแนนโปร่งใส `Σ(w·s·c)/Σ(w·c)` (deterministic/monotonic/gated),
+  อธิบายได้ + what-if + แนวโน้ม, รายงาน HTML self-contained (SVG วาดเอง, ไม่มี JS) +
+  MD/JSON/CSV, ผนึก SHA-256 ลง integrity ledger + `verify`, white-label คำสั่ง `/posture`
+
+ทั้งหมด passive/defensive, defang IOC ทุกครั้ง, ไม่ส่งเนื้อหาข้อความออกนอกระบบ เอกสาร
++ ADR ที่ [`docs/blueteam/`](docs/blueteam/) และ [`docs/adr/`](docs/adr/)
+
+---
+
 ## 🙏 Credits
 
 - พัฒนาโดย **[@wissha_yosef](https://t.me/wissha_yosef)**

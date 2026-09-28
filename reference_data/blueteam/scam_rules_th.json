@@ -1,0 +1,144 @@
+{
+  "schema": "scam_rules_th",
+  "version": "1.1.0",
+  "updated": "2026-01",
+  "checksum": "0a9bd0353e7a31cc10795e125076243f26d0faa2eee0a6ec90b5c7ca0a31c777",
+  "data": [
+    {
+      "id": "th_invest_profit",
+      "pattern": "(กำไร|ผลตอบแทน|ปันผล)[^\\n]{0,12}\\d{2,}\\s*(%|เปอร์เซ็นต์|บาท)",
+      "weight": 30,
+      "category": "investment",
+      "desc": "อ้างผลตอบแทนสูงผิดปกติ",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_invest_crypto",
+      "pattern": "(ลงทุน|เทรด|เหรียญ|คริปโต|บิทคอยน์|forex|ฟอเร็กซ์)",
+      "weight": 12,
+      "category": "investment",
+      "desc": "ชักชวนลงทุนคริปโต/ฟอเร็กซ์",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_invest_guarantee",
+      "pattern": "(การันตี|รับรอง|ไม่มีความเสี่ยง|ได้ชัวร์|คืนทุน)",
+      "weight": 25,
+      "category": "investment",
+      "desc": "การันตีผลตอบแทน/ไม่มีความเสี่ยง",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_job_parttime",
+      "pattern": "(งาน\\s*(พาร์ทไทม์|เสริม|ออนไลน์)|หารายได้เสริม|กดไลก์|กดรับงาน|รีวิวสินค้า)",
+      "weight": 22,
+      "category": "job",
+      "desc": "หลอกงานพาร์ทไทม์ปลอม",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_job_income",
+      "pattern": "(รายได้|รับเงิน)[^\\n]{0,6}\\d{3,}[^\\n]{0,6}(ต่อวัน|/วัน|ต่อเดือน)",
+      "weight": 20,
+      "category": "job",
+      "desc": "อ้างรายได้ต่อวันสูง",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_congrats",
+      "pattern": "(คุณคือผู้โชคดี|ยินดีด้วย|คุณได้รับรางวัล|เป็นผู้โชคดี)",
+      "weight": 22,
+      "category": "giveaway",
+      "desc": "อ้างว่าเป็นผู้โชคดี",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_claim_prize",
+      "pattern": "(ได้รับสิทธิ์|กดรับ(สิทธิ์|รางวัล|เงิน)|รับรางวัล|แลกรับ)",
+      "weight": 23,
+      "category": "giveaway",
+      "desc": "ล่อให้กดรับรางวัล/สิทธิ์",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_free_money",
+      "pattern": "(แจกฟรี|รับฟรี|เงินฟรี|ฟรี\\s*\\d{3,}|รับเงิน\\s*\\d{3,})",
+      "weight": 18,
+      "category": "giveaway",
+      "desc": "แจกเงินฟรีล่อลวง",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_bank_alert",
+      "pattern": "(ธนาคารแจ้ง|บัญชี(ของคุณ)?[^\\n]{0,6}(ถูก)?(ระงับ|ล็อก|อายัด|ปิด))",
+      "weight": 25,
+      "category": "bank_impersonation",
+      "desc": "ปลอมเป็นธนาคารแจ้งบัญชีถูกระงับ",
+      "attack": "T1566.002"
+    },
+    {
+      "id": "th_verify_identity",
+      "pattern": "(ยืนยันตัวตน|ยืนยันบัญชี|อัปเดตข้อมูล(บัญชี|ส่วนตัว)?)",
+      "weight": 22,
+      "category": "bank_impersonation",
+      "desc": "หลอกให้ยืนยันตัวตน/อัปเดตข้อมูล",
+      "attack": "T1566.002"
+    },
+    {
+      "id": "th_otp",
+      "pattern": "(ขอรหัส\\s*otp|รหัส\\s*otp|แจ้งรหัส|เลข\\s*6\\s*หลัก|รหัสผ่านครั้งเดียว)",
+      "weight": 45,
+      "category": "otp_phish",
+      "desc": "ขอ OTP/รหัสผ่าน",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_loan",
+      "pattern": "(เงินกู้|กู้ด่วน|กู้ง่าย|อนุมัติไว|ไม่เช็คเครดิต|เงินด่วน)",
+      "weight": 20,
+      "category": "loan",
+      "desc": "เงินกู้นอกระบบ",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_gambling",
+      "pattern": "(บาคาร่า|สล็อต|พนัน|แทงบอล|คาสิโน|เว็บตรง|ฝากถอนออโต้)",
+      "weight": 22,
+      "category": "gambling",
+      "desc": "โฆษณาพนันออนไลน์",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_lure_dm",
+      "pattern": "(ทักแชท|ทักมา|ทักไลน์|inbox|dm|แอดไลน์|ติดต่อส่วนตัว|สนใจทัก)",
+      "weight": 12,
+      "category": "lure_dm",
+      "desc": "ล่อให้ทักส่วนตัว",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_click",
+      "pattern": "(กดที่นี่|คลิกที่นี่|กดลิงก์|ลิงก์ด้านล่าง)",
+      "weight": 8,
+      "category": "lure",
+      "desc": "ล่อให้กดลิงก์",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_urgent",
+      "pattern": "(ด่วน|รีบ|ภายใน\\s*\\d+\\s*(นาที|ชม|ชั่วโมง)|วันนี้เท่านั้น|หมดเขต)",
+      "weight": 8,
+      "category": "urgency",
+      "desc": "สร้างความเร่งรีบ",
+      "attack": "T1566"
+    },
+    {
+      "id": "th_recovery",
+      "pattern": "(กู้บัญชี|ปลดล็อกบัญชี|บัญชีโดนแฮก|กู้คืนเฟส|รับเรื่องคืนบัญชี)",
+      "weight": 30,
+      "category": "account_recovery",
+      "desc": "หลอกกู้บัญชี",
+      "attack": "T1566"
+    }
+  ]
+}
