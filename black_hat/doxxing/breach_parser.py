@@ -1131,4 +1131,125 @@ class FileScanner:
         max_file_size: Optional[int] = None,
         excluded_paths: Optional[Iterable[Path]] = None,
     ) -> None:
-        self.
+        self.extensions = {x.lower() if x.startswith(".") else f".{x.lower()}" for x in extensions}
+        self.max_file_size = max_file_size
+        self.excluded_paths = {Path(p).resolve() for p in (excluded_paths or [])}
+        
+    def scan(self, root: Path, recursive: bool = True) -> Iterator[FileInfo]:
+        if not root.exists():
+            raise FileNotFoundError(root)
+        if root.is_file():
+            candidates = [root]
+        elif recursive:
+            candidates = root.rglob("*")
+        else:
+            candidates = root.glob("*")
+            
+        for path in sorted(candidates):
+            if not path.is_file():
+                continue
+            try:
+                if path.resolve() in self.excluded_paths:
+                    continue
+            except OSError:
+                pass
+            if self.extensions and not any(path.name.lower().endswith(ext) for ext in self.extensions):
+                continue
+            stat = path.stat()
+            if self.max_file_size is not None and stat.st_size > self.max_file_size:
+                logger.warning("Skipping oversized file: %s", path)
+                continue
+            yield FileInfo(path=path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
+            
+            
+# -------- Batch engine --------
+
+class BatchEngine:
+    """Connect file discovery, parser and one or more local sinks."""
+
+    def __init__(
+        self,
+        parser: BreachParser,
+        sqlite_sink: Optional[SQLiteSink] = None,
+        jsonl_sink: Optional[JSONLSink] = None,
+    ) -> None:
+        self.parser = parser
+        self.sqlite_sink = sqlite_sink
+        self.jsonl_sink = jsonl_sink
+
+    def run(
+        self,
+        input_path: str,
+        recursive: bool = True,
+        excluded_paths: Optional[Iterable[Path]] = None,
+    ) -> ParseStats:
+        root = Path(input_path)
+        started = time.monotonic()
+
+        if self.sqlite_sink:
+            self.sqlite_sink.open()
+        if self.jsonl_sink:
+            self.jsonl_sink.open()
+
+        try:
+            if root.is_file():
+                files = [FileInfo(root, root.stat().st_size, root.stat().st_mtime)]
+            else:
+                 scanner = FileScanner(
+                    BreachParser.SUPPORTED_EXTENSIONS,
+                    self.parser.config.max_file_size,
+                    excluded_paths=excluded_paths,
+                )
+                files = scanner.scan(root, recursive=recursive)
+
+            for info in files:
+                logger.info("Queueing file: %s", info.path)
+                digest: Optional[str] = None
+                if self.sqlite_sink:
+                    try:
+                        digest = calculate_file_hash(info.path, "sha256")
+                    except OSError as exc:
+                        logger.warning("Unable to hash %s: %s", info.path, exc)
+
+                for chunk in self.parser.parse_file(str(info.path)):
+                    if self.sqlite_sink:
+                        self.sqlite_sink.write_chunk(chunk)
+                    if self.jsonl_sink:
+                        self.jsonl_sink.write_chunk(chunk)
+
+                if self.sqlite_sink and digest:
+                    try:
+                        self.sqlite_sink.write_manifest(info.path, digest)
+                         self.sqlite_sink.connection.commit()
+                    except OSError as exc:
+                         logger.warning("Unable to update manifest for %s: %s", info.path, exc)
+
+        finally:
+            if self.sqlite_sink:
+                self.sqlite_sink.close()
+            if self.jsonl_sink:
+                self.jsonl_sink.close()
+
+        self.parser.stats.elapsed_seconds = time.monotonic() - started
+        return self.parser.finalize()
+        
+
+# -------- CLI --------
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return number
+    
+    
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Offline local parser for CSV/JSON/JSONL/SQL datasets."
+    )
+    parser.add_argument("--input", required=True, help="Input file or directory")
+    parser.add_argument("--output-db", help="SQLite output database")
+    parser.add_argument("--output-jsonl", help="Normalized JSONL output file")
