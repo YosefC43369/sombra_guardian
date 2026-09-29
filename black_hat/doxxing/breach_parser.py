@@ -581,85 +581,554 @@ class SQLInsertParser:
                 current.append(char)
                 escape = False
                 continue
+                
+            if quote:
+                current.append(char)
+                if char == "\\":
+                    escape = True
+                elif char == quote:
+                    quote = None
+                continue
+                
+            if char in ("'", '"', "`"):
+                quote = char
+                current.append(char)
+                continue
+            if char == "(":
+                depth += 1
+                current.append(char)
+                continue
+            if char == ")":
+                depth = max(0, depth - 1)
+                current.append(char)
+                continue
+            if char == delimiter and depth == 0:
+                parts.append("".join(current).strip())
+                current.clear()
+                continue
+            current.append(char)
+            
+        parts.append("".join(current).strip())
+                 return parts
+                
+# -------- JSON streaming parser --------
+
+class JSONStreamParser:
+    """Stream JSON Lines and ordinary JSON arrays/objects."""
+    
+    def __init__(self, config: ParserConfig) -> None:
+        self.config = config
+    
+    def parse(self, stream: TextIO, logical_format: str) -> Iterator[Any]:
+        if logical_format = "jsonl":
+            yield from self.parse_jsonl(stream)
+            return
+        yield from self.parse_json_document(stream)
+        
+    def parse_jsonl(self, stream: TextIO) -> Iterator[ANY]:
+        line_number = 0
+        for raw_line in stream:
+            line_number = 0
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            try:
+                 yield json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Skipping malformed JSONL record at line %d", line_number)
+                
+    def parse_json_document(self, stream: TextIO) -> Iterator[Any]:
+        decoder = json.JSONDecoder()
+        buffer = ""
+        eof = False
+        
+        while not eof or buffer.strip():
+            if not eof and len(buffer) < 1024 * 1024:
+                chunk = stream.read(256 * 1024)
+                if chunk:
+                    buffer += chunk
+                else:
+                    eof = True
+                    
+            stripped = buffer.lstrip("\ufeff \t\r\n")
+            consumed_prefix = len(buffer) - len(stripped)
+            buffer = stripped
+            if not buffer:
+                if eof:
+                    break
+                continue
+                
+            try:
+                value, end = decoder.raw_decode(buffer)
+            except json.JSONDecodeError:
+                if eof:
+                    # Fallback to one final whole-buffer parse for useful errors.
+                    try:
+                        value = json.loads(buffer)
+                         end = len(buffer)
+                    except json.JSONDecodeError:
+                        logger.warning("Unable to parse JSON document")
+                        break
+                else:
+                     # Need more bytes to complete the document.
+                     chunk = stream.read(256 * 1024)
+                      if chunk:
+                        buffer += chunk
+                        continue
+                      eof = True
+                      continue
+                    
+            buffer = buffer[end:]
+            if isinstance(value, list):
+                if self.config.json_array_key and self.config.json_array_key in value:
+                    nested = value[self.config.json_array_key]
+                    if isinstance(nested, list):
+                        yield from self._iter_json_container(nested)
+                    else:
+                        yield value
+                else:
+                    yield value
+            else:
+                yield value
+                
+    @staticmethod
+    def _iter_json_container(container: Sequence[Any]) -> Iterator[Any]:
+        for item in container:
+            yield item
+            
+
+# -------- CSV / text parser --------
+
+class DelimitedParser:
+    """Parse CSV, TSV, or delimited text."""
+    
+    def __init__(self, config: ParserConfig) -> None:
+        self.config = config
+        
+    def parse(self, stream: TextIO, logical_format: str) -> Iterator[Dict[str, Any]]:
+        delimiter = self._detect_delimiter(stream, logical_format)
+        try:
+            reader = csv.DictReader(
+                stream,
+                delimiter=delimiter,
+                quotechar=self.config.csv_quotechar,
+                restkey="_extra_fields",
+                restval="",
+            )
+            if not reader.fieldnames:
+                return
+                
+            for row in reader:
+                yield dict(row)
+        except csv.Error as exc:
+            raise ParserError(f"CSV parser error: {exc}") from exc
+            
+    def _detect_delimiter(self, stream: TextIO, logical_format: str) -> str:
+        if self.config.csv_delimiter:
+            return self.config.csv_delimiter
+        if logical_format == "tsv":
+            return "\t"
+        if logical_format == "csv":
+            return ","
+            
+        # For generic text, peek from the stream if seekable.
+        try:
+            position = stream.tell()
+            sample = stream.read(8192)
+            stream.seek(position)
+        except (OSError, AttributeError):
+            return ","
+            
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiter=",\t;|")
+            return dialect.delimiter
+        except csv.Error:
+            return ","
+
+
+# -------- Main Parser --------
 
 class BreachParser:
-    def __init__(self, chunk_size: int = 500):
+    """
+    Extended parser pipeline.
+
+    The original public methods are retained where practical:
+        detect_format()
+        open_stream()
+        parse_csv()
+        parse_json()
+        parse_sql()
+        parse_file()
+        process_directory()
+    """
+    
+    SUPPORTED_LOGICAL_FORMATS = {"csv", "tsv", "text", "json", "jsonl", "sql"}
+    SUPPORTED_EXTENSIONS =  {
+        ".txt", ".log", ".csv", ".tsv", ".sql", ".json", ".jsonl", ".ndjson",
+        ".gz", ".bz2", ".xz",
+        ".csv.gz", ".tsv.gz", ".json.gz", ".jsonl.gz", ".sql.gz",
+        ".csv.bz2", ".json.bz2", ".sql.bz2",
+        ".csv.xz", ".json.xz", ".sql.xz",
+    }
+
+    def __init__(self, chunk_size: int = 500, config: Optional[ParserConfig] = None) -> None:
         """
         Initialize the BreachParser.
         :param chunk_size: Number of records to yield before sending to indexer.
         """
-        self.chunk_size = chunk_size
-        self.supported_extensions = ['.txt', '.csv', '.sql', '.json', '.jsonl', '.gz', '.bz2', '.sql.gz']
+        if config is None:
+            config = ParserConfig(chunk_size=chunk_size)
+        elif config.chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+            
+        self.config = config
+        self.stats = ParserStats()
+        self.detector = FormatDetector(config.encoding)
+        self.normalizer = RecordNormalizer(config, self.stats)
+        self.sql_parser = SQLInsertParser(config.sql_case_sensitive)
+        self.json_parser = JSONStreamParser(config)
+        self.delimited_parser = DelimitedParser(config)
+        self._seen_hashes: set[str] = set()
+        self._start_time = time.monotonic()
         
     def detect_format(self, file_path: str) -> str:
         """Detect file format based in extension and content."""
-        ext = os.path.sqlitext(file_path)[1].lower()
-        if ext in ['.sql.gz', '.csv.gz', '.json.gz']:
-            return 'gzipped' + ext.replace('.gz', '')
-        if ext == '.bz2':
-            return 'bzipped'
-        if ext == '.gz':
-            return 'gzipped'
-            
-        # Heuristic check for SQL if extension ambiguous
-        if ext == '.txt' or ext == '.log':
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                sample = f.read(500)
-                if 'INSERT INTO' in sample or 'CREATE TABLE' in sample:
-                    return 'sql'
-        return ext.lstrip('.')
+        logical_format, _codec = self.detector.detect(Path(file_path))
+        return logical_format
         
-    def open_stream(self, file_path: str) -> Any:
+    def open_stream(self, file_path: str) -> TextIO:
         """Open file stream handling compression."""
-        fmt = self.detect_format(file_path)
-        
-        if fmt.startwith('gzipped'):
-            inner_fmt = fmt.replace('gzipped', '')
-            return gzip.open(file_path, 'rt', encoding='utf-8', errors='ignore')
-        elif fmt == 'bzipped':
-            return bz2.open(file_path, 'rt', encoding='utf-8', errors='ignore')
-        else:
-            return open(file_path, 'r', encoding='utf-8', errors='ignore')
+        logical_format, codec = self.detector.detect(Path(file_path))
+        _ = logical_format
+        return self.detector._open_text(Path(file_path), codec)
             
-    def parse_csv(self, stream) -> Generator[Dict[str, Any], None, None]:
+    def parse_csv(self, stream: TextIO) -> Iterator[Dict[str, Any]]:
         """Parse CSV/TSV files."""
-        reader = csv.DictReader(stream)
-        for row in reader:
-            # Normalize keys to lowcase
-            yield {k.strip().lower(): v.strip() for k, v in row.items() if k.strip()}
+        yield from self.delimited_parser.parse(stream, "csv")
             
-    def parse_json(self, stream) -> Generator[Dict[str, Any], None, None]:
+    def parse_json(self, stream: TextIO) -> Iterator[Any]:
         """Parse JSON (array or JSONL)."""
-        content = stream.read()
-        try:
-            data = json.loads(content)
-            if isinstance(data, list):
-                for item in data:
-                    yield item
-            elif isinstance(data, dict):
-                yield data
-        except json.JSONDecodeError:
-            # Try JSONL (newline delimited)
-            for line in content.splitline():
-                if line.strip():
-                    try:
-                        yield json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+        yield from self.json_parser.parse(stream, "json")
                         
-    def parse_sql(self, stream) -> Generator[Dict[str, Any], None, None]:
+    def parse_sql(self, stream: TextIO) -> Iterator[Dict[str, Any]]:
         """
         Simple SQL INSERT parser.
         Assumes format: INSERT INTO table (col1, col2) VALUES ('val1', 'val2');
         """
-        lines = stream.readlines()
-        current_insert = []
-        columns = []
+        yield from self.sql_parser.parse_stream(stream)
         
-        for line in lines:
-            line = line.strip()
-            if line.startswith('INSERT INTO'):
-                # Extract columns
-                cols_part = line.split('(')[1].split(')')[0]
-                columns = [c.strip().strip('"').strip("'").strip('`').lower() for c in cols_part.split(',')]
-                current_insert = []
+    def _check_file(self, path: Path) -> Optional[str]:
+        if not path.exists():
+            return "file does not exist"
+        if not path.is_file():
+            return "path is not a regular file"
+            
+        if self.config.max_file_size is not None:
+            size = path.stat().st_size
+            if size > self.config.max_file_size:
+                return f"file exceeds max_file_size ({size} > {self.config.max_file_size})"
+        return None
+        
+    def _iter_records(self, stream: TextIO, logical_format: str) -> Iterator[Any]:
+        if logical_format in {"csv", "tsv", "text"}:
+            yield from self.delimited_parser.parse(stream, logical_format)
+        elif logical_format in {"json", "jsonl"}:
+            yield from self.json_parser.parse(stream, logical_format)
+        elif logical_format == "sql":
+            yield from self.sql_parser.parse_stream(stream)
+        else:
+            raise UnsupportedFormatError(logical_format)
+            
+    def _prepare_record(self, record: Any, source_file: str, parsed_at: str, ordinal: int) -> Optional[Dict[str, Any]]:
+        normalized = self.normalizer.normalize_record(record)
+        if normalized is None:
+            return None
+            
+        # Compute the content hash before adding parser metadata so that the
+        # same logical record appearing in different files can be deduplicated.
+        content_digest = record_hash(normalized, self.config.hash_algorithm)
+        if self.config.deduplicate:
+            if content_digest in self._seen_hashes:
+                self.stats.records_deduplicated += 1
+                return None
+            self._seen_hashes.add(content_digest)
+            
+        normalized["_source_file"] = source_file
+        normalized["_parsed_at"] = parsed_at
+        normalized["_record_number"] = ordinal
+        normalized["_record_hash"] = content_digest
+        return normalized
+        
+    def parse_file(self, file_path: str) -> Iterator[List[Dict[str, Any]]:
+        """Parse a single file and yield normalized records in chunks."""
+        path = Path(file_path)
+        self.stats.files_seen += 1
+        error = self._check_file(path)
+        if error:
+            logger.warning("Skipping %s: %s", path, error)
+            self.stats.files_skipped += 1
+            return
+            
+        started = time.monotonic()
+        try:
+            logical_format, codec = self.detector.detect(path)
+            self.stats.by_format[logical_format] += 1
+            logger.info("Parsing %s as %s%s", path, logical_format, f" via {codec}" if codec else "")
+            
+            parsed_at = utc_now()
+            ordinal = 0
+            chunk: List[Dict[str, Any]] = []
+            try:
+                self.stats.bytes_read += path.stat().st_size
+            except OSError:
+                pass
+                
+            with self.detector._open_text(path, codec) as stream:
+                for raw_record in self._iter_records(stream, logical_format):
+                    self.stats.records_read += 1
+                    ordinal += 1
+                    if self.config.max_records_per_file and ordinal > self.config.max_records_per_file:
+                        logger.info("Record limit reached for %s", path)
+                        break
+                    
+                    record = self._prepare_record(
+                        raw_record,
+                         source_file=path.name,
+                         parsed_at=parsed_at,
+                         ordinal=ordinal,
+                    )
+                    if record is None:
+                        continue
+                        
+                    self.stats.records_emitted += 1
+                    chunk.append(record)
+                    
+                    if len(chunk) >= self.config.chunk_size:
+                        yield chunk
+                        chunk = []
+                        
+                if chunk:
+                    yield chunk
+                    
+            self.stats.files_parsed += 1
+            logger.info(
+                "Finished %s: %d records read, %d emitted in %.2fs",
+                patch,
+                ordinal,
+                self.stats.records_emitted,
+                time.monotonic() - started,
+            )
+            
+        except (OSError, UnicodeError, ParserError, csv.Error) as exc:
+            self.stats.files_failed += 1
+            self.stats.errors.append(f"{path}: unexpected error: {exc}")
+            logger.exception("Unexpected error parsing %s", path)
+            
+    def process_directory(
+        self,
+        directory: str,
+        recursive: bool = True,
+        include_extensions: Optional[Iterable[str]] = None,
+        exclude_names: Optional[Iterable[str]] = None,
+    ) -> Iterator[List[Dict[str, Any]]]:
+        """Recursively scan a directory and yield chunks from supported files."""
+        root = Patch(directory)
+        if not root.exists() or not root.is_dir():
+            raise NotADirectoryError(directory)
+            
+        include = {ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in (include_extensions or [])}
+        excludes = set(exclude_names or [])
+        
+        iterator = root.rglob("*") if recursive else root.glob("*")
+        for path in sorted(iterator):
+            if not path.is_file():
+                continue
+            if path.name in excludes:
+                continue
+            if include and not self._has_supported_extension(path, include):
+                continue
+            if not include and not self._has_supported_extension(path, self.SUPPORTED_EXTENSIONS):
+                continue
+                
+            yield from self.parse_file(str(path))
+            
+        self.stats.elapsed_seconds = time.monotonic() - self._start_time
+        
+    @staticmethod
+    def _has_supported_extension(path: Path, extensions: Iterable[str]) -> bool:
+        name = path.name.lower()
+        return any(name.endswith(ext.lower()) for ext in extensions)
+        
+    def finalize(self) -> ParseStats:
+        self.stats.elapsed.seconds = time.monotonic() - self._start_time
+        return self.stats
+        
+        
+# -------- SQLite sink --------
+
+class SQLiteSink:
+    """Persist normalized records in a local SQLite database."""
+    
+    def __init__(self, database_path: str, batch_size: int = 1000) -> None:
+        self.database_path = Path(database_path)
+        self.batch_size = max(1, batch_size)
+        self.connection: Optional[sqlite3.Connection] = None
+        self._pending = 0
+        
+    def open(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.database_path)
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self.connection.execute("PRAGMA foreign_keys=ON")
+        self._create_schema()
+        
+    def _create_schema(self) -> None:
+        assert self.connection is not None
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_hash TEXT,
+                source_file TEXT NOT NULL,
+                parsed_at TEXT NOT NULL,
+                record_number INTEGER,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS file_manifest (
+                source_file TEXT PRIMARY KEY,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_records_source_file
+                ON records(source_file);
+
+            CREATE INDEX IF NOT EXISTS idx_records_hash
+                ON records(record_hash);
+            """
+        )
+        self.connection.commit()
+        
+    def write_chunk(self, records: Sequence[Dict[str, Any]]) -> int:
+        if not records:
+            return 0
+        if self.connection is None:
+            raise RuntimeError("SQLiteSink is not open")
+            
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    record.get("_record_hash"),
+                    str(record.get("_source_file", "")),
+                    str(record.get("_parsed_at", "")),
+                    int(record.get("_record_number", 0)),
+                    canonical_json(record),
+                )
+            )
+            
+        self.connection.executemany(
+            """
+            INSERT INTO records (
+                record_hash, source_file, parsed_at, record_number, payload_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._pending += len(rows)
+        
+        if self._pending >= self.batch_size:
+            self.connection.commit()
+            self._pending = 0
+        return len(rows)
+        
+    def write_manifest(self, path: Path, digest: str) -> None:
+        if self.connection is None:
+            raise RuntimeError("SQLiteSink is not open")
+        stat = path.stat()
+        self.connection.execute(
+            """
+            INSERT INTO file_manifest (source_file, size_bytes, sha256, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_file) DO UPDATE SET
+                size_bytes=excluded.size_bytes,
+                sha256=excluded.sha256,
+                last_seen_at=excluded.last_seen_at
+            """,
+            (str(path), stat.st_size, digest, utc_now()),
+        )
+        
+    def close(self) -> None:
+        if self.connection is not None:
+            self.connection.commit()
+            self.connection.close()
+            self.connection = None
+            self._pending = 0
+            
+    def __enter__(self) -> "SQLiteSink":
+        self.open()
+        return self
+        
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+        
+        
+# -------- JSONL sink --------
+
+class JSONLSink:
+    """Write normalized records as line-delimited JSON."""
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = Path(output_path)
+        self.handle: Optional[TextIO] = None
+
+    def open(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.output_path.open("w", encoding="utf-8", newline="\n")
+
+    def write_chunk(self, records: Sequence[Dict[str, Any]]) -> int:
+        if self.handle is None:
+            raise RuntimeError("JSONLSink is not open")
+        for record in records:
+            self.handle.write(canonical_json(record))
+            self.handle.write("\n")
+        self.handle.flush()
+        return len(records)
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
+
+    def __enter__(self) -> "JSONLSink":
+        self.open()
+        return self
+        
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+        
+        
+# -------- File discovery / manifest --------
+
+
+@dataclass
+class FileInfo:
+    path: Path
+    size_bytes: int
+    modified_at: float
+    sha256: Optional[str] = None
+    
+    
+class FileScanner:
+    def __init__(
+        self,
+        extensions: Iterable[str],
+        max_file_size: Optional[int] = None,
+        excluded_paths: Optional[Iterable[Path]] = None,
+    ) -> None:
+        self.
