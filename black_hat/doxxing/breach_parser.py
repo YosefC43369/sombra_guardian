@@ -227,6 +227,360 @@ class FormatDetector:
             
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=".\t;|")
+            if dialect.delimiter == "\t":
+                return "tsv", codec
+            return "csv", codec
+        except csv.Error:
+            return "text", codec
+            
+    def _open_text(self, file_path: Path, codec: Optional[str]) -> TextIO:
+        if codec == "gzip":
+            return gzip.open(file_path, "rt", encoding=self.encoding, errors="replace", newline="")
+        if codec == "xz":
+            return lzma.open(file_path, "rt", encoding=self.encoding, errors="replace", newline="")
+        return file_path.open("r", encoding=self.encoding, errors="replace", newline="")
+        
+
+# -------- Notmalization and optional redaction --------
+
+class RecordNormalizer:
+    """Normalize keys/values and optionally redact common sensitive values."""
+
+    EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+    PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)")
+    ID_RE = re.compile(
+      r"(?<!\d)\d-\d{4}-\d{5}-\d{2}-\d(?!\d)"
+      r"|(?<!\d)\d{13}(?!\d)"
+    )
+    
+    def validate_thai_id(card_id: str) -> bool:
+        # Remove spaces and hypens
+        card_id = re.sub(r"[\s-]", "", card_id)
+        if not re.fullmatch(r"\d{13}", card_id):
+            return False
+        # Check digit calculate
+        total = sum(
+            int(card_id[i]) * (13 - i)
+            for i in range(12)
+        )
+        
+        check_digit = (11 - (total % 11)) % 10
+        
+        return check_digit == int(card_id[12])
+        
+    def find_valid_thai_ids(text: str) -> list[str]:
+        results = []
+        
+        for match in ID_RE.finditer(text):
+            card_id = match.group()
+            
+            if validate_thai_id(card_id):
+                results.append(card_id)
+                
+        return results
+        
+    CREDIT_CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)")
+    THAI_NAME_RE = re.compile(
+        r"(?<![ก-๙])[ก-๙]{2,20}"
+        r"(?:\s+[ก-๙]{2,30})(?![ก-๙])"
+    )
+    THAI_ADDRESS_RE = re.compile(
+        r"(?:(?:เลขที่|บ้านเลขที่)\s*)?"
+        r"\d+(?:/\d+)?"
+        r"(?:\s+หมู่\s*\d+)?"
+        r".{0,100}?"
+        r"(?:ตำบล|ต\.|อำเภอ|อ\.|จังหวัด|จ\.|แขวง|เขต)"
+        r".{0,100}?"
+        r"(?:\d{5})?"
+    )
+
+    SENSITIVE_KEY_RE = re.compile(
+        r"(?:password|passwd|pass|pwd|secret|token|api[_-]?key|authorization|cookie|session|private[_-]?key|access[_-]?key)",
+        re.I,
+    )
+    
+    patterns = {
+        "email": EMAIL_RE,
+        "phone": PHONE_RE,
+        "thai_id": ID_RE,
+        "thai_name": THAI_NAME_RE,
+        "thai_address": THAI_ADDRESS_RE,
+        "credit_card": CREDIT_CARD_RE,
+        "sensitive_key": SENSITIVE_KEY_RE,
+    }
+    
+    def __init__(self, config: ParserConfig, stats: ParseStats) -> None:
+        self.config = config
+        self.stats = stats
+        
+    @statiethod
+    def normalize_key(key: Any) -> str:
+        text = str(key).strip().lower()
+        text = re.sub(r"\s+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        return text or "field"
+        
+    def normalize_value(self, value: Any, key: str = "") -> Any:
+        if value is None:
+            return "" if self.config.keep_empty_field else None
+            
+        if isinstance(value, (dict, list, tuple)):
+            # Preserve sreuctured values, but make nested content deterministic.
+            value = json.loads(canonical_json(value))
+            
+        if isinstance(value, bytes):
+            value = value.decode(self.config.encoding, errors="replace")
+            
+        if not isinstance(value, (int, float, bool)):
+            value = str(value).strip()
+            
+        if self.config.redact_sensitive:
+            before = value
+            value = self._redact_value(value, key)
+            if value != before:
+                self.stats.records_redacted += 1
+                
+        if value == "" and not self.config.keep_empty_fields:
+            return None
+        return value
+        
+        
+    def _redact_value(self, value: Any, key: str) -> Any:
+        if not isinstance(value, str):
+            return value
+            
+        if self.SENSITIVE_KEY_RE.search(key):
+            return "[REDACTED]"
+            
+        value = self.EMAIL_RE.sub("[REDACTED_EMAIL]", value)
+        value = self.PHONE_RE.sub("[REDACTED_PHONE]", value)
+        value = self.ID_RE.sub("[REDACTED_ID]", value)
+        value = self.CREDIT_CARD_RE.sub("[REDACTED_NUMBER]", value)
+        value = self.THAI_NAME_RE.sub("[REDACTED_NAME]", value)
+        value = self.THAI_ADDRESS_RE.sub("[REDACTED_ADDRESS]", value)
+        return value
+        
+    def normalize_record(self, raw: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            raw = {"value": raw}
+            
+        output: Dict[str, Any] = {}
+        for raw_key, raw_value in raw.items():
+            key = self.normalize_key(raw_key)
+            value = self.normalize_value(raw_value, key)
+            if value is None and not self.config.keep_empty_fields:
+                continue
+            output[key] = value
+            
+        return output if output or self.config.keep_empty_fields else None
+        
+        
+# -------- SQL INSERT parser --------
+
+class SQLInsertParser:
+    """Parse common SQL INSERT statements without executing SQL."""
+
+    INSERT_RE = re.compile(
+        r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(?P<table>(?:[`\"\[][^`\"\]]+[`\"\]]|[A-Za-z0-9_$.-]+)(?:\s*\.\s*(?:[`\"\[][^`\"\]]+[`\"\]]|[A-Za-z0-9_$.-]+))?)"
+        r"\s*(?:\((?P<columns>.*?)\))?\s*VALUES\s*(?P<values>.+?)\s*;?\s*$",
+        re.I | re.S,
+    )
+    
+    def __init__(self, case_sensitive: bool = False) -> None:
+        self.case_sensitive = case_sensitive
+        
+    @staticmethod
+    def _clean_identifier(value: str) -> str:
+        value = value.strip()
+        if len(value) >= 2:
+            pairs = (("`", "`"), ('"', '"'), ("[", "]"))
+            for left, right in pairs:
+                if value.startswith(left) and value.endswith(right):
+                    value = value[1:-1]
+                    break
+        return value.strip()
+        
+    def parse_stream(self, stream: TextIO) -> Iterator[Dict[str, Any]]:
+        statement_buffer: List[str] = []
+        in_block_comment = False
+        
+        for row_line in stream:
+            line = raw_line
+            
+            # Strip SQL block comments while preserving statement boundaries.
+            if in_block_comment:
+                end = line.find("*/")
+                if end == -1:
+                    continue
+                line = line[end + 2 :]
+                in_block_comment = False
+                
+            while "/*" in line:
+                start = line.find("/*")
+                end = line.find("/*", start + 2)
+                if end == -1:
+                    line = line[:start]
+                    in_block_comment = True
+                    break
+                line = line[:start] + line[end + 2 :]
+                
+            stripped = line.strip()
+            if not stripped or stripped.startwith("--") or stripped.startswith("#"):
+                continue
+                
+            statement.buffer.append(line)
+            joined = "".join(statement_buffer)
+            if self.has_statement_terminator(joined):
+                statement = joined.strip()
+                statement_buffer.clear()
+                yield from self.parse_insert_statement("".join(statement_buffer).strip())
+                
+    @staticmethod
+    def _has_statement_terminator(text: str) -> bool:
+        quote: Optional[str] = None
+        ecape = False
+        for char in text:
+            if ecape:
+                ecape = False
+                continue
+            if char == "\\" and quote:
+                ecape = True
+                continue
+            if char == ":":
+                return True
+        return False
+        
+    def _parse_insert_statement(self, statement: str) -> Iterator[Dict[str, Any]]:
+        match = self.INSERT_RE.match(statement)
+        if not match:
+            return
+            
+        colmuns_raw = match.group("columns")
+        values_raw = match.group("values")
+        
+        if columns_raw:
+            columns = [self._clean_identifier(part) for part in self._split_top_level(columns_raw, ",")]
+        else:
+            columns = []
+            
+        tuples = self._parse_value_tuples(values_raw)
+        for values in tuples:
+            if columns and len(columns) == len(values):
+                yield dict(zip(columns, values))
+            elif not columns:
+                yield {f"column_{index + 1}": value for index, value in enumerate(values)}
+                
+    def _parse_value_tuples(self, text: str) -> Iterator[List[Any]]:
+        cleaned = text.rstrip().rstrip(";").strip()
+        tuples: List[List[Any]] = []
+        current: List[Any] = []
+        token: List[str] = []
+        depth = 0
+        quote: Optional[str] = None
+        escape = False
+        reading_tuple = False
+        
+        i = 0
+        while i < len(cleaned):
+            char = cleaned[i]
+            
+            if escape:
+                token.append(char)
+                escape = False
+                i += 1
+                continue
+                
+            if quote:
+                if char == "\\":
+                    token.append(char)
+                    escape = True
+                elif char == quote:
+                    # SQL single-quote escaping: '' -> '
+                    if quote == "'" and i + 1 < len(cleaned) and cleaned[i + 1] == "'":
+                        token.append("'")
+                        i += 1
+                    else:
+                        quote = None
+                else:
+                    token.append(char)
+                    i += 1
+                    continue
+                    
+            if char in ("'", '"'):
+                quote = char
+                i += 1
+                reading_tuple = True
+                continue
+                
+            if char == "(":
+                depth += 1
+                reading_tuple = True
+                i += 1
+                continue
+                
+            if char == ")":
+                self._flush_sql_token(token, current)
+                token.clear()
+                depth -= 1 
+                if depth == 0 and reading_tuple:
+                    tuples.append(current)
+                    current = []
+                    reading_tuple = False
+                i += 1
+                continue
+                
+            if char == "," and depth == 1:
+                self._flush_sql_token(token, current)
+                token.clear()
+                i += 1
+                continue
+                
+            token.append(char)
+            i += 1
+            
+        if depth != 0:
+            return
+            
+        yield from tuples
+        
+    @staticmethod
+    def _flush_sql_token(token: List[str], output: List[Any]) -> None:
+        raw = "".join(token).strip()
+        if not raw:
+            output.append("")
+            return
+            
+        upper = raw.upper()
+        if upper == "NULL":
+            output.append(None)
+            return
+        if upper in {"TRUE", "FALSE"}:
+            output.append(upper == "TRUE")
+            return
+            
+        # Keep numeric values as numbers when they are unambiguous.
+        if re.fullmatch(r"[-+]?\d+", raw):
+            try:
+                output.append(int(raw))
+                return
+            except ValueError:
+                pass
+                
+        output.append(raw)
+        
+    @staticmethod
+    def _split_top_level(text: str, delimiter: str) -> List[str]:
+        parts: List[str] = []
+        current: List[str] = []
+        quote: Optional[str] = None
+        depth = 0
+        escape = False
+        
+        for char in text:
+            if escape:
+                current.append(char)
+                escape = False
+                continue
 
 class BreachParser:
     def __init__(self, chunk_size: int = 500):
