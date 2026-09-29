@@ -75,6 +75,7 @@ from github_repo import (
     list_repository_files, list_repositories_for_chat, cleanup_workspace,
     sweep_expired_repositories,
 )
+import repo_intel
 
 import coordinator
 
@@ -4255,7 +4256,60 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await update.message.reply_text("❌ subcommand ไม่ถูกต้อง (clone/status/files/cleanup/list)")
-        
+
+
+async def cmd_analyzerepo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/analyzerepo <repository_id> — วิเคราะห์ repo ที่ clone ไว้: ระบุว่ามันทำงาน
+    อย่างไร "รันจริงในแซนด์บ็อกซ์" เพื่อดูว่าปัจจุบันยังใช้งานได้ไหม แล้วให้ AI สรุป
+    เป็นภาษาเข้าใจง่าย พร้อมวิเคราะห์เชิงลึก (ช่องโหว่/ห่วงโซ่อุปทาน/OpSec/ความเก่า)
+
+    กฎเหล็ก: คำตัดสินใช้งานได้/ไม่ได้มาจากผลรันจริงเท่านั้น ไม่มีการแต่งผล
+    Admin เท่านั้น (แนวเดียวกับ /github clone)
+    """
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ /analyzerepo ใช้ได้เฉพาะ Admin")
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        return await update.message.reply_text(
+            "ใช้งาน: /analyzerepo <repository_id>\n"
+            "(ดูรหัสได้จาก /github list — ต้อง /github clone <url> ก่อน)")
+    repository_id = int(args[0])
+    info = get_repository_info(repository_id)
+    if not info:
+        return await update.message.reply_text("❌ ไม่พบ Repository นี้ — /github clone ก่อน")
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)")
+
+    write_audit_log(chat_id, user_id, actor="admin", action="REPO_ANALYZE",
+                    detail=f"repository_id={repository_id}")
+    status_msg = None
+    try:
+        status_msg = await update.message.reply_text(
+            f"👾 กำลังวิเคราะห์ + รันทดสอบ {info['owner']}/{info['name']} "
+            "ในแซนด์บ็อกซ์ … (อาจใช้เวลาสักครู่ตามชุดเทส)")
+    except TelegramError:
+        pass
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    try:
+        report = await repo_intel.analyze(repository_id, user_id)
+    except Exception:
+        logger.exception("REPO ANALYZE ERROR repository_id=%s", repository_id)
+        if status_msg is not None:
+            await safe_delete(status_msg, chat_id, context)
+        return await update.message.reply_text(
+            "⚠️ วิเคราะห์ไม่สำเร็จ (เกิดข้อผิดพลาดภายใน) ลองใหม่อีกครั้ง")
+
+    if status_msg is not None:
+        await safe_delete(status_msg, chat_id, context)
+    await _reply_chunked(update, repo_intel.render(report))
+
+
 async def github_sweep_loop():
     """Background polling loop mirroring news_background_loop()'s
     existing pattern. Makes github_repo.py's DEFAULT_REPOSITORY_TTL_SECONDS
@@ -6607,6 +6661,7 @@ def main():
     app.add_handler(CommandHandler("memberpatterns", cmd_memberpatterns))
     app.add_handler(CommandHandler("memberpurge", cmd_memberpurge))
     app.add_handler(CommandHandler("github", cmd_github))
+    app.add_handler(CommandHandler("analyzerepo", cmd_analyzerepo))
     app.add_handler(CommandHandler("sign", cmd_sign))
     app.add_handler(CommandHandler("debt", cmd_debt))
     app.add_handler(CommandHandler("debt_summary", cmd_debt_summary))

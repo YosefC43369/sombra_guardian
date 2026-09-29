@@ -28,6 +28,8 @@ from .sources.rdap import RdapSource
 from .sources.site_tech import SiteTechSource
 from .sources.hibp import HibpSource
 from .sources.google_dork import GoogleDorkSource
+from .sources.subfinder import SubfinderSource
+from .sources.social import SocialSource, normalize_handle
 from .utils import validators
 from .utils.async_http import AsyncHTTPClient, HAVE_HTTPX
 from . import profile as profile_mod
@@ -37,19 +39,24 @@ logger = logging.getLogger("modbot.osint.collector")
 
 
 def detect_kind(target: str) -> Optional[str]:
-    """คืน 'ip' หรือ 'domain' ตามรูปแบบ target — None ถ้าไม่ใช่ทั้งคู่"""
+    """คืน 'ip' | 'domain' | 'username' ตามรูปแบบ target — None ถ้าไม่เข้าเลย
+    ตรวจ ip/domain ก่อน แล้วค่อย username (เช่น @handle) เพื่อไม่ให้โดเมนถูกจับเป็น handle"""
     if validators.normalize_ip(target) is not None:
         return "ip"
     if validators.normalize_domain(target) is not None:
         return "domain"
+    if normalize_handle(target) is not None:
+        return "username"
     return None
 
 
 def default_sources(kind: str) -> List[Source]:
     """ชุดแหล่งมาตรฐานต่อชนิดเป้าหมาย — ทั้งหมดเป็นการอ่านข้อมูลสาธารณะล้วน"""
     if kind == "domain":
-        return [CrtShSource(), DnsRecordsSource(), RdapSource(),
+        return [CrtShSource(), SubfinderSource(), DnsRecordsSource(), RdapSource(),
                 SiteTechSource(), HibpSource(), GoogleDorkSource()]
+    if kind == "username":
+        return [SocialSource()]
     if kind == "ip":
         rdap = RdapSource()
         rdap.kind = "ip"           # RdapSource.fetch รองรับ ip อยู่แล้ว
