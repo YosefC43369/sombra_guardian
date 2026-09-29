@@ -31,7 +31,7 @@ import asyncio
 import logging
 import search
 import scrape
-import osint
+import osint_core as osint
 import username_osint
 from dataclasses import dataclass
 from typing import Optional, List, Tuple

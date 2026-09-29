@@ -10,7 +10,7 @@ sys.path.insert(0, _ROOT)
 os.chdir(_ROOT)
 logging.basicConfig(level=logging.ERROR)
 
-import osint
+import osint_core as osint
 import osint_db
 import osint_es
 import search_es
