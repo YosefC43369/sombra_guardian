@@ -20,7 +20,7 @@ import os
 import logging
 from typing import Dict, List, Optional
 
-import osint
+import osint_core as osint
 
 logger = logging.getLogger("modbot.osint_es")
 

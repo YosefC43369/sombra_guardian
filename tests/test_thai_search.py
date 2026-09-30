@@ -14,7 +14,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.chdir(_ROOT)
 
-import osint
+import osint_core as osint
 
 PASS, FAIL = [], []
 def check(n, c, d=""):

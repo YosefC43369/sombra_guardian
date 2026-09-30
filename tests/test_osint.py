@@ -5,7 +5,7 @@ sys.path.insert(0, _ROOT)
 os.chdir(_ROOT)
 logging.basicConfig(level=logging.WARNING)
 
-import osint
+import osint_core as osint
 
 PASS, FAIL = [], []
 def check(n, c, d=""):

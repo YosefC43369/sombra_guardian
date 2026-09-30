@@ -8,7 +8,8 @@ logging.basicConfig(level=logging.CRITICAL)
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from bs4 import BeautifulSoup
 
-import osint, search, scrape, coordinator, nethealth
+import osint_core as osint
+import search, scrape, coordinator, nethealth
 
 PASS, FAIL = [], []
 def check(n, c, d=""):

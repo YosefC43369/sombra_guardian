@@ -382,7 +382,11 @@ def _existing_commands(application) -> set:
     an existing command (e.g. the member-incident /timeline)."""
     found: set = set()
     try:
-        for group in getattr(application, "handlers", {}).values():
+        handlers = getattr(application, "handlers", {})
+        # PTB stores handlers as {group: [handler, ...]}; some harnesses/mocks use
+        # a flat list. Support both so collision-safety never silently no-ops.
+        groups = handlers.values() if hasattr(handlers, "values") else [handlers]
+        for group in groups:
             for h in group:
                 cmds = getattr(h, "commands", None)
                 if cmds:

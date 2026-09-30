@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
-import osint
+import osint_core as osint
 
 logger = logging.getLogger("modbot.osint_db")
 

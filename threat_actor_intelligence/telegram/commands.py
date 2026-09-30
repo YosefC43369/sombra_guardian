@@ -316,11 +316,15 @@ def register(application, *, service: Optional[TAICommandService] = None) -> int
         _service_singleton = service
     existing = set()
     try:  # pragma: no cover
-        for group in application.handlers.values():
+        handlers = getattr(application, "handlers", {})
+        # PTB uses {group: [handler, ...]}; tolerate a flat list too so the
+        # collision check never silently no-ops and double-registers a command.
+        groups = handlers.values() if hasattr(handlers, "values") else [handlers]
+        for group in groups:
             for h in group:
                 cmds = getattr(h, "commands", None)
                 if cmds:
-                    existing.update(cmds)
+                    existing.update(str(c) for c in cmds)
     except Exception:  # pragma: no cover
         pass
     n = 0
