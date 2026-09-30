@@ -1,0 +1,71 @@
+{
+  "code": "discovery-baseline",
+  "name": "Discovery Baseline",
+  "description": "A baseline host- and network-discovery chain. Used to validate that the environment produces the expected discovery telemetry and that detections fire. Emulation-only: each step is a record plus synthetic telemetry, nothing is executed.",
+  "risk_level": "LOW",
+  "framework": "MITRE_ATTACK",
+  "source": "builtin",
+  "tags": ["discovery", "baseline", "coverage"],
+  "steps": [
+    {
+      "order": 1,
+      "technique_id": "T1082",
+      "tactic": "discovery",
+      "name": "System Information Discovery",
+      "description": "Query basic host information (OS, architecture, hostname).",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "SYSTEM_QUERY"],
+        "expected_rules": ["BT-SIM-001"],
+        "data_sources": ["Process", "Command"]
+      }
+    },
+    {
+      "order": 2,
+      "technique_id": "T1016",
+      "tactic": "discovery",
+      "name": "System Network Configuration Discovery",
+      "description": "Enumerate network interfaces and configuration.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "SYSTEM_QUERY"],
+        "expected_rules": ["BT-SIM-002"],
+        "data_sources": ["Process", "Command"]
+      }
+    },
+    {
+      "order": 3,
+      "technique_id": "T1049",
+      "tactic": "discovery",
+      "name": "System Network Connections Discovery",
+      "description": "List active network connections.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "NETWORK_CONNECTION"],
+        "expected_rules": ["BT-SIM-003"],
+        "data_sources": ["Process", "Network Traffic"]
+      }
+    },
+    {
+      "order": 4,
+      "technique_id": "T1057",
+      "tactic": "discovery",
+      "name": "Process Discovery",
+      "description": "Enumerate running processes.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "SYSTEM_QUERY"],
+        "expected_rules": ["BT-SIM-004"],
+        "data_sources": ["Process"]
+      }
+    },
+    {
+      "order": 5,
+      "technique_id": "T1083",
+      "tactic": "discovery",
+      "name": "File and Directory Discovery",
+      "description": "Enumerate files and directories of interest.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "FILE_ACCESS"],
+        "expected_rules": ["BT-SIM-005"],
+        "data_sources": ["Process", "File"]
+      }
+    }
+  ]
+}

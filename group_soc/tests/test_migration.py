@@ -32,7 +32,8 @@ def test_migration_creates_indexes(db_path):
 
 def test_runner_reaches_0006_and_verifies(db_path):
     runner = migrations.MigrationRunner(db_path)
-    assert runner.current() == "0006"
+    # 0006 must be applied; it need not be the newest (later modules add migrations)
+    assert runner.current() >= "0006"
     assert runner.verify() == []
 
 
