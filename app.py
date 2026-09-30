@@ -56,6 +56,11 @@ from osint import collector as osint_collector
 from osint import case_report as osint_case_report
 from analytics import analytics_db_init, record_message_activity, get_group_summary
 from news import news_db_init, run_news_check_cycle, news_background_loop
+# CVE Intelligence & Tracking subsystem (cve_tracker/). Dormant unless
+# CVE_TRACKER_ENABLED=true. The background loop mirrors news_background_loop and
+# is started in post_init below; commands are contributed via the plugin
+# plugins/builtin/cve_tracker_suite.py, and schema via migrations/m0008.
+from cve_tracker.engine import cve_background_loop, get_tracker, stop_tracker
 from scope_policy import (
     scope_policy_db_init, ProgramStatus,
     create_program, get_program, list_programs, set_program_status,
@@ -6347,9 +6352,20 @@ async def post_init(app):
             _start_background_task(app, "c2_task", lambda: C2_SERVER.start_listening())
         except Exception:
             logger.exception("C2: could not start listener (bot continues)")
+    # CVE Intelligence loop — same create_task/cancel lifecycle as news_task.
+    # get_tracker() returns the process-wide singleton the plugin's commands
+    # also use, so /cve_status etc. reflect this loop. cve_background_loop is
+    # a no-op when CVE_TRACKER_ENABLED is off, so this is always safe to start.
+    _start_background_task(app, "cve_task", lambda: cve_background_loop(app.bot))
 
 async def post_shutdown(app):
-    for key in ("news_task", "github_sweep_task", "c2_task"):
+    # Ask the CVE scheduler to stop cooperatively before its task is cancelled,
+    # so it persists checkpoints and drains cleanly (best-effort).
+    try:
+        await stop_tracker()
+    except Exception:
+        logger.exception("CVE: graceful stop failed (continuing shutdown)")
+    for key in ("news_task", "github_sweep_task", "c2_task", "cve_task"):
         task = app.bot_data.get(key)
         if not task:
             continue
@@ -6717,6 +6733,19 @@ def main():
             sg_platform.register_handlers(app, PLATFORM, is_admin)
         except Exception:
             logger.exception("PLATFORM: handler registration failed (core bot unaffected)")
+
+    # CVE Intelligence: the /cve* commands are contributed by the plugin above;
+    # only the inline-pagination callback (^cvepg:) needs a CallbackQueryHandler,
+    # which the plugin layer cannot register. It shares the tracker singleton's
+    # command service so pagination tokens from /cve_search resolve here.
+    # Fully isolated: a failure never blocks the core bot handlers.
+    try:
+        from telegram.ext import CallbackQueryHandler as _CQH
+        from cve_tracker.telegram.handlers import CVEHandlers as _CVEHandlers
+        _cve_cb = _CVEHandlers(get_tracker().command_service)
+        app.add_handler(_CQH(_cve_cb.on_callback, pattern=r"^cvepg:"))
+    except Exception:
+        logger.exception("CVE: pagination callback registration failed (core bot unaffected)")
 
     app.add_error_handler(error_handler)
 
