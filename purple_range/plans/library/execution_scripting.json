@@ -1,0 +1,47 @@
+{
+  "code": "execution-scripting",
+  "name": "Execution & Scripting Coverage",
+  "description": "Validate detection coverage for command/script interpreter execution and scheduled-task-based execution. Emulation-only: synthetic telemetry drives the tuning cycle.",
+  "risk_level": "MEDIUM",
+  "framework": "MITRE_ATTACK",
+  "source": "builtin",
+  "tags": ["execution", "scripting", "coverage"],
+  "steps": [
+    {
+      "order": 1,
+      "technique_id": "T1059",
+      "tactic": "execution",
+      "name": "Command and Scripting Interpreter",
+      "description": "Generic interpreter execution (shell/cmd).",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE"],
+        "expected_rules": ["BT-SIM-010"],
+        "data_sources": ["Process", "Command"]
+      }
+    },
+    {
+      "order": 2,
+      "technique_id": "T1059.001",
+      "tactic": "execution",
+      "name": "PowerShell",
+      "description": "PowerShell interpreter execution with script block logging expected.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "SYSTEM_QUERY"],
+        "expected_rules": ["BT-SIM-011"],
+        "data_sources": ["Process", "Script"]
+      }
+    },
+    {
+      "order": 3,
+      "technique_id": "T1053.005",
+      "tactic": "execution",
+      "name": "Scheduled Task",
+      "description": "Execution via a scheduled task.",
+      "expectation": {
+        "expected_telemetry": ["PROCESS_CREATE", "SCHEDULED_TASK_EVENT"],
+        "expected_rules": ["BT-SIM-012"],
+        "data_sources": ["Scheduled Job", "Process"]
+      }
+    }
+  ]
+}
