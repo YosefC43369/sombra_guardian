@@ -11,6 +11,8 @@ import hashlib
 from datetime import datetime
 import struct
 import zlib
+import win32com.client
+import pythoncom
 
 # Ensure the necessary library is available
 try:
@@ -26,6 +28,93 @@ DEFAULT_PORT = 4444
 BUFFER_SIZE = 4096
 SOCKET_TIMEOUT = 10
 
+
+class SystemManager:
+    def __init__(self, comm_header):
+        self.comm = comm_header
+        # Initialize COM for Defender interactions
+        pythoncom.CoInitialize()
+        
+    def __del__(self):
+        pythoncom.CoUninitialize()
+        
+    def _get_defender_controller(self):
+        """
+        Creates the WMI connection object for Windows Defender.
+        """
+        try:
+            # Connect to the Windows Security Center namespace
+            swbemServices = win32com.client.GetObject("winmgmts:\\\\.\\root\\Microsoft\\Windows\\Defender")
+            return swbemServices.ExecQuery("Select * FROM MSFT_MyComputerStatus")[0]
+        except Exception as e:
+            print(f"[DEFENDER] Error accessing Defender: {e}")
+            return None
+            
+    def scan_system(self, scan_type="Full"):
+        """
+        Initiates a system scan.
+        scan_type: 'Full', 'Quick', or 'Custom'
+        """
+        print(f"[DEFENDER] Starting {scan_type} scan...")
+        
+        try:
+            # Create the scan job object
+            swbemServices = win32com.client.GetObject("winmgmts:\\\\.\\root\\Microsoft\\Windows\\Defender")
+            scanJob = swbemServices.Get("MSFT_MpScan")
+            
+            # Configure scan parameters
+            scanJob.Type = 1 if scan_type == "Full" else 0 # 1 = Full, 0 = Quick
+            scanJob.RebootNeeded = 0
+            
+            # Start the scan
+            scanJob.StartScan()
+            print(f"[DEFENDER] Scan started successfully.")
+            return {"status": "started", "scan_id": scanJob.Id}
+            
+        except Exception as e:
+            print(f"[DEFENDER] Failed to start scan: {e}")
+            return {"status": "failed", "error": str(e)}
+            
+    def check_protection_status(self):
+        """
+        Queries the cirrent real-time protection status.
+        Return the state of Windows Defender (e.g., 'enabled', 'disabled').
+        """
+        try:
+            status = self._get_defender_controller()
+            if status:
+                # Attributes very slightly by Windows version, but 'RealTimeProtectionEnabled' is standard
+                is_enabled = getattr(status, 'RealTimeProtectionEnabled', False)
+                return {"status": "enabled" if is_enabled else "disabled"}
+            else:
+                return {"status": "error"}
+        except Exception as e:
+            print(f"[DEFENDER] Check status error: {e}")
+            return {"status": "error"}
+            
+    def query_threats(self):
+        """
+        Retrieves a list of all identified threats on the system.
+        This identifies malware, worm, spyware, and Trojans.
+        """
+        try:
+            # Create the Threats collection
+            swbemServices = win32com.client.GetObject("winmgmts:\\\\.\\root\\Microsoft\\Windows\\Defender")
+            colThreats = swbemServices = swbemServices.ExecQuery("Slect * FROM MSFT_MpThreat")
+            
+            threat_list = []
+            for threat in colThreats:
+                threat_info = {
+                    "ThreatID": threat.ID,
+                    "Name": threat.DisplayName,
+                    "Severity": threat.Severity,
+                    "FilePath": threat.Files[0].Path if threat.Files else "N/A",
+                    "ThreatCategory": threat.ThreatCategory
+                }
+                threat_list.append(threat_info)
+                
+            # Filter results for the user's requested categories
+        
 
 class CommunicationHandler:
     """
