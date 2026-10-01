@@ -56,3 +56,36 @@ def last_findings(message):
         
     if not os.path.exists(SCAN_RESULT_FILE):
         bot.reply_to(message, "No encrypted scan results stored.")
+        return
+        
+    try:
+        results = load_encrypted()
+        findings = results.get(findings", {})
+        
+        text = (
+            f"Scan date: {results.get('scan_date')}\n"
+            f"Processes: {findings.get('processes', [])}\n"
+            f"Registry: {findings.get('registry', [])}\n"
+            f"Tasks: {findings.get('tasks', []}\n"
+        )
+        
+        bot.reply_to(message, text[:3500])
+    except Exception:
+        bot.reply_to(message, "Could not read encrypted findings.")
+        
+        
+def main():
+    if not ADMIN_IDS:
+        print("Refusing to start: TELEGRAM_ADMIN_IDS is empty.")
+        return
+        
+    if not os.environ.get("IR_FERENT_KEY"):
+        print("Missing IR_FERENT_KEY. Generate one:")
+        print("python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'")
+        return
+        
+    bot.polling()
+    
+    
+if __name__ == "__main__":
+    main()
