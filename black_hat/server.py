@@ -44,7 +44,7 @@ def send_command_to_clients(command: str):
             clients.remove(client)
             
 
-if "__name__" == "main":
+if __name__ == "main":
     server_thread = threading.Thread(target=start_server)
     server_thread.start()
     
