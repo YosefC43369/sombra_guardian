@@ -31,5 +31,5 @@ def execute_command(command: str) -> str:
     return "Command executed: " + command
     
 
-if "__name__" == "__main__":
+if __name__ == "__main__":
     connect_to_server()
