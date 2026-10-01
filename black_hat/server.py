@@ -20,7 +20,7 @@ def handle_client(client_socket):
             break
             
     client_socket.close()
-    client.remove(client_socket)
+    clients.remove(client_socket)
     
     
 def start_server():
