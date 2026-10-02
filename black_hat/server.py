@@ -422,7 +422,51 @@ class ClientRegistry:
             self._records[client_id] = record
             self._socket_to_id[id(socket)] = client_id
         return record
-
+        
+    def get(self, client_id: str) -> Optional[ClientRecord]:
+        with self._lock:
+            return self._records.get(client_id)
+            
+    def get_by_socket(self, sock: socket.socket) -> Optional[ClientRecord]:
+        with self._lock:
+            client_id = self._socket_to_id.get(id(sock))
+            return self._records.get(client_id) if client_id else None
+            
+    def remove(self, client_id: str) -> Optional[ClientRecord]:
+        with self._lock:
+            record = self._records.pop(client_id, None)
+            if record is not None:
+                self._socket_to_id.pop(id(record.socket_obj), None)
+                record.state = ClientState.DISCONNECTED
+            return record
+    
+    def all(self) -> List[ClientRecord]:
+        with self._lock:
+            return list(self._records.values())
+            
+    def snapshot(self) -> List[Dict[str, Any]]:
+        return [record.snapshot() for record in self.all()]
+        
+    def count(self) -> int:
+        with self._lock:
+            return len(self._records)
+            
+    def tag(self, client_id: str, *tags: str) -> bool:
+        record = self.get(client_id)
+        if record is None:
+            return False
+        with record.lock:
+            record.tags.update(str(tag).strip() for tag in tags if str(tag).strip())
+        return True
+        
+    def untag(self, client_id: str, *tags: str) -> bool:
+        record = self.get(client_id)
+        if record is None:
+            return False
+        with record.lock:
+            for tag in tags:
+                record.tags.discard(str(tag).strip())
+        return True
 
 if __name__ == "__main__":
     configure_logging()
