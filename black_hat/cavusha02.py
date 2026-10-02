@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import csv
+import fnmatch
 import getpass
 import hashlib
 import ipaddress
@@ -15,14 +16,20 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import socket
 import threading
+import random
 import time
 import json
 import os
+import re
 import sys
 import platform
 import subprocess
+import tempfile
+import stat
 import psutil
+import shutil
 import hashlib
+from pathlib import Path
 from datetime import datetime
 import struct
 import zlib
@@ -569,7 +576,7 @@ class OperationCore:
             self.comm.send_data(result, "status")
             
         elif command_str == "get_threats":
-            threats = self.sys_mgr.query_thread()
+            threats = self.sys_mgr.query_threats()
             self.comm.send_data(threats, "status")
             if threats['total_threats'] > 0:
                 # Automatically attempt to remove the first found threat
@@ -810,3 +817,92 @@ def _bt_atomic_write(path: str, value: Any) -> None:
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
+            
+            
+@dataclass
+class BlueTeamConfig:
+    allowed_roots: list[str] = field(default_factory=list)
+    quarantine_dir: str = field(
+        default_factory=lambda: os.path.join(os.path.expanduser("~"), "BlueTeamQuarantinr")
+    )
+    state_file: str = field(
+        default_factory=lambda: os.path.join(os.path.expanduser("~"), "blue_team_audit.jsonl")
+    )
+    ioc_file: str = ""
+    scan_workers: int = BLUE_TEAM_DEFAULT_SCAN_WORKERS
+    max_file_size: int = BLUE_TEAM_MAX_FILE_SIZE
+    entropy_threshold: float = 7.2
+    suspicious_score_threshold: int = 35
+    critical_score_threshold: int = 80
+    telegram_allowed_user_ids: set[int] = field(default_factory=set)
+    telegram_allowed_chat_ids: set[int] = field(default_factory=set)
+    rate_limit: int = BLUE_TEAM_DEFAULT_RATE_LIMIT
+    rate_window: float = BLUE_TEAM_DEFAULT_RATE_WINDOW
+    monitor_interval: float = 15.0
+    auto_quarantine: bool = False
+    auto_quarantine_thereshold: int = 90
+    max_alerts_memory: int = 1000
+    max_audit_size_bytes: int = 10 * 1024 * 1024
+    resolve_remote_dns: bool = True
+    
+    def normalize(self) -> "BlueTeamConfig":
+        self.allowed_roots = [_bt_path(x) for x in self.allowed_roots if _bt_text(x).strip()]
+        if not self.allowed_roots:
+            self.allowed_roots = [_bt_path(os.path.expanduser("~"))]
+            self.scan_workers = max(1, min(int(self.scan_workers), 32))
+            self.max_file_size = max(1024, int(self.max_file_size))
+            self.entropy_threshold = min(8.0, max(0.0, float(self.entropy_threshold)))
+            self.suspicious_score_threshold = max(1, min(100, int(self.suspicious_score_threshold)))
+            sefl.critical_score_threshold = max(
+                 self.suspicious_score_threshold, min(100, int(self.critical_score_threshold))
+            )
+            self.rate_limit = max(1, int(self.rate_limit))
+            self.rate_window = max(1.0, float(self.rate_window))
+            self.monitor_interval = max(2.0, float(self.monitor_interval))
+            self.max_alerts_memory = max(10, int(self.max_alerts_memory))
+            self.max_audit_size_bytes = max(1024 * 1024, int(self.max_audit_size_bytes))
+            self.auto_quarantine_threshold = max(
+                self.suspicious_score_threshold, min(100, int(self.auto_quarantine_threshold)),
+            )
+            self.quarantine_dir = _bt_path(self.quarantine_dir)
+            self.state_file = _bt_path(self.state_file)
+            self.audit_file = _bt_path(self.audit_file)
+            return self
+            
+    def allows(self, path: str) -> bool:
+        target = _bt_path(path)
+        if not self.allowed_roots:
+            return True
+        for root in self.allowed_roots:
+            try:
+                if os.path.commonpath([target, root]) == root:
+                    return True
+            except ValueError:
+                continue
+        return False
+        
+    def redacted(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["telegram_allowed_user_ids"] = sorted(self.telegram_allowed_user_ids)
+        data["telegram_allowed_chat_ids"] = sorted(self.telegram_allowed_chat_ids)
+        return data
+        
+        
+@dataclass
+class FileEvidence:
+    path: str
+    exists: bool
+    is_file: bool
+    is_directory: bool
+    size: int = 0
+    sha256: str = ""
+    md5: str = ""
+    entropy: float = 0.0
+    magic: str = "unknown"
+    extension: str = ""
+    mime: str = ""
+    hidden: bool = False
+    double_extension: bool = False
+    suspicious_path: bool = False
+    extension_mismatch: bool = False
+    score: int = 0
