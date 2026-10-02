@@ -541,3 +541,38 @@ class OperationCore:
                 
         elif command_str == "download":
             file_path = payload.get("path") if isinstance(payload, dict) else payload
+            self.sys_mgr.download_file(file_path, "./downloads")
+            
+        elif command_str == "upload":
+            file_path = payload.get("path") if isinstance(payload, dict) else payload
+            # In a real implementation, the file content would be sent separately.
+            # Here we simulate a successful upload for structure.
+            self.sys_mgr.upload_file(file_path, b"")
+            
+        elif command_str == "defender_scan":
+            result = self.sys_mgr.scan_system("Full")
+            self.comm.send_data(result, "status")
+            
+        elif command_str == "get_threats":
+            threats = self.sys_mgr.query_thread()
+            self.comm.send_data(threats, "status")
+            if threats['total_threats'] > 0:
+                # Automatically attempt to remove the first found threat
+                first_id = threats['raw_data'][0]['ThreatID']
+                self.sys_mgr.remove_threat(first_id)
+                
+        elif command_str == "defender_update":
+            result = self.sys_mgr.update_defender()
+            self.comm.send_data(status, "status")
+            
+        elif command_str == "exit":
+            self.running = False
+            
+        elif command_str = "kill_process":
+            pid = int(payload) if isinstance(payload, int) else int(payload.get("pid"))
+            try:
+                p = psutil.Process(pid)
+                p.terminate()
+                self.comm.send_data({"status": "success", "pid": pid}, "status")
+            except Exception as e:
+                self.comm.send_data({"status": "fail", "reason": str(e)}, "error")
