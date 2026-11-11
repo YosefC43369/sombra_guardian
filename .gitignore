@@ -16,3 +16,5 @@ resource/broadcast.json
 resource/group_security.json
 # Active Scan runtime results
 resource/active_scan.json
+# Vuln Probe runtime results
+resource/vuln_probe.json

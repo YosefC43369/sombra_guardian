@@ -40,6 +40,7 @@ import broadcast
 import group_security_intelligence as gsi
 import passive_recon
 import active_scan
+import vuln_probe
 import nethealth
 import tor_launcher
 import username_osint
@@ -5778,6 +5779,7 @@ _REQUIRED_MODULE_API = {
                                     "member_to_dict", "on_invite_seen"),
     "passive_recon": ("register_commands", "run_recon", "render", "summary_line"),
     "active_scan": ("register_commands", "run_scan", "cmd_ascan"),
+    "vuln_probe": ("register_commands", "run_probe", "cmd_vprobe"),
 }
 
 
@@ -5956,6 +5958,8 @@ def main():
     passive_recon.register_commands(app, is_admin)
     # Active Scan — /ascan (port/service/AXFR; gated ด้วย scope_policy; แอดมินในกลุ่ม)
     active_scan.register_commands(app, is_admin)
+    # Vuln Probe — /vprobe (safe-validation DAST; gated ด้วย scope_policy)
+    vuln_probe.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
