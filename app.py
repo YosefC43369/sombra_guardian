@@ -35,6 +35,7 @@ import search_es
 import airports
 import notes
 import reputation
+import autolink
 import nethealth
 import tor_launcher
 import username_osint
@@ -5635,9 +5636,12 @@ async def post_init(app):
     # EXPIRED. Started here on the same create_task/cancel lifecycle as the
     # news loop, which is the pattern its own docstring says it mirrors.
     _start_background_task(app, "github_sweep_task", github_sweep_loop)
-    
+    # AutoLink loop — ยิงลิงก์ที่ถึงรอบตามแคมเปญของแต่ละห้อง ตลอดเวลา
+    _start_background_task(app, "autolink_task",
+                           lambda: autolink.autolink_background_loop(app.bot))
+
 async def post_shutdown(app):
-    for key in ("news_task", "github_sweep_task"):
+    for key in ("news_task", "github_sweep_task", "autolink_task"):
         task = app.bot_data.get(key)
         if not task:
             continue
@@ -5721,6 +5725,7 @@ _REQUIRED_MODULE_API = {
                    "validate_tuning", "get_technique_coverage", "get_exercise_metrics"),
     "purpleteam_report": ("get_report_data", "format_report", "export_report_json",
                           "export_coverage_csv", "export_attack_navigator_layer"),
+    "autolink": ("cmd_autolink", "autolink_background_loop", "run_cycle"),
 }
 
 
@@ -5888,6 +5893,9 @@ def main():
     app.add_handler(CommandHandler("repdigest", cmd_repdigest))
     app.add_handler(CommandHandler("repundo", cmd_repundo))
     app.add_handler(CommandHandler("repconfig", cmd_repconfig))
+    # AutoLink — ส่งลิงก์เว็บอัตโนมัติตลอดเวลา (dispatcher เดียว, แอดมินเท่านั้นสำหรับคำสั่งแก้)
+    app.add_handler(CommandHandler(
+        "autolink", lambda u, c: autolink.cmd_autolink(u, c, is_admin)))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

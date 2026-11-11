@@ -8,3 +8,5 @@ venv/
 resource/osint_db.json
 # Google Drive reference-data cache (runtime, derived from Drive)
 cache/
+# AutoLink runtime data (แคมเปญลิงก์อัตโนมัติ — สร้างตอนรัน)
+resource/autolink.json
