@@ -1,0 +1,3 @@
+[
+  {"id":"CSRF-FORM-001","category":"csrf","description":"State-changing form missing anti-CSRF token (inspection only, no submission)","test_string":"","expected":"POST form without csrf token input / weak SameSite","risk":"MEDIUM","safety":"SAFE","rule":"csrf_form_inspection","reference":"https://owasp.org/www-community/attacks/csrf"}
+]

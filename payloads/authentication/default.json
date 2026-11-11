@@ -1,0 +1,4 @@
+[
+  {"id":"AUTH-COOKIE-001","category":"authentication","description":"Session cookie security attributes (Secure/HttpOnly/SameSite)","test_string":"","expected":"Session cookie missing Secure/HttpOnly/SameSite","risk":"MEDIUM","safety":"SAFE","rule":"session_audit","reference":"https://owasp.org/www-community/controls/SecureCookieAttribute"},
+  {"id":"AUTH-HTTPS-001","category":"authentication","description":"HTTPS enforcement (http->https redirect)","test_string":"","expected":"Plain HTTP not redirected to HTTPS","risk":"MEDIUM","safety":"SAFE","rule":"https_enforce","reference":"https://owasp.org/www-project-web-security-testing-guide/"}
+]

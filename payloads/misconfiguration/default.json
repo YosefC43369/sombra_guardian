@@ -1,0 +1,6 @@
+[
+  {"id":"MISC-HDR-001","category":"misconfiguration","description":"Missing security headers (passive inspection)","test_string":"","expected":"HSTS/CSP/X-Frame-Options/etc. absent","risk":"LOW","safety":"SAFE","rule":"header_audit","reference":"https://owasp.org/www-project-secure-headers/"},
+  {"id":"MISC-CORS-001","category":"misconfiguration","description":"CORS reflection with forged Origin","test_string":"https://evil.sombra-probe.invalid","expected":"ACAO reflects arbitrary origin (+credentials)","risk":"MEDIUM","safety":"SAFE","rule":"cors","reference":"https://portswigger.net/web-security/cors"},
+  {"id":"MISC-REDIR-001","category":"misconfiguration","description":"Open redirect via redirect parameter (marker host, no follow)","test_string":"https://oob.sombra-probe.invalid/","expected":"Location points to external marker host","risk":"MEDIUM","safety":"SAFE","rule":"open_redirect","reference":"https://cwe.mitre.org/data/definitions/601.html"},
+  {"id":"MISC-ERR-001","category":"misconfiguration","description":"Verbose error / stack trace disclosure","test_string":"","expected":"Framework stack trace or debug output in response","risk":"LOW","safety":"SAFE","rule":"verbose_error","reference":"https://owasp.org/www-project-web-security-testing-guide/"}
+]

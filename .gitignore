@@ -18,3 +18,6 @@ resource/group_security.json
 resource/active_scan.json
 # Vuln Probe runtime results
 resource/vuln_probe.json
+# Web Vulnerability Assessment runtime
+resource/wva.json
+resource/wva_scope_map.json

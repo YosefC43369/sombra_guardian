@@ -1,0 +1,6 @@
+[
+  {"id":"EXP-PATH-001","category":"exposure","description":"VCS config exposure indicator","test_string":"/.git/config","expected":"200 + git config signature","risk":"MEDIUM","safety":"SAFE","rule":"exposure_path","reference":"https://owasp.org/www-project-web-security-testing-guide/"},
+  {"id":"EXP-PATH-002","category":"exposure","description":"Dotenv exposure indicator","test_string":"/.env","expected":"200 + env var signature","risk":"HIGH","safety":"SAFE","rule":"exposure_path","reference":"https://owasp.org/www-project-web-security-testing-guide/"},
+  {"id":"EXP-PATH-003","category":"exposure","description":"Source map exposure indicator","test_string":"/app.js.map","expected":"200 + sourcemap signature","risk":"LOW","safety":"SAFE","rule":"exposure_path","reference":"https://owasp.org/www-project-web-security-testing-guide/"},
+  {"id":"EXP-PATH-004","category":"exposure","description":"Directory listing indicator","test_string":"/","expected":"Index-of directory listing signature","risk":"LOW","safety":"SAFE","rule":"dir_listing","reference":"https://owasp.org/www-project-web-security-testing-guide/"}
+]

@@ -41,6 +41,7 @@ import group_security_intelligence as gsi
 import passive_recon
 import active_scan
 import vuln_probe
+import web_vulnerability_assessment as wva
 import nethealth
 import tor_launcher
 import username_osint
@@ -5780,6 +5781,7 @@ _REQUIRED_MODULE_API = {
     "passive_recon": ("register_commands", "run_recon", "render", "summary_line"),
     "active_scan": ("register_commands", "run_scan", "cmd_ascan"),
     "vuln_probe": ("register_commands", "run_probe", "cmd_vprobe"),
+    "web_vulnerability_assessment": ("register_commands", "run_assessment"),
 }
 
 
@@ -5960,6 +5962,8 @@ def main():
     active_scan.register_commands(app, is_admin)
     # Vuln Probe — /vprobe (safe-validation DAST; gated ด้วย scope_policy)
     vuln_probe.register_commands(app, is_admin)
+    # Web Vulnerability Assessment — /vulnscan /allowscan ... (authorized, safe-validation)
+    wva.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

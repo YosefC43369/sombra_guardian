@@ -1,0 +1,4 @@
+[
+  {"id":"LFI-CANARY-001","category":"lfi","description":"Inert traversal canary (non-sensitive)","test_string":"../../sombra-canary-xyz","expected":"Path/open error signature or traversal reflection","risk":"MEDIUM","safety":"SAFE","rule":"lfi_canary","reference":"https://owasp.org/www-community/attacks/Path_Traversal"},
+  {"id":"LFI-CANARY-002","category":"lfi","description":"Encoded traversal canary (non-sensitive)","test_string":"....//sombra-canary-xyz","expected":"Path/open error signature or traversal reflection","risk":"MEDIUM","safety":"SAFE","rule":"lfi_canary","reference":"https://owasp.org/www-community/attacks/Path_Traversal"}
+]

@@ -1,0 +1,4 @@
+[
+  {"id":"XSS-REFLECT-001","category":"xss","description":"Inert marker reflection (HTML context)","test_string":"<MARKER>","expected":"Marker reflected raw in HTML context","risk":"HIGH","safety":"SAFE","rule":"reflection","reference":"https://owasp.org/www-community/attacks/xss/"},
+  {"id":"XSS-REFLECT-002","category":"xss","description":"Attribute-breakout inert marker","test_string":"\"'><MARKER>","expected":"Marker reflected unescaped near delimiters","risk":"HIGH","safety":"SAFE","rule":"reflection","reference":"https://owasp.org/www-community/attacks/xss/"}
+]

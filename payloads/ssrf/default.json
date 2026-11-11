@@ -1,0 +1,3 @@
+[
+  {"id":"SSRF-PARAM-001","category":"ssrf","description":"URL-accepting parameter indicator (external invalid marker host, never internal)","test_string":"https://oob.sombra-probe.invalid/","expected":"Param appears to fetch/validate URLs (indicator only)","risk":"MEDIUM","safety":"SAFE","rule":"ssrf_indicator","reference":"https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"}
+]

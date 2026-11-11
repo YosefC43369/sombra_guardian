@@ -1,0 +1,5 @@
+[
+  {"id":"SQLI-ERR-001","category":"sqli","description":"Single-quote error probe","test_string":"'","expected":"New SQL error signature appears vs baseline","risk":"HIGH","safety":"SAFE","rule":"sql_error","reference":"https://owasp.org/www-community/attacks/SQL_Injection"},
+  {"id":"SQLI-ERR-002","category":"sqli","description":"Double-quote error probe","test_string":"\"","expected":"New SQL error signature appears vs baseline","risk":"HIGH","safety":"SAFE","rule":"sql_error","reference":"https://owasp.org/www-community/attacks/SQL_Injection"},
+  {"id":"SQLI-ERR-003","category":"sqli","description":"Parenthesis/quote combo error probe","test_string":"')","expected":"New SQL error signature appears vs baseline","risk":"HIGH","safety":"SAFE","rule":"sql_error","reference":"https://owasp.org/www-community/attacks/SQL_Injection"}
+]
