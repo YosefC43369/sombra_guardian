@@ -223,10 +223,14 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
     else:
         final = "COMPLETED"
 
+    # Evidence Management (ออปชัน, non-invasive) — ingest evidence จากผลที่ได้ (ไม่สแกนใหม่)
+    evidence_ref = await _collect_evidence(
+        task_id, rec, plan, all_findings, module_results, asset_sink, correlation_ref)
+
     store.update_task(task_id, lambda r: r.update(
         {"status": final, "module_results": module_results, "findings": all_findings,
          "counts": counts, "ai_summary": ai_summary, "correlation": correlation_ref,
-         "finished_iso": store.iso()}), path)
+         "evidence": evidence_ref, "finished_iso": store.iso()}), path)
     store.audit(task_id, "run_end", f"status={final} findings={len(all_findings)}", path)
     await _progress(progress, f"✅ {final}: {len(all_findings)} findings "
                               f"({ran_ok} โมดูลสำเร็จ / {ran_fail} ล้ม)")
@@ -285,6 +289,40 @@ async def _attack_surface_correlation(target, asset_sink, findings, task_id, use
                 "summary": asc.report.summary_line(result)}
     except Exception:
         logger.warning("RT_ORCH attack_surface_correlation failed", exc_info=True)
+        return None
+
+
+async def _collect_evidence(task_id, rec, plan, findings, module_results, asset_sink,
+                            correlation_ref):
+    """ingest evidence เข้า evidence_management (ออปชัน) — คืน pointer ย่อ หรือ None
+
+    ไม่ทำให้ pipeline ล้มถ้าโมดูลไม่มี/ปิด/ล้มเหลว — เป็นส่วนเสริมล้วน
+    """
+    try:
+        import evidence_management as evd
+    except Exception:
+        return None
+    try:
+        if not evd.store.get_policy().get("enabled", True):
+            return None
+        snapshot = {"task_id": task_id, "target": rec.get("target"), "plan": plan,
+                    "findings": findings, "module_results": module_results,
+                    "started_iso": rec.get("started_iso"), "finished_iso": store.iso()}
+        correlation = None
+        if correlation_ref and correlation_ref.get("result_id"):
+            try:
+                import attack_surface_correlation as asc
+                correlation = asc.store.get_result(correlation_ref["result_id"])
+            except Exception:
+                correlation = None
+        res = await asyncio.to_thread(
+            evd.service.ingest_task, snapshot, module_outputs=asset_sink,
+            correlation=correlation, actor="red_team_orchestrator")
+        if res.get("error"):
+            return {"status": res["error"]}
+        return {"ingested": res.get("count", 0), "errors": len(res.get("errors", []))}
+    except Exception:
+        logger.warning("RT_ORCH evidence collection failed", exc_info=True)
         return None
 
 

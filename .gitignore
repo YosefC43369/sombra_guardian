@@ -27,3 +27,5 @@ resource/api_assess.json
 resource/rt_orchestrator.json
 # Attack Surface Correlation runtime (correlation results + snapshots)
 resource/attack_surface_correlation.json
+# Evidence Management runtime (evidence records + chain of custody)
+resource/evidence_management.json

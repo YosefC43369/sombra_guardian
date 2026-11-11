@@ -240,6 +240,27 @@ ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
     EnvVar("ASC_MAX_RESULTS", "attack_surface_correlation/store.py",
            "max stored correlation results (retention)", False, "200"),
 
+    # Evidence Management (centralized evidence repository; passive data-processing)
+    EnvVar("EVIDENCE_MANAGEMENT_ENABLED", "evidence_management/store.py",
+           "master on/off switch for the evidence repository", False, "true"),
+    EnvVar("EVIDENCE_HASH_ALGORITHM", "evidence_management/store.py",
+           "evidence content hash algorithm", False, "sha256"),
+    EnvVar("EVIDENCE_MAX_FILE_SIZE_MB", "evidence_management/store.py",
+           "max artifact file size accepted for hashing", False, "25"),
+    EnvVar("EVIDENCE_VERIFY_ON_INGEST", "evidence_management/store.py",
+           "compute+record integrity status at ingest time", False, "true"),
+    EnvVar("EVIDENCE_AUDIT_TRAIL_ENABLED", "evidence_management/store.py",
+           "record access/export custody events", False, "true"),
+    EnvVar("EVIDENCE_REDACTION_ENABLED", "evidence_management/store.py",
+           "redact credentials/cookies/tokens/PII before storage", False, "true"),
+    EnvVar("EVIDENCE_RETENTION_DAYS", "evidence_management/store.py",
+           "evidence retention window (days)", False, "365"),
+    EnvVar("EVIDENCE_DB", "evidence_management/store.py",
+           "evidence repository store path", False,
+           "resource/evidence_management.json"),
+    EnvVar("EVIDENCE_MAX_RECORDS", "evidence_management/store.py",
+           "max stored evidence records (retention cap)", False, "5000"),
+
     # Integrity Ledger (tamper-evident Merkle audit log; optional HMAC key)
     EnvVar("INTEGRITY_SECRET", "integrity_ledger.py",
            "HMAC key that signs checkpoints; keep it out of bot.db for the "

@@ -45,6 +45,7 @@ import web_vulnerability_assessment as wva
 import api_security_assessment as api_sec
 import red_team_orchestrator as rto
 import attack_surface_correlation as asc
+import evidence_management as evd
 import nethealth
 import tor_launcher
 import username_osint
@@ -5789,6 +5790,7 @@ _REQUIRED_MODULE_API = {
     "red_team_orchestrator": ("register_commands", "create_task", "run_task", "build_plan"),
     "attack_surface_correlation": ("register_commands", "correlate", "analyze_task",
                                    "build_result"),
+    "evidence_management": ("register_commands", "submit", "ingest_task", "verify"),
 }
 
 
@@ -5977,6 +5979,8 @@ def main():
     rto.register_commands(app, is_admin)
     # Attack Surface Correlation — /asc_* (เชื่อมโยง asset จากข้อมูลที่เก็บแล้ว; ไม่สแกนเอง)
     asc.register_commands(app, is_admin)
+    # Evidence Management — /evd_* (คลังหลักฐาน: hash/custody/verify/report; ไม่สแกนเอง)
+    evd.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
