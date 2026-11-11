@@ -39,6 +39,7 @@ import autolink
 import broadcast
 import group_security_intelligence as gsi
 import passive_recon
+import active_scan
 import nethealth
 import tor_launcher
 import username_osint
@@ -5776,6 +5777,7 @@ _REQUIRED_MODULE_API = {
                                     "on_message", "on_admin_update",
                                     "member_to_dict", "on_invite_seen"),
     "passive_recon": ("register_commands", "run_recon", "render", "summary_line"),
+    "active_scan": ("register_commands", "run_scan", "cmd_ascan"),
 }
 
 
@@ -5952,6 +5954,8 @@ def main():
     gsi.register_commands(app, is_admin)
     # Passive Reconnaissance — /recon (เดี่ยว + ไฟล์ .txt; แอดมินในกลุ่ม, เปิดใน DM)
     passive_recon.register_commands(app, is_admin)
+    # Active Scan — /ascan (port/service/AXFR; gated ด้วย scope_policy; แอดมินในกลุ่ม)
+    active_scan.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

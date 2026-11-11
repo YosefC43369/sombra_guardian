@@ -14,3 +14,5 @@ resource/autolink.json
 resource/broadcast.json
 # Group Security Intelligence runtime data (snapshot/finding/incident/backup)
 resource/group_security.json
+# Active Scan runtime results
+resource/active_scan.json
