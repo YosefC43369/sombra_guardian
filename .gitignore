@@ -10,3 +10,5 @@ resource/osint_db.json
 cache/
 # AutoLink runtime data (แคมเปญลิงก์อัตโนมัติ — สร้างตอนรัน)
 resource/autolink.json
+# Broadcast runtime data (config + ทะเบียนปลายทาง — สร้างตอนรัน)
+resource/broadcast.json

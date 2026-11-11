@@ -36,6 +36,7 @@ import airports
 import notes
 import reputation
 import autolink
+import broadcast
 import nethealth
 import tor_launcher
 import username_osint
@@ -5495,6 +5496,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
         
     logger.info(f"MESSAGE RECEIVED | Chat ID: {chat.id} | User ID: {user.id} | Text: {text}")
+    # Broadcast: สะสมปลายทางอัตโนมัติจากห้อง/แชตที่บอตเห็น (ทำงานเมื่อ collect=on
+    # เท่านั้น และกลืน error เอง ไม่ทำให้ handler หลักพัง)
+    try:
+        _bc_title = getattr(chat, "title", None) or getattr(user, "full_name", "") or ""
+        broadcast.remember_chat(chat.id, title=_bc_title, ctype=chat.type)
+    except Exception:
+        pass
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
         # Identity registry + message fingerprint, before detection runs:
@@ -5639,9 +5647,12 @@ async def post_init(app):
     # AutoLink loop — ยิงลิงก์ที่ถึงรอบตามแคมเปญของแต่ละห้อง ตลอดเวลา
     _start_background_task(app, "autolink_task",
                            lambda: autolink.autolink_background_loop(app.bot))
+    # Broadcast loop — ยิงลิงก์เดียวออกไปทุกปลายทางตามรอบเวลา
+    _start_background_task(app, "broadcast_task",
+                           lambda: broadcast.broadcast_background_loop(app.bot))
 
 async def post_shutdown(app):
-    for key in ("news_task", "github_sweep_task", "autolink_task"):
+    for key in ("news_task", "github_sweep_task", "autolink_task", "broadcast_task"):
         task = app.bot_data.get(key)
         if not task:
             continue
@@ -5726,6 +5737,8 @@ _REQUIRED_MODULE_API = {
     "purpleteam_report": ("get_report_data", "format_report", "export_report_json",
                           "export_coverage_csv", "export_attack_navigator_layer"),
     "autolink": ("cmd_autolink", "autolink_background_loop", "run_cycle"),
+    "broadcast": ("cmd_broadcast", "broadcast_background_loop", "send_to_all",
+                  "remember_chat"),
 }
 
 
@@ -5896,6 +5909,8 @@ def main():
     # AutoLink — ส่งลิงก์เว็บอัตโนมัติตลอดเวลา (dispatcher เดียว, แอดมินเท่านั้นสำหรับคำสั่งแก้)
     app.add_handler(CommandHandler(
         "autolink", lambda u, c: autolink.cmd_autolink(u, c, is_admin)))
+    # Broadcast — ตั้งลิงก์เดียว ยิงออกไปทุกปลายทางอัตโนมัติ (เจ้าของบอตเท่านั้น)
+    app.add_handler(CommandHandler("broadcast", broadcast.cmd_broadcast))
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
