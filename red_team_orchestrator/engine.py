@@ -157,6 +157,8 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
 
     module_results: List[Dict[str, Any]] = []
     all_findings: List[Dict[str, Any]] = []
+    # sink สำหรับ attack_surface_correlation (in-memory เท่านั้น — ไม่ persist ลง task)
+    asset_sink: Dict[str, Any] = {}
     ran_ok = 0
     ran_fail = 0
 
@@ -171,7 +173,7 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
         spec = registry.REGISTRY[name]
         await _progress(progress, f"▶️ {name} …")
         ctx = {"target": rec["target"], "program_id": program_id, "actor": actor,
-               "options": options, "progress": None}
+               "options": options, "progress": None, "asset_sink": asset_sink}
         try:
             result = await asyncio.wait_for(spec.adapter(ctx), timeout=timeout)
         except asyncio.TimeoutError:
@@ -202,6 +204,12 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
     all_findings = _correlate(all_findings)
     counts = _counts(all_findings, module_results)
 
+    # Attack Surface Correlation (ออปชัน, non-invasive, ทนความล้มเหลว) —
+    # ใช้ native output ที่ sink มา + unified findings; เก็บผลเต็มใน asc store,
+    # แนบเฉพาะ pointer ย่อใน task record (กัน bloat)
+    correlation_ref = await _attack_surface_correlation(
+        rec["target"], asset_sink, all_findings, task_id, pol.get("use_ai"))
+
     # AI summary (ออปชัน, ทนความล้มเหลว)
     ai_summary = None
     if pol.get("use_ai") and all_findings:
@@ -217,7 +225,8 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
 
     store.update_task(task_id, lambda r: r.update(
         {"status": final, "module_results": module_results, "findings": all_findings,
-         "counts": counts, "ai_summary": ai_summary, "finished_iso": store.iso()}), path)
+         "counts": counts, "ai_summary": ai_summary, "correlation": correlation_ref,
+         "finished_iso": store.iso()}), path)
     store.audit(task_id, "run_end", f"status={final} findings={len(all_findings)}", path)
     await _progress(progress, f"✅ {final}: {len(all_findings)} findings "
                               f"({ran_ok} โมดูลสำเร็จ / {ran_fail} ล้ม)")
@@ -254,6 +263,29 @@ def _counts(findings, module_results) -> Dict[str, Any]:
     c["modules_failed"] = sum(1 for m in module_results if m["status"] == "failed")
     c["total_findings"] = len(findings)
     return c
+
+
+async def _attack_surface_correlation(target, asset_sink, findings, task_id, use_ai):
+    """เรียก attack_surface_correlation (ออปชัน) — คืน pointer ย่อ หรือ None
+
+    ไม่ทำให้ pipeline ล้มถ้าโมดูลไม่มี/ปิดอยู่/ล้มเหลว — เป็นส่วนเสริมล้วน
+    """
+    try:
+        import attack_surface_correlation as asc
+    except Exception:
+        return None
+    try:
+        if not asc.store.get_policy().get("enabled", True):
+            return None
+        result = await asc.correlate(asset_sink or {}, findings=findings, target=target,
+                                     source_task_id=task_id, ai=bool(use_ai), persist=True)
+        if result.get("error"):
+            return {"status": result["error"]}
+        return {"result_id": result.get("result_id"), "counts": result.get("counts", {}),
+                "summary": asc.report.summary_line(result)}
+    except Exception:
+        logger.warning("RT_ORCH attack_surface_correlation failed", exc_info=True)
+        return None
 
 
 async def _ai_summary(target, findings):

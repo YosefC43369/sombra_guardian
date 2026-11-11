@@ -44,6 +44,7 @@ import vuln_probe
 import web_vulnerability_assessment as wva
 import api_security_assessment as api_sec
 import red_team_orchestrator as rto
+import attack_surface_correlation as asc
 import nethealth
 import tor_launcher
 import username_osint
@@ -5786,6 +5787,8 @@ _REQUIRED_MODULE_API = {
     "web_vulnerability_assessment": ("register_commands", "run_assessment"),
     "api_security_assessment": ("register_commands", "run_assessment"),
     "red_team_orchestrator": ("register_commands", "create_task", "run_task", "build_plan"),
+    "attack_surface_correlation": ("register_commands", "correlate", "analyze_task",
+                                   "build_result"),
 }
 
 
@@ -5972,6 +5975,8 @@ def main():
     api_sec.register_commands(app, is_admin)
     # Red Team Orchestrator — /rt_assess ... (ประสานโมดูลเดิม; ไม่ bypass scope)
     rto.register_commands(app, is_admin)
+    # Attack Surface Correlation — /asc_* (เชื่อมโยง asset จากข้อมูลที่เก็บแล้ว; ไม่สแกนเอง)
+    asc.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))

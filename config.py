@@ -222,6 +222,24 @@ ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
     EnvVar("REPO_MAX_CONCURRENT_TEST_RUNS", "repository_sandbox.py",
            "concurrent sandboxed runs", False, "module default"),
 
+    # Attack Surface Correlation (passive data-processing; analyses stored module data)
+    EnvVar("ATTACK_SURFACE_CORRELATION_ENABLED", "attack_surface_correlation/store.py",
+           "master on/off switch for the correlation engine", False, "true"),
+    EnvVar("CORRELATION_CONFIDENCE_THRESHOLD", "attack_surface_correlation/store.py",
+           "min confidence (0.0–1.0) for a relationship to be reported", False, "0.70"),
+    EnvVar("CORRELATION_MAX_ASSETS", "attack_surface_correlation/store.py",
+           "max assets processed per correlation run", False, "10000"),
+    EnvVar("CORRELATION_HISTORY_ENABLED", "attack_surface_correlation/store.py",
+           "enable snapshot-to-snapshot historical comparison", False, "true"),
+    EnvVar("CORRELATION_AI_ANALYSIS_ENABLED", "attack_surface_correlation/store.py",
+           "let the existing AI explain correlation results (deterministic without it)",
+           False, "false"),
+    EnvVar("ASC_DB", "attack_surface_correlation/store.py",
+           "correlation results store path", False,
+           "resource/attack_surface_correlation.json"),
+    EnvVar("ASC_MAX_RESULTS", "attack_surface_correlation/store.py",
+           "max stored correlation results (retention)", False, "200"),
+
     # Integrity Ledger (tamper-evident Merkle audit log; optional HMAC key)
     EnvVar("INTEGRITY_SECRET", "integrity_ledger.py",
            "HMAC key that signs checkpoints; keep it out of bot.db for the "

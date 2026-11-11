@@ -114,7 +114,7 @@ def _norm_active_scan(scan: Dict[str, Any]) -> List[Dict[str, Any]]:
 # adapters (เรียก run function จริง, guarded)
 # ---------------------------------------------------------------------------
 
-async def _run_with(coro_factory, name, normalize, metadata_fn=None):
+async def _run_with(coro_factory, name, normalize, metadata_fn=None, ctx=None):
     start = _now()
     try:
         result = await coro_factory()
@@ -122,6 +122,10 @@ async def _run_with(coro_factory, name, normalize, metadata_fn=None):
         logger.exception("RT_ORCH module %s failed", name)
         return module_result(name, "failed", errors=[f"{type(e).__name__}: {e}"],
                              started=start, completed=_now())
+    # optional: ส่ง native output ให้ attack_surface_correlation (in-memory, ไม่ persist)
+    # เก็บเฉพาะเมื่อผู้เรียกใส่ ctx["asset_sink"] มา — ไม่กระทบ task record/พฤติกรรมเดิม
+    if isinstance(ctx, dict) and isinstance(ctx.get("asset_sink"), dict) and isinstance(result, dict):
+        ctx["asset_sink"][name] = result
     # แยก "ล้มเหลว" ออกจาก "สำเร็จแต่ไม่พบอะไร"
     status = _result_status(result)
     findings = normalize(result) if status in ("completed", "empty") else []
@@ -152,7 +156,7 @@ async def adapt_passive(ctx):
     return await _run_with(
         lambda: passive_recon.run_recon(ctx["target"], progress=ctx.get("progress")),
         "passive_recon", _norm_passive,
-        metadata_fn=lambda r: {"duration_ms": r.get("duration_ms")})
+        metadata_fn=lambda r: {"duration_ms": r.get("duration_ms")}, ctx=ctx)
 
 
 async def adapt_vuln_probe(ctx):
@@ -160,7 +164,7 @@ async def adapt_vuln_probe(ctx):
     return await _run_with(
         lambda: vuln_probe.run_probe(ctx["program_id"], ctx["target"], ctx["actor"],
                                      progress=ctx.get("progress")),
-        "vuln_probe", _norm_vuln_probe)
+        "vuln_probe", _norm_vuln_probe, ctx=ctx)
 
 
 async def adapt_wva(ctx):
@@ -170,7 +174,7 @@ async def adapt_wva(ctx):
                                    categories=ctx.get("options", {}).get("categories"),
                                    progress=ctx.get("progress")),
         "web_vulnerability_assessment", lambda r: _norm_findings_schema(r, "wva"),
-        metadata_fn=lambda r: {"counts": r.get("counts", {})})
+        metadata_fn=lambda r: {"counts": r.get("counts", {})}, ctx=ctx)
 
 
 async def adapt_api(ctx):
@@ -183,7 +187,7 @@ async def adapt_api(ctx):
                                    progress=ctx.get("progress")),
         "api_security_assessment", lambda r: _norm_findings_schema(r, "api"),
         metadata_fn=lambda r: {"endpoints": r.get("endpoints_analyzed", 0),
-                               "counts": r.get("counts", {})})
+                               "counts": r.get("counts", {})}, ctx=ctx)
 
 
 async def adapt_active_scan(ctx):
@@ -193,7 +197,7 @@ async def adapt_active_scan(ctx):
                                      profile=ctx.get("options", {}).get("profile", "quick"),
                                      progress=ctx.get("progress")),
         "active_scan", _norm_active_scan,
-        metadata_fn=lambda r: {"summary": r.get("summary", {})})
+        metadata_fn=lambda r: {"summary": r.get("summary", {})}, ctx=ctx)
 
 
 # ---------------------------------------------------------------------------

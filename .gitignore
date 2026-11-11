@@ -25,3 +25,5 @@ resource/wva_scope_map.json
 resource/api_assess.json
 # Red Team Orchestrator runtime
 resource/rt_orchestrator.json
+# Attack Surface Correlation runtime (correlation results + snapshots)
+resource/attack_surface_correlation.json
