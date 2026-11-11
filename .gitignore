@@ -23,3 +23,5 @@ resource/wva.json
 resource/wva_scope_map.json
 # API Security Assessment runtime
 resource/api_assess.json
+# Red Team Orchestrator runtime
+resource/rt_orchestrator.json

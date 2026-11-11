@@ -43,6 +43,7 @@ import active_scan
 import vuln_probe
 import web_vulnerability_assessment as wva
 import api_security_assessment as api_sec
+import red_team_orchestrator as rto
 import nethealth
 import tor_launcher
 import username_osint
@@ -5784,6 +5785,7 @@ _REQUIRED_MODULE_API = {
     "vuln_probe": ("register_commands", "run_probe", "cmd_vprobe"),
     "web_vulnerability_assessment": ("register_commands", "run_assessment"),
     "api_security_assessment": ("register_commands", "run_assessment"),
+    "red_team_orchestrator": ("register_commands", "create_task", "run_task", "build_plan"),
 }
 
 
@@ -5968,6 +5970,8 @@ def main():
     wva.register_commands(app, is_admin)
     # API Security Assessment — /api_assess /api_import ... (authorized, safe-validation)
     api_sec.register_commands(app, is_admin)
+    # Red Team Orchestrator — /rt_assess ... (ประสานโมดูลเดิม; ไม่ bypass scope)
+    rto.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
