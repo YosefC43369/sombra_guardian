@@ -12,3 +12,5 @@ cache/
 resource/autolink.json
 # Broadcast runtime data (config + ทะเบียนปลายทาง — สร้างตอนรัน)
 resource/broadcast.json
+# Group Security Intelligence runtime data (snapshot/finding/incident/backup)
+resource/group_security.json

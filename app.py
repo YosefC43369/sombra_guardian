@@ -37,6 +37,7 @@ import notes
 import reputation
 import autolink
 import broadcast
+import group_security_intelligence as gsi
 import nethealth
 import tor_launcher
 import username_osint
@@ -4564,6 +4565,22 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
                 chat.id, target.id, result["old_status"], result["new_status"],
                 "yes" if result["invite_attribution_available"] else "unavailable")
 
+    # Group Security Intelligence: ตรวจการเลื่อน/ลดขั้นแอดมิน + สิทธิ์เปลี่ยน แบบ event-driven
+    # และบันทึกลิงก์เชิญที่ติดมากับการเข้ากลุ่ม (เท่าที่ Bot API เปิดให้เห็น)
+    try:
+        asyncio.create_task(gsi.on_admin_update(
+            context.bot, chat.id,
+            gsi.member_to_dict(old), gsi.member_to_dict(new),
+            actor_id=(member_update.from_user.id
+                      if member_update.from_user is not None else None)))
+        link = getattr(invite, "invite_link", None)
+        if link:
+            asyncio.create_task(gsi.on_invite_seen(
+                context.bot, chat.id, link,
+                getattr(invite, "name", None), getattr(creator, "id", None)))
+    except Exception:
+        logger.exception("GSI chat_member hook error | chat=%s", chat.id)
+
     # A ban or a restriction is a moderation action. Record it with the
     # administrator Telegram identified -- and only when it differs from
     # the target, since a member leaving on their own is not an
@@ -5505,6 +5522,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         record_message_activity(chat.id, text)
+        # Group Security Intelligence: ตรวจข้อมูลลับ/social-engineering แบบไม่บล็อก
+        # event loop — schedule เป็น task แยก, กลืน error เองภายในโมดูล
+        try:
+            async def _gsi_delete():
+                await context.bot.delete_message(chat.id, message.message_id)
+            asyncio.create_task(gsi.on_message(
+                context.bot, chat.id, user.id, text,
+                username=user.username, message_id=message.message_id,
+                delete_cb=_gsi_delete))
+        except Exception:
+            logger.exception("GSI on_message schedule error | chat=%s", chat.id)
         # Identity registry + message fingerprint, before detection runs:
         # a message that is about to be deleted still needs its sender on
         # record, and the fingerprint is what pattern analysis reads.
@@ -5650,9 +5678,13 @@ async def post_init(app):
     # Broadcast loop — ยิงลิงก์เดียวออกไปทุกปลายทางตามรอบเวลา
     _start_background_task(app, "broadcast_task",
                            lambda: broadcast.broadcast_background_loop(app.bot))
+    # Group Security Intelligence loop — snapshot แอดมิน/คอนฟิกตามรอบ
+    _start_background_task(app, "gsi_task",
+                           lambda: gsi.background_loop(app.bot))
 
 async def post_shutdown(app):
-    for key in ("news_task", "github_sweep_task", "autolink_task", "broadcast_task"):
+    for key in ("news_task", "github_sweep_task", "autolink_task", "broadcast_task",
+                "gsi_task"):
         task = app.bot_data.get(key)
         if not task:
             continue
@@ -5739,6 +5771,9 @@ _REQUIRED_MODULE_API = {
     "autolink": ("cmd_autolink", "autolink_background_loop", "run_cycle"),
     "broadcast": ("cmd_broadcast", "broadcast_background_loop", "send_to_all",
                   "remember_chat"),
+    "group_security_intelligence": ("register_commands", "background_loop",
+                                    "on_message", "on_admin_update",
+                                    "member_to_dict", "on_invite_seen"),
 }
 
 
@@ -5911,6 +5946,8 @@ def main():
         "autolink", lambda u, c: autolink.cmd_autolink(u, c, is_admin)))
     # Broadcast — ตั้งลิงก์เดียว ยิงออกไปทุกปลายทางอัตโนมัติ (เจ้าของบอตเท่านั้น)
     app.add_handler(CommandHandler("broadcast", broadcast.cmd_broadcast))
+    # Group Security Intelligence — คำสั่ง /security_* (แอดมินกลุ่มเท่านั้น)
+    gsi.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
