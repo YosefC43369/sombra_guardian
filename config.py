@@ -240,6 +240,28 @@ ENV_REGISTRY: Dict[str, EnvVar] = {v.name: v for v in [
     EnvVar("ASC_MAX_RESULTS", "attack_surface_correlation/store.py",
            "max stored correlation results (retention)", False, "200"),
 
+    # Risk Prioritization (single risk engine; separate from vulnerability execution)
+    EnvVar("RISK_ENGINE_ENABLED", "risk_prioritization/store.py",
+           "master on/off switch for the risk prioritization engine", False, "true"),
+    EnvVar("RISK_MODEL_VERSION", "risk_prioritization/store.py",
+           "risk scoring model version", False, "2"),
+    EnvVar("RISK_CONFIDENCE_THRESHOLD", "risk_prioritization/store.py",
+           "evidence-confidence threshold below which a finding is NEEDS_VERIFICATION",
+           False, "0.70"),
+    EnvVar("RISK_AI_ANALYSIS_ENABLED", "risk_prioritization/store.py",
+           "let the existing AI explain prioritization (deterministic without it)",
+           False, "false"),
+    EnvVar("RISK_DB", "risk_prioritization/store.py", "risk results store path", False,
+           "resource/risk_prioritization.json"),
+    EnvVar("RISK_MAX_RESULTS", "risk_prioritization/store.py",
+           "max stored risk results (retention)", False, "200"),
+    # Payload library (expanded registry; safe testing profiles)
+    EnvVar("PAYLOAD_PROFILE", "web_vulnerability_assessment/payload_engine.py",
+           "default safe test intensity: SAFE_MINIMAL|SAFE_STANDARD|SAFE_EXTENDED", False,
+           "SAFE_STANDARD"),
+    EnvVar("WVA_PAYLOAD_DIR", "web_vulnerability_assessment/payload_engine.py",
+           "payload registry root directory", False, "payloads"),
+
     # Evidence Management (centralized evidence repository; passive data-processing)
     EnvVar("EVIDENCE_MANAGEMENT_ENABLED", "evidence_management/store.py",
            "master on/off switch for the evidence repository", False, "true"),

@@ -29,3 +29,5 @@ resource/rt_orchestrator.json
 resource/attack_surface_correlation.json
 # Evidence Management runtime (evidence records + chain of custody)
 resource/evidence_management.json
+# Risk Prioritization runtime (risk results + snapshots)
+resource/risk_prioritization.json

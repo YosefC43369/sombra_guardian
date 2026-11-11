@@ -227,10 +227,14 @@ async def run_task(task_id: str, *, progress: ProgressCb = None, notify=None,
     evidence_ref = await _collect_evidence(
         task_id, rec, plan, all_findings, module_results, asset_sink, correlation_ref)
 
+    # Risk Prioritization (ออปชัน, non-invasive) — จัดลำดับความเสี่ยงจาก findings + correlation
+    risk_ref = await _prioritize_risk(
+        task_id, rec["target"], all_findings, correlation_ref, pol.get("use_ai"))
+
     store.update_task(task_id, lambda r: r.update(
         {"status": final, "module_results": module_results, "findings": all_findings,
          "counts": counts, "ai_summary": ai_summary, "correlation": correlation_ref,
-         "evidence": evidence_ref, "finished_iso": store.iso()}), path)
+         "evidence": evidence_ref, "risk": risk_ref, "finished_iso": store.iso()}), path)
     store.audit(task_id, "run_end", f"status={final} findings={len(all_findings)}", path)
     await _progress(progress, f"✅ {final}: {len(all_findings)} findings "
                               f"({ran_ok} โมดูลสำเร็จ / {ran_fail} ล้ม)")
@@ -323,6 +327,33 @@ async def _collect_evidence(task_id, rec, plan, findings, module_results, asset_
         return {"ingested": res.get("count", 0), "errors": len(res.get("errors", []))}
     except Exception:
         logger.warning("RT_ORCH evidence collection failed", exc_info=True)
+        return None
+
+
+async def _prioritize_risk(task_id, target, findings, correlation_ref, use_ai):
+    """จัดลำดับความเสี่ยง (ออปชัน) — คืน pointer ย่อ หรือ None (ทนล้มเหลว)"""
+    try:
+        import risk_prioritization as risk
+    except Exception:
+        return None
+    try:
+        if not risk.store.get_policy().get("enabled", True):
+            return None
+        correlation = None
+        if correlation_ref and correlation_ref.get("result_id"):
+            try:
+                import attack_surface_correlation as asc
+                correlation = asc.store.get_result(correlation_ref["result_id"])
+            except Exception:
+                correlation = None
+        result = await risk.run(findings or [], target=target, correlation=correlation,
+                                source_task_id=task_id, ai=bool(use_ai), persist=True)
+        if result.get("error"):
+            return {"status": result["error"]}
+        return {"result_id": result.get("result_id"), "counts": result.get("counts", {}),
+                "summary": risk.report.summary_line(result)}
+    except Exception:
+        logger.warning("RT_ORCH risk prioritization failed", exc_info=True)
         return None
 
 

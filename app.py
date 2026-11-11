@@ -46,6 +46,7 @@ import api_security_assessment as api_sec
 import red_team_orchestrator as rto
 import attack_surface_correlation as asc
 import evidence_management as evd
+import risk_prioritization as risk
 import nethealth
 import tor_launcher
 import username_osint
@@ -5791,6 +5792,8 @@ _REQUIRED_MODULE_API = {
     "attack_surface_correlation": ("register_commands", "correlate", "analyze_task",
                                    "build_result"),
     "evidence_management": ("register_commands", "submit", "ingest_task", "verify"),
+    "risk_prioritization": ("register_commands", "run", "prioritize", "analyze_task",
+                            "build_transparency"),
 }
 
 
@@ -5981,6 +5984,8 @@ def main():
     asc.register_commands(app, is_admin)
     # Evidence Management — /evd_* (คลังหลักฐาน: hash/custody/verify/report; ไม่สแกนเอง)
     evd.register_commands(app, is_admin)
+    # Risk Prioritization — /risk_* (จัดลำดับความเสี่ยง + payload transparency; ไม่รันทดสอบ)
+    risk.register_commands(app, is_admin)
     app.add_handler(CommandHandler("deepsearch", cmd_deepsearch))
     app.add_handler(CommandHandler("bbprogram", cmd_bbprogram))
     app.add_handler(CommandHandler("bbauth", cmd_bbauth))
