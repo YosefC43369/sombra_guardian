@@ -21,3 +21,5 @@ resource/vuln_probe.json
 # Web Vulnerability Assessment runtime
 resource/wva.json
 resource/wva_scope_map.json
+# API Security Assessment runtime
+resource/api_assess.json
