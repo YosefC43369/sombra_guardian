@@ -37,6 +37,33 @@ async def _allowed(update, context, is_admin) -> bool:
     return True if ct == "private" else await is_admin(update, context)
 
 
+# Telegram จำกัดข้อความ 4096 อักขระ — แบ่งส่งเป็นชิ้น ๆ ตามขอบบรรทัด (headroom 4000)
+TG_LIMIT = 4000
+
+
+def chunk_text(text: str, limit: int = TG_LIMIT):
+    """แบ่งข้อความยาวให้แต่ละชิ้น <= limit โดยพยายามตัดที่ newline (ไม่ตัดกลางบรรทัดถ้าเลี่ยงได้)"""
+    out, buf = [], ""
+    for line in str(text).split("\n"):
+        while len(line) > limit:                 # บรรทัดเดียวยาวเกิน -> ตัดแข็ง
+            if buf:
+                out.append(buf); buf = ""
+            out.append(line[:limit]); line = line[limit:]
+        if len(buf) + len(line) + 1 > limit:
+            out.append(buf); buf = line
+        else:
+            buf = f"{buf}\n{line}" if buf else line
+    if buf:
+        out.append(buf)
+    return out or [""]
+
+
+async def reply_long(msg, text: str, **kw) -> None:
+    """ตอบข้อความยาวโดยแบ่งเป็นหลายข้อความ (ไม่เกิน 4096 ต่อข้อความ)"""
+    for part in chunk_text(text):
+        await msg.reply_text(part, **kw)
+
+
 async def cmd_assess(update, context, is_admin: IsAdmin) -> None:
     msg = update.effective_message
     args = list(context.args or [])
@@ -109,10 +136,15 @@ async def cmd_payloads(update, context, is_admin: IsAdmin) -> None:
         cat = args[0].lower()
         n = cov["by_category"].get(cat, 0)
         subs = {k: v for k, v in cov["by_subcategory"].items() if k.startswith(cat + "/")}
-        lines.append(f"\n*{cat}*: {n} test cases · subcategories: {subs}")
+        lines.append(f"\n*{cat}*: {n} test cases")
+        for sc, cnt in sorted(subs.items()):
+            lines.append(f"- {sc}: {cnt}")
     else:
-        lines.append(f"\nby category: {cov['by_category']}")
-    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+        lines.append("\n*by category:*")
+        for c, cnt in sorted(cov["by_category"].items(), key=lambda kv: -kv[1]):
+            lines.append(f"- {c}: {cnt}")
+    # Telegram 4096 limit -> แบ่งส่งหลายข้อความอัตโนมัติ
+    await reply_long(msg, "\n".join(lines), parse_mode="Markdown")
 
 
 async def _deliver(context, chat_id, result, task_id) -> None:
